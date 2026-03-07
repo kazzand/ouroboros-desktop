@@ -86,7 +86,18 @@ EMBEDDED_PYTHON = _find_embedded_python()
 # Bootstrap
 # ---------------------------------------------------------------------------
 def check_git() -> bool:
-    return shutil.which("git") is not None
+    if shutil.which("git") is not None:
+        return True
+    if IS_WINDOWS:
+        for _candidate in (
+            os.path.join(os.environ.get("ProgramFiles", r"C:\Program Files"), "Git", "cmd", "git.exe"),
+            os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs", "Git", "cmd", "git.exe"),
+        ):
+            if os.path.isfile(_candidate):
+                git_dir = os.path.dirname(_candidate)
+                os.environ["PATH"] = git_dir + ";" + os.environ.get("PATH", "")
+                return True
+    return False
 
 
 def _sync_core_files() -> None:
