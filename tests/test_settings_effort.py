@@ -14,10 +14,10 @@ from ouroboros.config import (
 # ---------------------------------------------------------------------------
 
 def test_initial_effort_default(monkeypatch):
-    """Default effort is 'none' when env var not set."""
+    """Default effort is 'medium' when env var not set."""
     monkeypatch.delenv("OUROBOROS_EFFORT_TASK", raising=False)
     monkeypatch.delenv("OUROBOROS_INITIAL_REASONING_EFFORT", raising=False)
-    assert resolve_effort("task") == "none"
+    assert resolve_effort("task") == "medium"
 
 
 def test_initial_effort_valid_values(monkeypatch):
@@ -28,11 +28,11 @@ def test_initial_effort_valid_values(monkeypatch):
         assert resolve_effort("task") == effort
 
 
-def test_initial_effort_invalid_falls_back_to_none(monkeypatch):
-    """Invalid effort values fall back to 'none'."""
+def test_initial_effort_invalid_falls_back_to_medium(monkeypatch):
+    """Invalid effort values fall back to 'medium'."""
     monkeypatch.setenv("OUROBOROS_EFFORT_TASK", "extreme")
     monkeypatch.delenv("OUROBOROS_INITIAL_REASONING_EFFORT", raising=False)
-    assert resolve_effort("task") == "none"
+    assert resolve_effort("task") == "medium"
 
 
 # ---------------------------------------------------------------------------
@@ -41,7 +41,7 @@ def test_initial_effort_invalid_falls_back_to_none(monkeypatch):
 
 def test_effort_defaults_in_config():
     """All four effort keys have correct defaults in SETTINGS_DEFAULTS."""
-    assert SETTINGS_DEFAULTS.get("OUROBOROS_EFFORT_TASK") == "none"
+    assert SETTINGS_DEFAULTS.get("OUROBOROS_EFFORT_TASK") == "medium"
     assert SETTINGS_DEFAULTS.get("OUROBOROS_EFFORT_EVOLUTION") == "high"
     assert SETTINGS_DEFAULTS.get("OUROBOROS_EFFORT_REVIEW") == "medium"
     assert SETTINGS_DEFAULTS.get("OUROBOROS_EFFORT_CONSCIOUSNESS") == "low"

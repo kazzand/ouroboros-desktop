@@ -11,12 +11,12 @@ from ouroboros.agent import _resolve_initial_effort
 # Task / Chat
 # ---------------------------------------------------------------------------
 
-def test_task_effort_default_is_none():
-    """Default task effort is 'none' when no env var is set."""
+def test_task_effort_default_is_medium():
+    """Default task effort is 'medium' when no env var is set."""
     with patch.dict(os.environ, {}, clear=True):
-        assert resolve_effort("task") == "none"
-        assert resolve_effort("chat") == "none"
-        assert resolve_effort("") == "none"
+        assert resolve_effort("task") == "medium"
+        assert resolve_effort("chat") == "medium"
+        assert resolve_effort("") == "medium"
 
 
 def test_task_effort_via_new_env():
@@ -39,10 +39,10 @@ def test_task_effort_new_takes_precedence_over_legacy():
         assert resolve_effort("task") == "high"
 
 
-def test_task_effort_invalid_falls_back_to_none():
-    """Invalid effort values fall back to 'none'."""
+def test_task_effort_invalid_falls_back_to_medium():
+    """Invalid effort values fall back to 'medium'."""
     with patch.dict(os.environ, {"OUROBOROS_EFFORT_TASK": "extreme"}, clear=True):
-        assert resolve_effort("task") == "none"
+        assert resolve_effort("task") == "medium"
 
 
 # ---------------------------------------------------------------------------
@@ -112,6 +112,6 @@ def test_task_type_is_case_insensitive():
 def test_shim_still_works():
     """_resolve_initial_effort in agent.py is still callable and correct."""
     with patch.dict(os.environ, {}, clear=True):
-        assert _resolve_initial_effort("task") == "none"
+        assert _resolve_initial_effort("task") == "medium"
         assert _resolve_initial_effort("evolution") == "high"
         assert _resolve_initial_effort("review") == "medium"

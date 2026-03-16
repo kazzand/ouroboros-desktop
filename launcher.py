@@ -724,7 +724,7 @@ a { color:#e85d6f; }
   <input id="api-key" type="password" placeholder="sk-or-v1-..." autofocus>
   <p class="hint">Get one at <a href="https://openrouter.ai/keys" target="_blank">openrouter.ai/keys</a></p>
   <div class="row">
-    <div class="field"><label>Main Model</label><input id="model" value="anthropic/claude-sonnet-4.6"></div>
+    <div class="field"><label>Main Model</label><input id="model" value="anthropic/claude-opus-4.6"></div>
     <div class="field"><label>Budget ($)</label><input id="budget" type="number" value="10" min="1" step="1" style="width:100px"></div>
   </div>
 
@@ -776,7 +776,7 @@ btn.addEventListener('click', async () => {
     btn.disabled = true; btn.textContent = 'Saving...';
     const data = {
         TOTAL_BUDGET: parseFloat(document.getElementById('budget').value) || 10,
-        OUROBOROS_MODEL: document.getElementById('model').value.trim() || 'anthropic/claude-sonnet-4.6',
+        OUROBOROS_MODEL: document.getElementById('model').value.trim() || 'anthropic/claude-opus-4.6',
     };
     const orKey = keyInput.value.trim();
     if (orKey.length >= 10) data.OPENROUTER_API_KEY = orKey;

@@ -391,7 +391,7 @@ def _parse_claude_output(stdout: str, ctx: ToolContext) -> str:
             ctx.pending_events.append({
                 "type": "llm_usage",
                 "provider": "claude_code_cli",
-                "model": os.environ.get("CLAUDE_CODE_MODEL", "sonnet"),
+                "model": os.environ.get("CLAUDE_CODE_MODEL", "opus"),
                 "api_key_type": "anthropic",
                 "model_category": "claude_code",
                 "usage": {"cost": float(payload["total_cost_usd"])},
@@ -427,7 +427,7 @@ def _claude_code_edit(ctx: ToolContext, prompt: str, cwd: str = "",
 
     ctx.emit_progress_fn("Delegating to Claude Code CLI...")
 
-    model = os.environ.get("CLAUDE_CODE_MODEL", "sonnet").strip()
+    model = os.environ.get("CLAUDE_CODE_MODEL", "opus").strip()
 
     lock = _acquire_git_lock(ctx)
     try:

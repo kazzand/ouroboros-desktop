@@ -45,23 +45,23 @@ export function initSettings({ ws, state }) {
                     through the GGUF server configured above.
                 </div>
                 <div class="form-row" style="align-items:flex-end">
-                    <div class="form-field"><label>Main Model</label><input id="s-model" value="anthropic/claude-sonnet-4.6" style="width:250px"></div>
+                    <div class="form-field"><label>Main Model</label><input id="s-model" value="anthropic/claude-opus-4.6" style="width:250px"></div>
                     <label class="local-toggle"><input type="checkbox" id="s-local-main" disabled> Local</label>
                 </div>
                 <div class="form-row" style="align-items:flex-end">
-                    <div class="form-field"><label>Code Model</label><input id="s-model-code" value="anthropic/claude-sonnet-4.6" style="width:250px"></div>
+                    <div class="form-field"><label>Code Model</label><input id="s-model-code" value="anthropic/claude-opus-4.6" style="width:250px"></div>
                     <label class="local-toggle"><input type="checkbox" id="s-local-code" disabled> Local</label>
                 </div>
                 <div class="form-row" style="align-items:flex-end">
-                    <div class="form-field"><label>Light Model</label><input id="s-model-light" value="google/gemini-3-flash-preview" style="width:250px"></div>
+                    <div class="form-field"><label>Light Model</label><input id="s-model-light" value="anthropic/claude-sonnet-4.6" style="width:250px"></div>
                     <label class="local-toggle"><input type="checkbox" id="s-local-light" disabled> Local</label>
                 </div>
                 <div class="form-row" style="align-items:flex-end">
-                    <div class="form-field"><label>Fallback Model</label><input id="s-model-fallback" value="google/gemini-3-flash-preview" style="width:250px"></div>
+                    <div class="form-field"><label>Fallback Model</label><input id="s-model-fallback" value="anthropic/claude-sonnet-4.6" style="width:250px"></div>
                     <label class="local-toggle"><input type="checkbox" id="s-local-fallback" disabled> Local</label>
                 </div>
                 <div class="form-row">
-                    <div class="form-field"><label>Claude Code Model</label><input id="s-claude-code-model" value="sonnet" placeholder="sonnet, opus, or full name" style="width:250px"></div>
+                    <div class="form-field"><label>Claude Code Model</label><input id="s-claude-code-model" value="opus" placeholder="sonnet, opus, or full name" style="width:250px"></div>
                 </div>
             </div>
             <div class="divider"></div>
@@ -74,7 +74,7 @@ export function initSettings({ ws, state }) {
                         <select id="s-effort-task" style="width:120px">
                             <option value="none">none</option>
                             <option value="low">low</option>
-                            <option value="medium">medium</option>
+                            <option value="medium" selected>medium</option>
                             <option value="high">high</option>
                         </select>
                     </div>
@@ -84,7 +84,7 @@ export function initSettings({ ws, state }) {
                             <option value="none">none</option>
                             <option value="low">low</option>
                             <option value="medium">medium</option>
-                            <option value="high">high</option>
+                            <option value="high" selected>high</option>
                         </select>
                     </div>
                     <div class="form-field">
@@ -92,7 +92,7 @@ export function initSettings({ ws, state }) {
                         <select id="s-effort-review" style="width:120px">
                             <option value="none">none</option>
                             <option value="low">low</option>
-                            <option value="medium">medium</option>
+                            <option value="medium" selected>medium</option>
                             <option value="high">high</option>
                         </select>
                     </div>
@@ -100,7 +100,7 @@ export function initSettings({ ws, state }) {
                         <label>Consciousness</label>
                         <select id="s-effort-consciousness" style="width:120px">
                             <option value="none">none</option>
-                            <option value="low">low</option>
+                            <option value="low" selected>low</option>
                             <option value="medium">medium</option>
                             <option value="high">high</option>
                         </select>
@@ -180,7 +180,7 @@ export function initSettings({ ws, state }) {
         if (s.OUROBOROS_MODEL_LIGHT) document.getElementById('s-model-light').value = s.OUROBOROS_MODEL_LIGHT;
         if (s.OUROBOROS_MODEL_FALLBACK) document.getElementById('s-model-fallback').value = s.OUROBOROS_MODEL_FALLBACK;
         if (s.CLAUDE_CODE_MODEL) document.getElementById('s-claude-code-model').value = s.CLAUDE_CODE_MODEL;
-        const effortTask = s.OUROBOROS_EFFORT_TASK || s.OUROBOROS_INITIAL_REASONING_EFFORT || 'none';
+        const effortTask = s.OUROBOROS_EFFORT_TASK || s.OUROBOROS_INITIAL_REASONING_EFFORT || 'medium';
         document.getElementById('s-effort-task').value = effortTask;
         document.getElementById('s-effort-evolution').value = s.OUROBOROS_EFFORT_EVOLUTION || 'high';
         document.getElementById('s-effort-review').value = s.OUROBOROS_EFFORT_REVIEW || 'medium';
@@ -288,7 +288,7 @@ export function initSettings({ ws, state }) {
             OUROBOROS_MODEL_CODE: document.getElementById('s-model-code').value,
             OUROBOROS_MODEL_LIGHT: document.getElementById('s-model-light').value,
             OUROBOROS_MODEL_FALLBACK: document.getElementById('s-model-fallback').value,
-            CLAUDE_CODE_MODEL: document.getElementById('s-claude-code-model').value || 'sonnet',
+            CLAUDE_CODE_MODEL: document.getElementById('s-claude-code-model').value || 'opus',
             OUROBOROS_EFFORT_TASK: document.getElementById('s-effort-task').value,
             OUROBOROS_EFFORT_EVOLUTION: document.getElementById('s-effort-evolution').value,
             OUROBOROS_EFFORT_REVIEW: document.getElementById('s-effort-review').value,

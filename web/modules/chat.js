@@ -28,6 +28,25 @@ export function initChat({ ws, state, updateUnreadBadge }) {
     const sendBtn = document.getElementById('chat-send');
 
     const _chatHistory = [];
+    const seenAssistantKeys = new Set();
+    const assistantKeyOrder = [];
+    let historyLoaded = false;
+    let historySyncPromise = null;
+
+    function buildAssistantKey(text, timestamp, isProgress = false) {
+        if (!timestamp) return '';
+        return `${isProgress ? '1' : '0'}|${timestamp}|${text}`;
+    }
+
+    function rememberAssistantKey(key) {
+        if (!key || seenAssistantKeys.has(key)) return;
+        seenAssistantKeys.add(key);
+        assistantKeyOrder.push(key);
+        if (assistantKeyOrder.length > 2000) {
+            const oldest = assistantKeyOrder.shift();
+            if (oldest) seenAssistantKeys.delete(oldest);
+        }
+    }
 
     function formatMsgTime(isoStr) {
         if (!isoStr) return null;
@@ -59,7 +78,9 @@ export function initChat({ ws, state, updateUnreadBadge }) {
         const pending = !!opts.pending;
         const clientMessageId = opts.clientMessageId || '';
         const ts = timestamp || new Date().toISOString();
-        if (!isProgress) _chatHistory.push({ text, role, ts });
+        const assistantKey = role === 'assistant' ? buildAssistantKey(text, ts, isProgress) : '';
+        if (assistantKey && seenAssistantKeys.has(assistantKey)) return null;
+        if (!isProgress) _chatHistory.push({ text, role, ts, markdown: !!markdown });
         const bubble = document.createElement('div');
         bubble.className = `chat-bubble ${role}` + (isProgress ? ' progress' : '');
         if (pending) bubble.classList.add('pending');
@@ -85,27 +106,44 @@ export function initChat({ ws, state, updateUnreadBadge }) {
         }
         messagesDiv.scrollTop = messagesDiv.scrollHeight;
         try { sessionStorage.setItem('ouro_chat', JSON.stringify(_chatHistory.slice(-200))); } catch {}
+        rememberAssistantKey(assistantKey);
         if (pending && clientMessageId) pendingUserBubbles.set(clientMessageId, bubble);
         return bubble;
     }
 
+    async function syncHistory({ includeUser = false } = {}) {
+        if (historySyncPromise) return historySyncPromise;
+        historySyncPromise = (async () => {
+            try {
+                const resp = await fetch('/api/chat/history?limit=1000', { cache: 'no-store' });
+                if (!resp.ok) return false;
+                const data = await resp.json();
+                const messages = Array.isArray(data.messages) ? data.messages : [];
+                for (const msg of messages) {
+                    if (!includeUser && msg.role !== 'assistant') continue;
+                    addMessage(msg.text, msg.role, !!msg.markdown, msg.ts || null, !!msg.is_progress);
+                }
+                historyLoaded = true;
+                return messages.length > 0;
+            } catch (err) {
+                console.error('Failed to load chat history:', err);
+                return false;
+            } finally {
+                historySyncPromise = null;
+            }
+        })();
+        return historySyncPromise;
+    }
+
     // Restore chat history from server (persists across app restarts)
     (async () => {
-        try {
-            const resp = await fetch('/api/chat/history?limit=1000');
-            if (resp.ok) {
-                const data = await resp.json();
-                if (data.messages && data.messages.length > 0) {
-                    for (const msg of data.messages) addMessage(msg.text, msg.role, false, msg.ts || null, !!msg.is_progress);
-                    return;
-                }
-            }
-        } catch (err) { console.error('Failed to load chat history:', err); }
+        if (await syncHistory({ includeUser: true })) return;
         // Fallback: sessionStorage (survives page reload but not app restart)
         try {
             const saved = JSON.parse(sessionStorage.getItem('ouro_chat') || '[]');
-            for (const msg of saved) addMessage(msg.text, msg.role, false, msg.ts || null);
+            for (const msg of saved) addMessage(msg.text, msg.role, !!msg.markdown, msg.ts || null);
         } catch {}
+        historyLoaded = true;
     })();
 
     function sendMessage() {
@@ -211,6 +249,7 @@ export function initChat({ ws, state, updateUnreadBadge }) {
     ws.on('open', () => {
         document.getElementById('chat-status').className = 'status-badge online';
         document.getElementById('chat-status').textContent = 'Online';
+        syncHistory({ includeUser: !historyLoaded }).catch(() => {});
     });
     ws.on('close', () => {
         hideTyping();

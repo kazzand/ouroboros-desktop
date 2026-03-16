@@ -16,7 +16,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 log = logging.getLogger(__name__)
 
-DEFAULT_LIGHT_MODEL = "google/gemini-3-flash-preview"
+DEFAULT_LIGHT_MODEL = "anthropic/claude-sonnet-4.6"
 
 
 def normalize_reasoning_effort(value: str, default: str = "medium") -> str:
@@ -552,11 +552,11 @@ class LLMClient:
 
     def default_model(self) -> str:
         """Return the single default model from env. LLM switches via tool if needed."""
-        return os.environ.get("OUROBOROS_MODEL", "anthropic/claude-sonnet-4.6")
+        return os.environ.get("OUROBOROS_MODEL", "anthropic/claude-opus-4.6")
 
     def available_models(self) -> List[str]:
         """Return list of available models from env (for switch_model tool schema)."""
-        main = os.environ.get("OUROBOROS_MODEL", "anthropic/claude-sonnet-4.6")
+        main = os.environ.get("OUROBOROS_MODEL", "anthropic/claude-opus-4.6")
         code = os.environ.get("OUROBOROS_MODEL_CODE", "")
         light = os.environ.get("OUROBOROS_MODEL_LIGHT", "")
         models = [main]

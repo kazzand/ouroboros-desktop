@@ -71,13 +71,34 @@ class LocalChatBridge:
         except queue.Empty:
             return []
 
-    def send_message(self, chat_id: int, text: str, parse_mode: str = "") -> Tuple[bool, str]:
+    def send_message(
+        self,
+        chat_id: int,
+        text: str,
+        parse_mode: str = "",
+        ts: Optional[str] = None,
+        is_progress: bool = False,
+    ) -> Tuple[bool, str]:
         """Put a message in the outbox for the UI to consume."""
         clean_text = _strip_markdown(text) if not parse_mode else text
-        msg = {"type": "text", "content": clean_text, "markdown": bool(parse_mode)}
+        message_ts = ts or datetime.datetime.now(datetime.timezone.utc).isoformat()
+        msg = {
+            "type": "text",
+            "content": clean_text,
+            "markdown": bool(parse_mode),
+            "is_progress": bool(is_progress),
+            "ts": message_ts,
+        }
         self._outbox.put(msg)
         if self._broadcast_fn:
-            self._broadcast_fn({"type": "chat", "role": "assistant", "content": clean_text, "ts": datetime.datetime.utcnow().isoformat() + "Z"})
+            self._broadcast_fn({
+                "type": "chat",
+                "role": "assistant",
+                "content": clean_text,
+                "markdown": bool(parse_mode),
+                "is_progress": bool(is_progress),
+                "ts": message_ts,
+            })
         return True, "ok"
 
     def send_chat_action(self, chat_id: int, action: str = "typing") -> bool:
@@ -185,12 +206,23 @@ def _strip_markdown(text: str) -> str:
     return text
 
 
-def _send_markdown(chat_id: int, text: str) -> Tuple[bool, str]:
+def _send_markdown(
+    chat_id: int,
+    text: str,
+    ts: Optional[str] = None,
+    is_progress: bool = False,
+) -> Tuple[bool, str]:
     """Send markdown text to the UI."""
     bridge = get_bridge()
     if not text:
         return False, "empty"
-    return bridge.send_message(chat_id, text, parse_mode="markdown")
+    return bridge.send_message(
+        chat_id,
+        text,
+        parse_mode="markdown",
+        ts=ts,
+        is_progress=is_progress,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -229,38 +261,56 @@ def budget_line(force: bool = False) -> str:
         return ""
 
 
-def log_chat(direction: str, chat_id: int, user_id: int, text: str) -> None:
+def log_chat(
+    direction: str,
+    chat_id: int,
+    user_id: int,
+    text: str,
+    ts: Optional[str] = None,
+    fmt: str = "",
+) -> None:
     if DATA_DIR:
         append_jsonl(DATA_DIR / "logs" / "chat.jsonl", {
-            "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "ts": ts or datetime.datetime.now(datetime.timezone.utc).isoformat(),
             "session_id": load_state().get("session_id"),
             "direction": direction,
             "chat_id": chat_id,
             "user_id": user_id,
             "text": text,
+            "format": fmt,
         })
 
 
 def send_with_budget(chat_id: int, text: str, log_text: Optional[str] = None,
                      force_budget: bool = False, fmt: str = "",
-                     is_progress: bool = False, task_id: str = "") -> None:
+                     is_progress: bool = False, task_id: str = "",
+                     ts: Optional[str] = None) -> None:
     # force_budget kept in signature for caller compat but is a no-op since 3.3.0
     st = load_state()
     owner_id = int(st.get("owner_id") or 0)
     _text = str(text or "")
+    msg_ts = ts or datetime.datetime.now(datetime.timezone.utc).isoformat()
 
     if is_progress and DATA_DIR:
         append_jsonl(DATA_DIR / "logs" / "progress.jsonl", {
-            "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "ts": msg_ts,
             "type": "send_message",
             "task_id": task_id,
             "is_progress": True,
             "direction": "out", "chat_id": chat_id, "user_id": owner_id,
             "text": text if log_text is None else log_text,
             "content": _text,
+            "format": fmt,
         })
     else:
-        log_chat("out", chat_id, owner_id, text if log_text is None else log_text)
+        log_chat(
+            "out",
+            chat_id,
+            owner_id,
+            text if log_text is None else log_text,
+            ts=msg_ts,
+            fmt=fmt,
+        )
 
     if _text.strip() in ("", "\u200b"):
         return
@@ -269,9 +319,8 @@ def send_with_budget(chat_id: int, text: str, log_text: Optional[str] = None,
     full = _text
 
     if fmt == "markdown":
-        ok, err = _send_markdown(chat_id, full)
+        ok, err = _send_markdown(chat_id, full, ts=msg_ts, is_progress=is_progress)
         return
 
     bridge = get_bridge()
-    for part in split_message(full):
-        bridge.send_message(chat_id, part)
+    bridge.send_message(chat_id, full, ts=msg_ts, is_progress=is_progress)

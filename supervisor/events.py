@@ -130,6 +130,7 @@ def _handle_send_message(evt: Dict[str, Any], ctx: Any) -> None:
         log_text = evt.get("log_text")
         fmt = str(evt.get("format") or "")
         is_progress = bool(evt.get("is_progress"))
+        raw_ts = evt.get("ts")
         ctx.send_with_budget(
             int(evt["chat_id"]),
             str(evt.get("text") or ""),
@@ -137,6 +138,7 @@ def _handle_send_message(evt: Dict[str, Any], ctx: Any) -> None:
             fmt=fmt,
             is_progress=is_progress,
             task_id=str(evt.get("task_id") or ""),
+            ts=(str(raw_ts) if raw_ts else None),
         )
     except Exception as e:
         ctx.append_jsonl(

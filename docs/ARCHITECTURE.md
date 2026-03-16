@@ -482,17 +482,17 @@ Settings file: `~/Ouroboros/data/settings.json`. File-locked for concurrent acce
 | OPENROUTER_API_KEY | "" | Required. Main LLM API key |
 | OPENAI_API_KEY | "" | Optional. For web_search tool |
 | ANTHROPIC_API_KEY | "" | Optional. For Claude Code CLI |
-| OUROBOROS_MODEL | anthropic/claude-sonnet-4.6 | Main reasoning model |
-| OUROBOROS_MODEL_CODE | anthropic/claude-sonnet-4.6 | Code editing model |
-| OUROBOROS_MODEL_LIGHT | google/gemini-3-flash-preview | Fast/cheap model (safety, consciousness) |
-| OUROBOROS_MODEL_FALLBACK | google/gemini-3-flash-preview | Fallback when primary fails |
-| CLAUDE_CODE_MODEL | sonnet | Anthropic model for Claude Code CLI (sonnet, opus, or full name) |
+| OUROBOROS_MODEL | anthropic/claude-opus-4.6 | Main reasoning model |
+| OUROBOROS_MODEL_CODE | anthropic/claude-opus-4.6 | Code editing model |
+| OUROBOROS_MODEL_LIGHT | anthropic/claude-sonnet-4.6 | Fast/cheap model (safety, consciousness) |
+| OUROBOROS_MODEL_FALLBACK | anthropic/claude-sonnet-4.6 | Fallback when primary fails |
+| CLAUDE_CODE_MODEL | opus | Anthropic model for Claude Code CLI (sonnet, opus, or full name) |
 | OUROBOROS_MAX_WORKERS | 5 | Worker process pool size |
 | TOTAL_BUDGET | 10.0 | Total budget in USD |
 | OUROBOROS_WEBSEARCH_MODEL | gpt-5.2 | OpenAI model for web_search tool |
 | OUROBOROS_REVIEW_MODELS | openai/gpt-5.4,google/gemini-3.1-pro-preview,anthropic/claude-opus-4.6 | Comma-separated OpenRouter model IDs for pre-commit review (min 2 for quorum) |
 | OUROBOROS_REVIEW_ENFORCEMENT | blocking | Pre-commit review enforcement: `advisory` or `blocking` |
-| OUROBOROS_EFFORT_TASK | none | Reasoning effort for task/chat: none, low, medium, high |
+| OUROBOROS_EFFORT_TASK | medium | Reasoning effort for task/chat: none, low, medium, high |
 | OUROBOROS_EFFORT_EVOLUTION | high | Reasoning effort for evolution tasks |
 | OUROBOROS_EFFORT_REVIEW | medium | Reasoning effort for review tasks |
 | OUROBOROS_EFFORT_CONSCIOUSNESS | low | Reasoning effort for background consciousness |

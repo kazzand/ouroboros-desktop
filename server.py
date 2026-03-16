@@ -78,6 +78,7 @@ async def broadcast_ws(msg: dict) -> None:
         try:
             await ws.send_text(data)
         except Exception:
+            log.debug("Dropping dead WebSocket client during broadcast", exc_info=True)
             dead.append(ws)
     if dead:
         with _ws_lock:
@@ -102,6 +103,20 @@ def broadcast_ws_sync(msg: dict) -> None:
         asyncio.run_coroutine_threadsafe(broadcast_ws(msg), loop)
     except RuntimeError:
         pass
+
+
+async def _ws_heartbeat_loop() -> None:
+    """Keep embedded clients active and give watchdogs a steady liveness signal."""
+    while True:
+        await asyncio.sleep(15)
+        with _ws_lock:
+            has_clients = bool(_ws_clients)
+        if not has_clients:
+            continue
+        await broadcast_ws({
+            "type": "heartbeat",
+            "ts": datetime.now(timezone.utc).isoformat(),
+        })
 
 
 # ---------------------------------------------------------------------------
@@ -807,6 +822,7 @@ async def api_chat_history(request: Request) -> JSONResponse:
                         "role": role,
                         "ts": str(entry.get("ts", "")),
                         "is_progress": False,
+                        "markdown": str(entry.get("format", "")).lower() == "markdown",
                     })
         except Exception as e:
             log.warning("Failed to read chat history: %s", e)
@@ -832,6 +848,7 @@ async def api_chat_history(request: Request) -> JSONResponse:
                         "role": "assistant",
                         "ts": str(entry.get("ts", "")),
                         "is_progress": True,
+                        "markdown": str(entry.get("format", "")).lower() == "markdown",
                     })
         except Exception as e:
             log.warning("Failed to read progress log: %s", e)
@@ -892,13 +909,14 @@ routes = [
     Mount("/static", app=NoCacheStaticFiles(directory=str(web_dir)), name="static"),
 ]
 
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 
 
 @asynccontextmanager
 async def lifespan(app):
     global _event_loop
     _event_loop = asyncio.get_running_loop()
+    ws_heartbeat_task = asyncio.create_task(_ws_heartbeat_loop(), name="ws-heartbeat")
 
     settings = load_settings()
     has_api_key = bool(settings.get("OPENROUTER_API_KEY"))
@@ -920,24 +938,29 @@ async def lifespan(app):
             daemon=True, name="local-model-autostart",
         ).start()
 
-    yield
+    try:
+        yield
+    finally:
+        ws_heartbeat_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await ws_heartbeat_task
 
-    log.info("Server shutting down...")
-    try:
-        from ouroboros.local_model import get_manager
-        get_manager().stop_server()
-    except Exception:
-        pass
-    try:
-        from ouroboros.tools.shell import kill_all_tracked_subprocesses
-        kill_all_tracked_subprocesses()
-    except Exception:
-        pass
-    try:
-        from supervisor.workers import kill_workers
-        kill_workers(force=True)
-    except Exception:
-        pass
+        log.info("Server shutting down...")
+        try:
+            from ouroboros.local_model import get_manager
+            get_manager().stop_server()
+        except Exception:
+            pass
+        try:
+            from ouroboros.tools.shell import kill_all_tracked_subprocesses
+            kill_all_tracked_subprocesses()
+        except Exception:
+            pass
+        try:
+            from supervisor.workers import kill_workers
+            kill_workers(force=True)
+        except Exception:
+            pass
 
 
 app = Starlette(routes=routes, lifespan=lifespan)
@@ -985,7 +1008,14 @@ if __name__ == "__main__":
         log.info("Port %d busy, using %d instead", PORT, actual_port)
     _write_port_file(actual_port)
     log.info("Starting Ouroboros server on port %d", actual_port)
-    config = uvicorn.Config(app, host="127.0.0.1", port=actual_port, log_level="warning")
+    config = uvicorn.Config(
+        app,
+        host="127.0.0.1",
+        port=actual_port,
+        log_level="warning",
+        ws_ping_interval=20,
+        ws_ping_timeout=20,
+    )
     server = uvicorn.Server(config)
 
     def _check_restart():

@@ -14,8 +14,10 @@ export class WS {
         this.maxDelay = 10000;
         this._wasConnected = false;
         this._lastSha = null;
+        this._lastMessageAt = 0;
         this._reconnectTimer = null;
         this._reloadFallbackTimer = null;
+        this._watchdogTimer = null;
         this._pendingMessages = [];
         this._nextClientMessageId = 1;
         // Do NOT connect here — wait for all modules to register listeners first
@@ -37,6 +39,23 @@ export class WS {
             clearTimeout(this._reloadFallbackTimer);
             this._reloadFallbackTimer = null;
         }
+    }
+
+    _clearWatchdogTimer() {
+        if (this._watchdogTimer) {
+            clearInterval(this._watchdogTimer);
+            this._watchdogTimer = null;
+        }
+    }
+
+    _startWatchdog(socket) {
+        this._clearWatchdogTimer();
+        this._watchdogTimer = setInterval(() => {
+            if (this.ws !== socket || socket.readyState !== WebSocket.OPEN) return;
+            if (Date.now() - this._lastMessageAt < 45000) return;
+            console.warn('WebSocket watchdog forcing reconnect after stale inbound stream');
+            try { socket.close(); } catch {}
+        }, 10000);
     }
 
     _scheduleReconnect() {
@@ -101,6 +120,7 @@ export class WS {
             if (disconnected) return;
             disconnected = true;
             if (this.ws === socket) this.ws = null;
+            this._clearWatchdogTimer();
             this.emit('close');
             this._scheduleReconnect();
         };
@@ -108,9 +128,11 @@ export class WS {
         socket.onopen = () => {
             if (this.ws !== socket) return;
             this._wasConnected = true;
+            this._lastMessageAt = Date.now();
             this._clearReconnectTimer();
             this._clearReloadFallbackTimer();
             this.reconnectDelay = 1000;
+            this._startWatchdog(socket);
             this.emit('open');
             document.getElementById('reconnect-overlay')?.classList.remove('visible');
             this._refreshStateAfterOpen(previouslyConnected);
@@ -127,11 +149,14 @@ export class WS {
         };
 
         socket.onmessage = (e) => {
+            this._lastMessageAt = Date.now();
             try {
                 const msg = JSON.parse(e.data);
                 this.emit('message', msg);
                 if (msg.type) this.emit(msg.type, msg);
-            } catch {}
+            } catch (err) {
+                console.error('WebSocket message handling failed:', err);
+            }
         };
     }
 

@@ -41,11 +41,11 @@ SETTINGS_DEFAULTS = {
     "OPENROUTER_API_KEY": "",
     "OPENAI_API_KEY": "",
     "ANTHROPIC_API_KEY": "",
-    "OUROBOROS_MODEL": "anthropic/claude-sonnet-4.6",
-    "OUROBOROS_MODEL_CODE": "anthropic/claude-sonnet-4.6",
-    "OUROBOROS_MODEL_LIGHT": "google/gemini-3-flash-preview",
-    "OUROBOROS_MODEL_FALLBACK": "google/gemini-3-flash-preview",
-    "CLAUDE_CODE_MODEL": "sonnet",
+    "OUROBOROS_MODEL": "anthropic/claude-opus-4.6",
+    "OUROBOROS_MODEL_CODE": "anthropic/claude-opus-4.6",
+    "OUROBOROS_MODEL_LIGHT": "anthropic/claude-sonnet-4.6",
+    "OUROBOROS_MODEL_FALLBACK": "anthropic/claude-sonnet-4.6",
+    "CLAUDE_CODE_MODEL": "opus",
     "OUROBOROS_MAX_WORKERS": 5,
     "TOTAL_BUDGET": 10.0,
     "OUROBOROS_SOFT_TIMEOUT_SEC": 600,
@@ -62,7 +62,7 @@ SETTINGS_DEFAULTS = {
     "OUROBOROS_REVIEW_ENFORCEMENT": "blocking",
     # Reasoning effort per task type: none | low | medium | high
     # OUROBOROS_INITIAL_REASONING_EFFORT remains a legacy alias for task/chat.
-    "OUROBOROS_EFFORT_TASK": "none",
+    "OUROBOROS_EFFORT_TASK": "medium",
     "OUROBOROS_EFFORT_EVOLUTION": "high",
     "OUROBOROS_EFFORT_REVIEW": "medium",
     "OUROBOROS_EFFORT_CONSCIOUSNESS": "low",
@@ -100,7 +100,7 @@ def resolve_effort(task_type: str) -> str:
     else:
         legacy = os.environ.get("OUROBOROS_INITIAL_REASONING_EFFORT", "")
         key = "OUROBOROS_EFFORT_TASK"
-        default = legacy if legacy in _VALID_EFFORTS else "none"
+        default = legacy if legacy in _VALID_EFFORTS else "medium"
 
     raw = os.environ.get(key, default)
     return raw if raw in _VALID_EFFORTS else default

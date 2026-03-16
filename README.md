@@ -170,11 +170,14 @@ All keys are configured through the **Settings** page in the UI or during the fi
 
 | Slot | Default | Purpose |
 |------|---------|---------|
-| Main | `anthropic/claude-sonnet-4.6` | Primary reasoning |
-| Code | `anthropic/claude-sonnet-4.6` | Code editing |
-| Light | `google/gemini-3-flash-preview` | Safety checks, consciousness, fast tasks |
-| Fallback | `google/gemini-3-flash-preview` | When primary model fails |
+| Main | `anthropic/claude-opus-4.6` | Primary reasoning |
+| Code | `anthropic/claude-opus-4.6` | Code editing |
+| Light | `anthropic/claude-sonnet-4.6` | Safety checks, consciousness, fast tasks |
+| Fallback | `anthropic/claude-sonnet-4.6` | When primary model fails |
+| Claude Code CLI | `opus` | Anthropic model for Claude Code CLI tools |
 | Web Search | `gpt-5.2` | OpenAI Responses API for web search |
+
+Task/chat reasoning defaults to `medium`.
 
 Models are configurable in the Settings page. All LLM calls go through [OpenRouter](https://openrouter.ai) (except web search, which uses OpenAI directly).
 
