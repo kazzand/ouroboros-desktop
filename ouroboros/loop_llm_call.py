@@ -110,24 +110,33 @@ def call_llm_with_retry(
             tool_calls = msg.get("tool_calls") or []
             content = msg.get("content")
             if not tool_calls and (not content or not content.strip()):
+                finish_reason = msg.get("finish_reason") or msg.get("stop_reason")
+                is_provider_glitch = finish_reason is None
+                event_type = "provider_incomplete_response" if is_provider_glitch else "llm_empty_response"
+                log_msg = (
+                    "Provider returned incomplete response (finish_reason=null)"
+                    if is_provider_glitch
+                    else "LLM returned empty response (no content, no tool_calls)"
+                )
                 _emit_live_log(event_queue, {
-                    "type": "llm_round_empty",
+                    "type": event_type,
                     "task_id": task_id,
                     "task_type": task_type,
                     "round": round_idx,
                     "attempt": attempt + 1,
                     "model": model,
+                    "finish_reason": finish_reason,
                 })
-                log.warning("LLM returned empty response (no content, no tool_calls), attempt %d/%d", attempt + 1, max_retries)
+                log.warning("%s, attempt %d/%d", log_msg, attempt + 1, max_retries)
 
                 append_jsonl(drive_logs / "events.jsonl", {
-                    "ts": utc_now_iso(), "type": "llm_empty_response",
+                    "ts": utc_now_iso(), "type": event_type,
                     "task_id": task_id,
                     "round": round_idx, "attempt": attempt + 1,
                     "model": model,
                     "raw_content": repr(content)[:500] if content else None,
                     "raw_tool_calls": repr(tool_calls)[:500] if tool_calls else None,
-                    "finish_reason": msg.get("finish_reason") or msg.get("stop_reason"),
+                    "finish_reason": finish_reason,
                 })
 
                 if attempt < max_retries - 1:

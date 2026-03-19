@@ -336,15 +336,36 @@ The registry discovers them automatically.
 
 ### Code Editing Strategy
 
-**Preferred workflow (multi-file):**
-1. `repo_write` all files first (single or multi-file mode).
-2. `repo_commit` to stage, review, and commit everything in one diff.
+**Preferred workflow for existing files:**
+1. `str_replace_editor` for surgical edits (find unique string, replace it).
+2. `repo_commit` to stage, review, and commit.
 
-**Alternative paths:**
-- Claude Code CLI → `claude_code_edit` → `repo_commit`.
-- Small single-file edit → `repo_write_commit` (legacy, writes+commits in one call).
-- `claude_code_edit` failed twice → manual `repo_write` + `repo_commit`.
+**For new files or intentional full rewrites:**
+1. `repo_write` (creates file or replaces entire content; has shrink guard for tracked files).
+2. `repo_commit`.
+
+**Complex multi-file refactors:**
+- `claude_code_edit` (Claude Code CLI, diff-aware) → `repo_commit`.
+
+**Legacy path:** `repo_write_commit` (writes one file + commits in one call).
+
+**Important:** `repo_write` will block writes to tracked files if the new content is
+significantly shorter than the original (>30% shrinkage). This prevents accidental
+truncation. Pass `force=true` to confirm intentional rewrites. For surgical edits,
+always prefer `str_replace_editor`.
+
 - `request_restart` — ONLY after a successful commit.
+
+### Recovery After Restart
+
+When a restart discards uncommitted changes, the system saves a **rescue snapshot**
+in `archive/rescue/<timestamp>/`. It contains:
+- `changes.diff` — full binary diff of all uncommitted changes
+- `untracked/` — copies of untracked files
+- `rescue_meta.json` — metadata (branch, reason, file counts)
+
+If health invariants show "RESCUE SNAPSHOT AVAILABLE", inspect the snapshot with
+`data_read` and decide whether to re-apply `changes.diff` via `run_shell`.
 
 **Commit review:** Every `repo_commit` and `repo_write_commit` runs a unified
 multi-model pre-commit review (3 models, structured checklist from `docs/CHECKLISTS.md`).

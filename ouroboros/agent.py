@@ -291,6 +291,16 @@ class OuroborosAgent:
                     "traceback": truncate_for_log(tb, 2000),
                 })
                 text = f"⚠️ Error during processing: {type(e).__name__}: {e}"
+                try:
+                    from ouroboros.task_results import STATUS_FAILED, write_task_result
+                    write_task_result(
+                        self.env.drive_root,
+                        str(task.get("id") or ""),
+                        STATUS_FAILED,
+                        result=text,
+                    )
+                except Exception:
+                    pass
 
             if not isinstance(text, str) or not text.strip():
                 text = "⚠️ Model returned an empty response. Try rephrasing your request."

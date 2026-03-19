@@ -503,7 +503,7 @@ def _append_provider_routing_health_checks(env: Any, checks: List[str]) -> None:
                     continue
                 evt_type = str(ev.get("type") or "")
                 model = str(ev.get("model") or "unknown")
-                if evt_type in {"llm_api_error", "review_model_error", "consciousness_llm_error"}:
+                if evt_type in {"llm_api_error", "review_model_error", "consciousness_llm_error", "provider_incomplete_response"}:
                     llm_error_models[model] += 1
                 elif evt_type == "local_context_overflow":
                     local_overflow_models[model] += 1
@@ -527,6 +527,36 @@ def _append_provider_routing_health_checks(env: Any, checks: List[str]) -> None:
         pass
 
 
+def _append_rescue_snapshot_checks(env: Any, checks: List[str]) -> None:
+    try:
+        import time as _time
+        rescue_dir = env.drive_path("archive/rescue")
+        if not rescue_dir.exists():
+            return
+        now = _time.time()
+        recent = []
+        for entry in sorted(rescue_dir.iterdir(), reverse=True):
+            if not entry.is_dir():
+                continue
+            age_sec = now - entry.stat().st_mtime
+            if age_sec < 7200:
+                meta_path = entry / "rescue_meta.json"
+                file_count = sum(1 for _ in entry.rglob("*") if _.is_file())
+                age_str = f"{int(age_sec // 60)}m ago" if age_sec < 3600 else f"{age_sec / 3600:.1f}h ago"
+                recent.append(f"{entry.name} ({age_str}, {file_count} files)")
+            if len(recent) >= 3:
+                break
+        if recent:
+            checks.append(
+                f"WARNING: RESCUE SNAPSHOT AVAILABLE — {', '.join(recent)}. "
+                "Uncommitted changes were saved before last restart. "
+                "Use data_read to inspect archive/rescue/<dirname>/rescue_meta.json "
+                "and changes.diff to decide if recovery is needed."
+            )
+    except Exception:
+        pass
+
+
 def build_health_invariants(env: Any) -> str:
     """Build health invariants section for LLM-first self-detection.
 
@@ -542,6 +572,7 @@ def build_health_invariants(env: Any) -> str:
     _append_duplicate_processing_checks(env, checks)
     _append_cache_hit_rate_checks(env, checks)
     _append_provider_routing_health_checks(env, checks)
+    _append_rescue_snapshot_checks(env, checks)
     try:
         _append_file_size_budget_checks(env, checks)
     except Exception:

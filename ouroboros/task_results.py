@@ -14,6 +14,9 @@ STATUS_SCHEDULED = "scheduled"
 STATUS_RUNNING = "running"
 STATUS_COMPLETED = "completed"
 STATUS_REJECTED_DUPLICATE = "rejected_duplicate"
+STATUS_FAILED = "failed"
+STATUS_INTERRUPTED = "interrupted"
+STATUS_CANCELLED = "cancelled"
 
 
 def task_results_dir(drive_root: Any) -> pathlib.Path:

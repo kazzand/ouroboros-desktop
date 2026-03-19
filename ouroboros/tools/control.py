@@ -10,7 +10,10 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 from ouroboros.task_results import (
+    STATUS_CANCELLED,
     STATUS_COMPLETED,
+    STATUS_FAILED,
+    STATUS_INTERRUPTED,
     STATUS_REJECTED_DUPLICATE,
     STATUS_REQUESTED,
     load_task_result,
