@@ -81,8 +81,8 @@ def call_llm_with_retry(
             add_usage(accumulated_usage, usage)
 
             cost = float(usage.get("cost") or 0)
-            display_model = model
-            provider = "local" if use_local else "openrouter"
+            display_model = str(usage.get("resolved_model") or model)
+            provider = "local" if use_local else str(usage.get("provider") or "openrouter")
             if use_local:
                 cost = 0.0
                 display_model = f"{model} (local)"

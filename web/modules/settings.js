@@ -200,40 +200,78 @@ export function initSettings({ ws, state }) {
                             </div>
                         </div>
                         <div class="settings-note" style="margin:0 0 12px 0">
-                            These fields are cloud model IDs. Enable <code>Local</code> to route that lane through the GGUF server configured above.
+                            Choose from the OpenRouter catalog when available. If your current value is not in the catalog, it will be kept as a custom entry. Enable <code>Local</code> to route that lane through the GGUF server configured above.
+                        </div>
+                        <div class="models-catalog-toolbar">
+                            <div id="models-catalog-status" class="settings-note models-catalog-status">
+                                Loading model catalog...
+                            </div>
+                            <button class="btn btn-default models-refresh-btn" id="btn-models-refresh" type="button">Refresh catalog</button>
                         </div>
                         <div class="form-row" style="align-items:flex-end">
-                            <div class="form-field"><label>Main Model</label><input id="s-model" value="anthropic/claude-opus-4.6" style="width:250px"></div>
+                            <div class="form-field">
+                                <label>Main Model</label>
+                                <div class="model-combobox" data-model-field="s-model">
+                                    <input id="s-model-display" class="model-combobox-input" placeholder="Type to search or enter a custom model" autocomplete="off" style="width:320px">
+                                    <input id="s-model" type="hidden">
+                                    <div id="s-model-menu" class="model-combobox-menu" hidden></div>
+                                </div>
+                            </div>
                             <label class="local-toggle">
                                 <input type="checkbox" id="s-local-main">
                                 <span class="local-toggle-switch" aria-hidden="true"></span>
                                 <span class="local-toggle-text">Local</span>
                             </label>
                         </div>
+                        <div class="settings-note model-select-note" id="s-model-note"></div>
                         <div class="form-row" style="align-items:flex-end">
-                            <div class="form-field"><label>Code Model</label><input id="s-model-code" value="anthropic/claude-opus-4.6" style="width:250px"></div>
+                            <div class="form-field">
+                                <label>Code Model</label>
+                                <div class="model-combobox" data-model-field="s-model-code">
+                                    <input id="s-model-code-display" class="model-combobox-input" placeholder="Type to search or enter a custom model" autocomplete="off" style="width:320px">
+                                    <input id="s-model-code" type="hidden">
+                                    <div id="s-model-code-menu" class="model-combobox-menu" hidden></div>
+                                </div>
+                            </div>
                             <label class="local-toggle">
                                 <input type="checkbox" id="s-local-code">
                                 <span class="local-toggle-switch" aria-hidden="true"></span>
                                 <span class="local-toggle-text">Local</span>
                             </label>
                         </div>
+                        <div class="settings-note model-select-note" id="s-model-code-note"></div>
                         <div class="form-row" style="align-items:flex-end">
-                            <div class="form-field"><label>Light Model</label><input id="s-model-light" value="anthropic/claude-sonnet-4.6" style="width:250px"></div>
+                            <div class="form-field">
+                                <label>Light Model</label>
+                                <div class="model-combobox" data-model-field="s-model-light">
+                                    <input id="s-model-light-display" class="model-combobox-input" placeholder="Type to search or enter a custom model" autocomplete="off" style="width:320px">
+                                    <input id="s-model-light" type="hidden">
+                                    <div id="s-model-light-menu" class="model-combobox-menu" hidden></div>
+                                </div>
+                            </div>
                             <label class="local-toggle">
                                 <input type="checkbox" id="s-local-light">
                                 <span class="local-toggle-switch" aria-hidden="true"></span>
                                 <span class="local-toggle-text">Local</span>
                             </label>
                         </div>
+                        <div class="settings-note model-select-note" id="s-model-light-note"></div>
                         <div class="form-row" style="align-items:flex-end">
-                            <div class="form-field"><label>Fallback Model</label><input id="s-model-fallback" value="anthropic/claude-sonnet-4.6" style="width:250px"></div>
+                            <div class="form-field">
+                                <label>Fallback Model</label>
+                                <div class="model-combobox" data-model-field="s-model-fallback">
+                                    <input id="s-model-fallback-display" class="model-combobox-input" placeholder="Type to search or enter a custom model" autocomplete="off" style="width:320px">
+                                    <input id="s-model-fallback" type="hidden">
+                                    <div id="s-model-fallback-menu" class="model-combobox-menu" hidden></div>
+                                </div>
+                            </div>
                             <label class="local-toggle">
                                 <input type="checkbox" id="s-local-fallback">
                                 <span class="local-toggle-switch" aria-hidden="true"></span>
                                 <span class="local-toggle-text">Local</span>
                             </label>
                         </div>
+                        <div class="settings-note model-select-note" id="s-model-fallback-note"></div>
                         <div class="form-row">
                             <div class="form-field"><label>Claude Code Model</label><input id="s-claude-code-model" value="opus" placeholder="sonnet, opus, or full name" style="width:250px"></div>
                         </div>
@@ -458,6 +496,270 @@ export function initSettings({ ws, state }) {
         });
     });
 
+    const DEFAULT_MODEL_VALUES = {
+        's-model': 'anthropic/claude-opus-4.6',
+        's-model-code': 'anthropic/claude-opus-4.6',
+        's-model-light': 'anthropic/claude-sonnet-4.6',
+        's-model-fallback': 'anthropic/claude-sonnet-4.6',
+    };
+    const MODEL_NOTE_IDS = {
+        's-model': 's-model-note',
+        's-model-code': 's-model-code-note',
+        's-model-light': 's-model-light-note',
+        's-model-fallback': 's-model-fallback-note',
+    };
+    const MODEL_DISPLAY_IDS = {
+        's-model': 's-model-display',
+        's-model-code': 's-model-code-display',
+        's-model-light': 's-model-light-display',
+        's-model-fallback': 's-model-fallback-display',
+    };
+    const MODEL_MENU_IDS = {
+        's-model': 's-model-menu',
+        's-model-code': 's-model-code-menu',
+        's-model-light': 's-model-light-menu',
+        's-model-fallback': 's-model-fallback-menu',
+    };
+    let modelCatalog = [];
+    let modelCatalogByValue = new Map();
+    let configuredModelProviders = [];
+
+    function getModelCatalogEmptyLabel() {
+        return 'Set a valid provider key in AI Providers to load models';
+    }
+
+    function getModelFieldElements(fieldId) {
+        return {
+            hiddenInput: document.getElementById(fieldId),
+            displayInput: document.getElementById(MODEL_DISPLAY_IDS[fieldId]),
+            menu: document.getElementById(MODEL_MENU_IDS[fieldId]),
+        };
+    }
+
+    function getConfiguredProvidersLabel() {
+        return configuredModelProviders.length
+            ? configuredModelProviders.join(', ')
+            : 'configured providers';
+    }
+
+    function getModelCatalogEntry(value) {
+        return modelCatalogByValue.get(String(value || '').trim()) || null;
+    }
+
+    function findCatalogEntryFromTypedValue(value) {
+        const normalized = String(value || '').trim().toLowerCase();
+        if (!normalized) return null;
+
+        const exactIdMatches = modelCatalog.filter((model) => String(model.id || '').trim().toLowerCase() === normalized);
+        if (exactIdMatches.length === 1) return exactIdMatches[0];
+
+        const exactLabelMatches = modelCatalog.filter((model) => String(model.label || '').trim().toLowerCase() === normalized);
+        if (exactLabelMatches.length === 1) return exactLabelMatches[0];
+
+        const exactNameMatches = modelCatalog.filter((model) => String(model.name || '').trim().toLowerCase() === normalized);
+        if (exactNameMatches.length === 1) return exactNameMatches[0];
+
+        return null;
+    }
+
+    function updateModelSelectNote(selectId, currentValue) {
+        const note = document.getElementById(MODEL_NOTE_IDS[selectId]);
+        if (!note) return;
+
+        const value = String(currentValue || '').trim();
+        const filteredCount = getFilteredModelCatalog(selectId).length;
+        if (!value) {
+            if (!modelCatalog.length) {
+                note.textContent = getModelCatalogEmptyLabel() + '.';
+            } else if (!filteredCount) {
+                note.textContent = 'No models match your search.';
+            } else {
+                note.textContent = `Choose a model from ${getConfiguredProvidersLabel()} or leave a custom value.`;
+            }
+            return;
+        }
+
+        const selectedModel = getModelCatalogEntry(value);
+        if (selectedModel) {
+            const sourceNote = selectedModel.source && selectedModel.source !== selectedModel.provider
+                ? ` via ${selectedModel.source}`
+                : '';
+            note.textContent = `Provider: ${selectedModel.provider}${sourceNote}. Model ID: ${selectedModel.id}`;
+            return;
+        }
+
+        note.textContent = `Custom model ID will be saved as entered: ${value}`;
+    }
+
+    function getFilteredModelCatalog(fieldId) {
+        const { displayInput, hiddenInput } = getModelFieldElements(fieldId);
+        if (!displayInput) return modelCatalog;
+        const selectedEntry = getModelCatalogEntry(hiddenInput?.value || '');
+        const searchValue = String(displayInput.dataset.query || '')
+            .trim()
+            .toLowerCase();
+        if (!searchValue) return modelCatalog;
+
+        if (selectedEntry && displayInput.value === selectedEntry.label) {
+            return modelCatalog;
+        }
+
+        return modelCatalog.filter((model) => {
+            const haystack = [
+                model.provider || '',
+                model.name || '',
+                model.id || '',
+                model.label || '',
+            ].join(' ').toLowerCase();
+            return haystack.includes(searchValue);
+        });
+    }
+
+    function renderModelMenu(fieldId, keepOpen = false) {
+        const { hiddenInput, displayInput, menu } = getModelFieldElements(fieldId);
+        if (!displayInput || !menu || !hiddenInput) return;
+
+        const nextValue = String(hiddenInput.value || '').trim();
+        const filteredCatalog = getFilteredModelCatalog(fieldId);
+        menu.innerHTML = '';
+
+        if (!modelCatalog.length) {
+            const empty = document.createElement('div');
+            empty.className = 'model-combobox-empty';
+            empty.textContent = getModelCatalogEmptyLabel();
+            menu.appendChild(empty);
+        } else if (!filteredCatalog.length) {
+            const empty = document.createElement('div');
+            empty.className = 'model-combobox-empty';
+            empty.textContent = 'No models match your search.';
+            menu.appendChild(empty);
+        }
+
+        const groupedModels = new Map();
+        for (const model of filteredCatalog) {
+            const provider = model.provider || 'Other';
+            if (!groupedModels.has(provider)) groupedModels.set(provider, []);
+            groupedModels.get(provider).push(model);
+        }
+
+        for (const [provider, models] of groupedModels.entries()) {
+            const group = document.createElement('div');
+            group.className = 'model-combobox-group';
+
+            const heading = document.createElement('div');
+            heading.className = 'model-combobox-group-label';
+            heading.textContent = provider;
+            group.appendChild(heading);
+
+            for (const model of models) {
+                const option = document.createElement('button');
+                option.type = 'button';
+                option.className = 'model-combobox-option';
+                option.dataset.value = model.value;
+                option.innerHTML = `
+                    <span class="model-combobox-option-title">${model.name || model.id}</span>
+                    <span class="model-combobox-option-id">${model.id}</span>
+                `;
+                option.addEventListener('click', () => {
+                    setModelFieldValue(fieldId, model.value);
+                    closeModelMenu(fieldId);
+                });
+                group.appendChild(option);
+            }
+            menu.appendChild(group);
+        }
+
+        if (nextValue && !getModelCatalogEntry(nextValue)) {
+            const custom = document.createElement('div');
+            custom.className = 'model-combobox-empty';
+            custom.textContent = `Custom value: ${nextValue}`;
+            menu.appendChild(custom);
+        }
+
+        menu.hidden = !keepOpen;
+        displayInput.setAttribute('aria-expanded', keepOpen ? 'true' : 'false');
+        updateModelSelectNote(fieldId, nextValue);
+    }
+
+    function closeModelMenu(fieldId) {
+        const { displayInput, menu } = getModelFieldElements(fieldId);
+        if (menu) menu.hidden = true;
+        if (displayInput) displayInput.setAttribute('aria-expanded', 'false');
+    }
+
+    function setModelFieldValue(fieldId, actualValue) {
+        const { hiddenInput, displayInput } = getModelFieldElements(fieldId);
+        if (!hiddenInput || !displayInput) return;
+
+        const nextValue = String(actualValue || '').trim();
+        const selectedModel = getModelCatalogEntry(nextValue);
+        hiddenInput.value = nextValue;
+        displayInput.dataset.query = '';
+
+        if (selectedModel) {
+            displayInput.value = selectedModel.label;
+            displayInput.dataset.selectedValue = selectedModel.value;
+        } else {
+            displayInput.value = nextValue;
+            displayInput.dataset.selectedValue = '';
+        }
+
+        updateModelSelectNote(fieldId, nextValue);
+    }
+
+    async function loadModelCatalog(preserveValues = true) {
+        const status = document.getElementById('models-catalog-status');
+        const currentValues = preserveValues ? {
+            model: document.getElementById('s-model')?.value || '',
+            code: document.getElementById('s-model-code')?.value || '',
+            light: document.getElementById('s-model-light')?.value || '',
+            fallback: document.getElementById('s-model-fallback')?.value || '',
+        } : null;
+
+        try {
+            if (status) {
+                status.textContent = 'Loading model catalog...';
+                status.style.color = 'var(--text-secondary)';
+            }
+            const resp = await fetch('/api/model-catalog');
+            const data = await resp.json().catch(() => ({}));
+            modelCatalog = Array.isArray(data.models) ? data.models : [];
+            modelCatalogByValue = new Map(modelCatalog.map((model) => [model.value, model]));
+            configuredModelProviders = Array.isArray(data.configured_providers) ? data.configured_providers : [];
+            if (status) {
+                if (!resp.ok || data.error) {
+                    status.textContent = data.error || `Failed to load model catalog (HTTP ${resp.status})`;
+                    status.style.color = 'var(--amber)';
+                } else if (!modelCatalog.length) {
+                    status.textContent = data.configured
+                        ? `No models returned by ${getConfiguredProvidersLabel()}.`
+                        : getModelCatalogEmptyLabel() + '.';
+                    status.style.color = 'var(--text-secondary)';
+                } else {
+                    status.textContent = `Loaded ${modelCatalog.length} models from ${getConfiguredProvidersLabel()}.`;
+                    status.style.color = 'var(--green)';
+                }
+            }
+        } catch (e) {
+            modelCatalog = [];
+            modelCatalogByValue = new Map();
+            configuredModelProviders = [];
+            if (status) {
+                status.textContent = `Failed to load model catalog: ${e.message}`;
+                status.style.color = 'var(--amber)';
+            }
+        }
+
+        setModelFieldValue('s-model', currentValues?.model || DEFAULT_MODEL_VALUES['s-model']);
+        setModelFieldValue('s-model-code', currentValues?.code || DEFAULT_MODEL_VALUES['s-model-code']);
+        setModelFieldValue('s-model-light', currentValues?.light || DEFAULT_MODEL_VALUES['s-model-light']);
+        setModelFieldValue('s-model-fallback', currentValues?.fallback || DEFAULT_MODEL_VALUES['s-model-fallback']);
+
+        Object.keys(DEFAULT_MODEL_VALUES).forEach((fieldId) => {
+            renderModelMenu(fieldId, false);
+        });
+    }
+
     function applySettings(s) {
         if (s.OPENROUTER_API_KEY) document.getElementById('s-openrouter').value = s.OPENROUTER_API_KEY;
         const legacyCompatibleBaseUrl = (s.OPENAI_BASE_URL || '').trim();
@@ -476,10 +778,10 @@ export function initSettings({ ws, state }) {
         if (s.CLOUDRU_FOUNDATION_MODELS_API_KEY) document.getElementById('s-cloudru-key').value = s.CLOUDRU_FOUNDATION_MODELS_API_KEY;
         if (s.ANTHROPIC_API_KEY) document.getElementById('s-anthropic').value = s.ANTHROPIC_API_KEY;
         if (s.OUROBOROS_NETWORK_PASSWORD) document.getElementById('s-network-password').value = s.OUROBOROS_NETWORK_PASSWORD;
-        if (s.OUROBOROS_MODEL) document.getElementById('s-model').value = s.OUROBOROS_MODEL;
-        if (s.OUROBOROS_MODEL_CODE) document.getElementById('s-model-code').value = s.OUROBOROS_MODEL_CODE;
-        if (s.OUROBOROS_MODEL_LIGHT) document.getElementById('s-model-light').value = s.OUROBOROS_MODEL_LIGHT;
-        if (s.OUROBOROS_MODEL_FALLBACK) document.getElementById('s-model-fallback').value = s.OUROBOROS_MODEL_FALLBACK;
+        setModelFieldValue('s-model', s.OUROBOROS_MODEL || DEFAULT_MODEL_VALUES['s-model']);
+        setModelFieldValue('s-model-code', s.OUROBOROS_MODEL_CODE || DEFAULT_MODEL_VALUES['s-model-code']);
+        setModelFieldValue('s-model-light', s.OUROBOROS_MODEL_LIGHT || DEFAULT_MODEL_VALUES['s-model-light']);
+        setModelFieldValue('s-model-fallback', s.OUROBOROS_MODEL_FALLBACK || DEFAULT_MODEL_VALUES['s-model-fallback']);
         if (s.CLAUDE_CODE_MODEL) document.getElementById('s-claude-code-model').value = s.CLAUDE_CODE_MODEL;
         const effortTask = s.OUROBOROS_EFFORT_TASK || s.OUROBOROS_INITIAL_REASONING_EFFORT || 'medium';
         document.getElementById('s-effort-task').value = effortTask;
@@ -512,9 +814,64 @@ export function initSettings({ ws, state }) {
         const data = await resp.json().catch(() => ({}));
         if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
         applySettings(data);
+        await loadModelCatalog();
     }
 
     loadSettings().catch(() => {});
+
+    Object.keys(DEFAULT_MODEL_VALUES).forEach((fieldId) => {
+        const { hiddenInput, displayInput } = getModelFieldElements(fieldId);
+        if (!hiddenInput || !displayInput) return;
+
+        displayInput.setAttribute('role', 'combobox');
+        displayInput.setAttribute('aria-expanded', 'false');
+        displayInput.setAttribute('aria-autocomplete', 'list');
+        displayInput.setAttribute('aria-controls', MODEL_MENU_IDS[fieldId]);
+
+        displayInput.addEventListener('focus', () => {
+            renderModelMenu(fieldId, true);
+        });
+
+        displayInput.addEventListener('input', () => {
+            const typedValue = displayInput.value.trim();
+            displayInput.dataset.query = typedValue;
+            const matchedModel = findCatalogEntryFromTypedValue(typedValue);
+            hiddenInput.value = matchedModel ? matchedModel.value : typedValue;
+            renderModelMenu(fieldId, true);
+        });
+
+        displayInput.addEventListener('keydown', (event) => {
+            if (event.key === 'Escape') {
+                closeModelMenu(fieldId);
+            }
+        });
+
+        displayInput.addEventListener('blur', () => {
+            const typedValue = displayInput.value.trim();
+            const matchedModel = findCatalogEntryFromTypedValue(typedValue);
+            if (matchedModel) {
+                setModelFieldValue(fieldId, matchedModel.value);
+            } else {
+                hiddenInput.value = typedValue;
+                updateModelSelectNote(fieldId, typedValue);
+            }
+            window.setTimeout(() => closeModelMenu(fieldId), 120);
+        });
+    });
+
+    document.addEventListener('click', (event) => {
+        if (!page.contains(event.target)) return;
+        Object.keys(DEFAULT_MODEL_VALUES).forEach((fieldId) => {
+            const { displayInput, menu } = getModelFieldElements(fieldId);
+            if (!displayInput || !menu) return;
+            const clickedInside = displayInput.contains(event.target) || menu.contains(event.target);
+            if (!clickedInside) closeModelMenu(fieldId);
+        });
+    });
+
+    document.getElementById('btn-models-refresh')?.addEventListener('click', () => {
+        loadModelCatalog(true).catch(() => {});
+    });
 
     let localStatusInterval = null;
     function updateLocalStatus() {

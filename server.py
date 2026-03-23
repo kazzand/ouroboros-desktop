@@ -614,6 +614,212 @@ async def api_settings_post(request: Request) -> JSONResponse:
         return JSONResponse({"error": str(e)}, status_code=400)
 
 
+def _provider_label_from_model_id(model_id: str) -> str:
+    prefix = str(model_id or "").split("/", 1)[0].strip().lower()
+    return {
+        "anthropic": "Anthropic",
+        "openai": "OpenAI",
+        "google": "Google",
+        "meta-llama": "Meta",
+        "x-ai": "xAI",
+        "qwen": "Qwen",
+        "mistralai": "Mistral",
+        "deepseek": "DeepSeek",
+        "perplexity": "Perplexity",
+    }.get(prefix, prefix.title() if prefix else "Other")
+
+
+def _tagged_model_value(provider_id: str, model_id: str) -> str:
+    model_value = str(model_id or "").strip()
+    if provider_id == "openrouter":
+        return model_value
+    return f"{provider_id}::{model_value}"
+
+
+def _build_model_catalog_entry(
+    provider_id: str,
+    provider_label: str,
+    model_id: str,
+    display_name: str,
+    source: str | None = None,
+) -> dict:
+    raw_id = str(model_id or "").strip()
+    name = str(display_name or "").strip() or raw_id
+    return {
+        "provider_id": provider_id,
+        "provider": provider_label,
+        "source": source or provider_label,
+        "id": raw_id,
+        "name": name,
+        "value": _tagged_model_value(provider_id, raw_id),
+        "label": f"{provider_label} · {name}",
+    }
+
+
+def _fetch_openrouter_model_catalog(api_key: str) -> list[dict]:
+    import requests
+
+    resp = requests.get(
+        "https://openrouter.ai/api/v1/models",
+        headers={"Authorization": f"Bearer {api_key}"},
+        timeout=20,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    raw_models = data.get("data", []) or []
+
+    models = []
+    for item in raw_models:
+        model_id = str(item.get("id", "") or "").strip()
+        if not model_id or "/" not in model_id:
+            continue
+        models.append(
+            _build_model_catalog_entry(
+                "openrouter",
+                _provider_label_from_model_id(model_id),
+                model_id,
+                str(item.get("name", "") or "").strip() or model_id.split("/", 1)[1],
+                source="OpenRouter",
+            )
+        )
+    return models
+
+
+def _fetch_openai_compatible_model_catalog(
+    provider_id: str,
+    provider_label: str,
+    api_key: str,
+    base_url: str,
+) -> list[dict]:
+    import requests
+
+    api_root = str(base_url or "").rstrip("/")
+    if not api_root:
+        return []
+
+    resp = requests.get(
+        f"{api_root}/models",
+        headers={"Authorization": f"Bearer {api_key}"},
+        timeout=20,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    raw_models = data.get("data", []) or []
+
+    models = []
+    for item in raw_models:
+        model_id = str(item.get("id", "") or "").strip()
+        if not model_id:
+            continue
+        models.append(
+            _build_model_catalog_entry(
+                provider_id,
+                provider_label,
+                model_id,
+                str(item.get("name", "") or "").strip() or model_id,
+            )
+        )
+    return models
+
+
+async def api_model_catalog(_request: Request) -> JSONResponse:
+    settings = load_settings()
+    provider_specs = []
+
+    openrouter_api_key = str(settings.get("OPENROUTER_API_KEY", "") or "").strip()
+    if openrouter_api_key:
+        provider_specs.append({
+            "provider_id": "openrouter",
+            "provider": "OpenRouter",
+            "loader": lambda: _fetch_openrouter_model_catalog(openrouter_api_key),
+        })
+
+    openai_api_key = str(settings.get("OPENAI_API_KEY", "") or "").strip()
+    if openai_api_key:
+        provider_specs.append({
+            "provider_id": "openai",
+            "provider": "OpenAI",
+            "loader": lambda: _fetch_openai_compatible_model_catalog(
+                "openai",
+                "OpenAI",
+                openai_api_key,
+                "https://api.openai.com/v1",
+            ),
+        })
+
+    cloudru_api_key = str(settings.get("CLOUDRU_FOUNDATION_MODELS_API_KEY", "") or "").strip()
+    cloudru_base_url = (
+        str(settings.get("CLOUDRU_FOUNDATION_MODELS_BASE_URL", "") or "").strip()
+        or "https://foundation-models.api.cloud.ru/v1"
+    )
+    if cloudru_api_key:
+        provider_specs.append({
+            "provider_id": "cloudru",
+            "provider": "Cloud.ru Foundation Models",
+            "loader": lambda: _fetch_openai_compatible_model_catalog(
+                "cloudru",
+                "Cloud.ru Foundation Models",
+                cloudru_api_key,
+                cloudru_base_url,
+            ),
+        })
+
+    compatible_api_key = str(settings.get("OPENAI_COMPATIBLE_API_KEY", "") or "").strip()
+    compatible_base_url = str(settings.get("OPENAI_COMPATIBLE_BASE_URL", "") or "").strip()
+    if compatible_api_key and compatible_base_url:
+        provider_specs.append({
+            "provider_id": "openai-compatible",
+            "provider": "OpenAI Compatible",
+            "loader": lambda: _fetch_openai_compatible_model_catalog(
+                "openai-compatible",
+                "OpenAI Compatible",
+                compatible_api_key,
+                compatible_base_url,
+            ),
+        })
+
+    if not provider_specs:
+        return JSONResponse({
+            "configured": False,
+            "configured_providers": [],
+            "models": [],
+            "error": (
+                "Set a valid provider key in AI Providers to load models "
+                "(OpenRouter, OpenAI, Cloud.ru Foundation Models, or OpenAI Compatible)."
+            ),
+        })
+
+    models: list[dict] = []
+    errors: list[str] = []
+    configured_providers = [spec["provider"] for spec in provider_specs]
+    seen_values: set[str] = set()
+
+    for spec in provider_specs:
+        try:
+            for item in spec["loader"]():
+                value = str(item.get("value", "") or "").strip()
+                if not value or value in seen_values:
+                    continue
+                seen_values.add(value)
+                models.append(item)
+        except Exception as e:
+            errors.append(f'{spec["provider"]}: {e}')
+
+    models.sort(key=lambda m: (m["provider"].lower(), m["name"].lower(), m["id"].lower()))
+
+    payload = {
+        "configured": bool(provider_specs),
+        "configured_providers": configured_providers,
+        "models": models,
+    }
+    if errors:
+        payload["errors"] = errors
+        payload["error"] = "Some providers failed to load: " + " | ".join(errors)
+
+    status_code = 200 if models or not errors else 502
+    return JSONResponse(payload, status_code=status_code)
+
+
 async def api_reset(request: Request) -> JSONResponse:
     """Reset all runtime data (state, memory, logs, settings) but keep repo.
 
@@ -871,6 +1077,7 @@ routes = [
     *file_browser_routes(),
     Route("/api/settings", endpoint=api_settings_get, methods=["GET"]),
     Route("/api/settings", endpoint=api_settings_post, methods=["POST"]),
+    Route("/api/model-catalog", endpoint=api_model_catalog, methods=["GET"]),
     Route("/api/command", endpoint=api_command, methods=["POST"]),
     Route("/api/reset", endpoint=api_reset, methods=["POST"]),
     Route("/api/git/log", endpoint=api_git_log),

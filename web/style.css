@@ -1227,6 +1227,111 @@ body {
     line-height: 1.5;
 }
 
+.models-catalog-toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin: 0 0 14px 0;
+}
+
+.models-catalog-status {
+    margin: 0;
+}
+
+.models-refresh-btn {
+    flex: 0 0 auto;
+    white-space: nowrap;
+}
+
+.model-combobox {
+    position: relative;
+    width: 320px;
+    max-width: 100%;
+}
+
+.model-combobox-input {
+    width: 100% !important;
+}
+
+.model-combobox-menu {
+    position: absolute;
+    top: calc(100% + 8px);
+    left: 0;
+    right: 0;
+    max-height: 280px;
+    overflow-y: auto;
+    border-radius: 14px;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    background: rgba(15, 23, 42, 0.98);
+    box-shadow: 0 20px 50px rgba(2, 8, 23, 0.38);
+    padding: 8px;
+    z-index: 20;
+}
+
+.model-combobox-group {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.model-combobox-group + .model-combobox-group {
+    margin-top: 10px;
+    padding-top: 10px;
+    border-top: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.model-combobox-group-label {
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--text-secondary);
+    padding: 0 8px 2px;
+}
+
+.model-combobox-option {
+    width: 100%;
+    border: 0;
+    border-radius: 10px;
+    background: transparent;
+    color: var(--text-primary);
+    cursor: pointer;
+    text-align: left;
+    padding: 9px 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    transition: background 0.16s ease, color 0.16s ease;
+}
+
+.model-combobox-option:hover,
+.model-combobox-option:focus-visible {
+    background: rgba(96, 165, 250, 0.14);
+    outline: none;
+}
+
+.model-combobox-option-title {
+    font-size: 13px;
+    font-weight: 600;
+}
+
+.model-combobox-option-id {
+    font-size: 11px;
+    color: var(--text-secondary);
+}
+
+.model-combobox-empty {
+    padding: 10px 12px;
+    font-size: 12px;
+    color: var(--text-secondary);
+}
+
+.model-select-note {
+    margin: -4px 0 14px;
+    padding-left: 2px;
+}
+
 .local-toggle {
     display: flex;
     align-items: center;
@@ -1338,6 +1443,11 @@ body {
     .form-field input,
     .form-field select {
         width: min(100%, 320px);
+    }
+
+    .models-catalog-toolbar {
+        align-items: flex-start;
+        flex-direction: column;
     }
 }
 
