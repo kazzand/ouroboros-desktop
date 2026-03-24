@@ -28,10 +28,13 @@ export function initChat({ ws, state, updateUnreadBadge }) {
     const sendBtn = document.getElementById('chat-send');
 
     const _chatHistory = [];
+    const sentInputHistory = [];
     const seenMessageKeys = new Set();
     const messageKeyOrder = [];
     let historyLoaded = false;
     let historySyncPromise = null;
+    let inputHistoryIndex = -1;
+    let inputDraftBeforeHistory = '';
 
     function buildMessageKey(role, text, timestamp, isProgress = false, systemType = '') {
         if (!timestamp) return '';
@@ -184,6 +187,10 @@ export function initChat({ ws, state, updateUnreadBadge }) {
     function sendMessage() {
         const text = input.value.trim();
         if (!text) return;
+        sentInputHistory.push(text);
+        if (sentInputHistory.length > 100) sentInputHistory.shift();
+        inputHistoryIndex = -1;
+        inputDraftBeforeHistory = '';
         input.value = '';
         input.style.height = 'auto';
         const result = ws.send({ type: 'chat', content: text });
@@ -195,12 +202,48 @@ export function initChat({ ws, state, updateUnreadBadge }) {
 
     sendBtn.addEventListener('click', sendMessage);
     input.addEventListener('keydown', (e) => {
+        if (e.key === 'ArrowUp' && !e.shiftKey) {
+            const isEmpty = !input.value.trim();
+            const isNavigatingHistory = inputHistoryIndex >= 0;
+            if ((isEmpty || isNavigatingHistory) && sentInputHistory.length) {
+                e.preventDefault();
+                if (inputHistoryIndex < 0) {
+                    inputDraftBeforeHistory = input.value;
+                    inputHistoryIndex = sentInputHistory.length - 1;
+                } else if (inputHistoryIndex > 0) {
+                    inputHistoryIndex -= 1;
+                }
+                input.value = sentInputHistory[inputHistoryIndex] || '';
+                input.style.height = 'auto';
+                input.style.height = Math.min(input.scrollHeight, 120) + 'px';
+                input.setSelectionRange(input.value.length, input.value.length);
+                return;
+            }
+        }
+        if (e.key === 'ArrowDown' && !e.shiftKey && inputHistoryIndex >= 0) {
+            e.preventDefault();
+            if (inputHistoryIndex < sentInputHistory.length - 1) {
+                inputHistoryIndex += 1;
+                input.value = sentInputHistory[inputHistoryIndex] || '';
+            } else {
+                inputHistoryIndex = -1;
+                input.value = inputDraftBeforeHistory;
+                inputDraftBeforeHistory = '';
+            }
+            input.style.height = 'auto';
+            input.style.height = Math.min(input.scrollHeight, 120) + 'px';
+            input.setSelectionRange(input.value.length, input.value.length);
+            return;
+        }
         if (e.key === 'Enter' && !e.shiftKey) {
             e.preventDefault();
             sendMessage();
         }
     });
     input.addEventListener('input', () => {
+        if (inputHistoryIndex === -1) {
+            inputDraftBeforeHistory = input.value;
+        }
         input.style.height = 'auto';
         input.style.height = Math.min(input.scrollHeight, 120) + 'px';
     });

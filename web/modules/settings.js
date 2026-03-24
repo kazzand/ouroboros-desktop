@@ -1012,7 +1012,7 @@ export function initSettings({ ws, state }) {
             await loadSettings();
             const message = data.warnings && data.warnings.length
                 ? ('Settings saved with warnings: ' + data.warnings.join(' | '))
-                : 'Settings saved. Budget changes take effect immediately.';
+                : (data.info || 'Settings saved. Budget changes take effect immediately.');
             const color = data.warnings && data.warnings.length ? 'var(--amber)' : 'var(--green)';
             page.querySelectorAll('.settings-status').forEach((status) => {
                 status.textContent = message;

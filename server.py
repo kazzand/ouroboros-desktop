@@ -132,11 +132,112 @@ from ouroboros.server_runtime import has_local_routing, setup_remote_if_configur
 _supervisor_ready = threading.Event()
 _supervisor_error: Optional[str] = None
 _event_loop: Optional[asyncio.AbstractEventLoop] = None
+_supervisor_thread: Optional[threading.Thread] = None
+_supervisor_ctx: Any = None
+
+
+def _settings_enable_supervisor(settings: dict) -> bool:
+    return bool(
+        str(settings.get("OPENROUTER_API_KEY", "") or "").strip()
+        or str(settings.get("OPENAI_API_KEY", "") or "").strip()
+        or str(settings.get("OPENAI_COMPATIBLE_API_KEY", "") or "").strip()
+        or str(settings.get("CLOUDRU_FOUNDATION_MODELS_API_KEY", "") or "").strip()
+        or has_local_routing(settings)
+    )
+
+
+def _provider_settings_snapshot(settings: dict) -> tuple[str, ...]:
+    keys = (
+        "OPENROUTER_API_KEY",
+        "OPENAI_API_KEY",
+        "OPENAI_BASE_URL",
+        "OPENAI_COMPATIBLE_API_KEY",
+        "OPENAI_COMPATIBLE_BASE_URL",
+        "CLOUDRU_FOUNDATION_MODELS_API_KEY",
+        "CLOUDRU_FOUNDATION_MODELS_BASE_URL",
+        "ANTHROPIC_API_KEY",
+    )
+    return tuple(str(settings.get(key, "") or "").strip() for key in keys)
+
+
+def _reload_live_supervisor_for_provider_change(settings: dict) -> dict[str, Any]:
+    global _supervisor_ctx
+
+    if not (_supervisor_thread and _supervisor_thread.is_alive() and _supervisor_ready.is_set()):
+        return {"reloaded": False, "recovered_tasks": 0, "error": None}
+
+    try:
+        from supervisor import queue as queue_mod
+        from supervisor import workers
+        from supervisor.queue import _queue_lock
+
+        with _queue_lock:
+            recovered_running: list[dict[str, Any]] = []
+            for meta in list(workers.RUNNING.values()):
+                task = meta.get("task")
+                if not isinstance(task, dict):
+                    continue
+                task_copy = dict(task)
+                task_copy["_attempt"] = int(task_copy.get("_attempt") or meta.get("attempt") or 1)
+                recovered_running.append(task_copy)
+
+            existing_pending = [dict(task) for task in workers.PENDING]
+
+            for worker in workers.WORKERS.values():
+                if worker.proc.is_alive():
+                    worker.proc.terminate()
+            for worker in workers.WORKERS.values():
+                worker.proc.join(timeout=3)
+            workers._kill_survivors()
+            workers.WORKERS.clear()
+            workers.RUNNING.clear()
+            workers.PENDING[:] = recovered_running + existing_pending
+            queue_mod.persist_queue_snapshot(reason="settings_provider_reload")
+
+        workers._chat_agent = None
+        workers.spawn_workers(int(settings.get("OUROBOROS_MAX_WORKERS", 5)) or 5)
+
+        if _supervisor_ctx is not None and getattr(_supervisor_ctx, "consciousness", None) is not None:
+            _supervisor_ctx.consciousness._event_queue = workers.get_event_q()
+
+        return {
+            "reloaded": True,
+            "recovered_tasks": len(recovered_running),
+            "error": None,
+        }
+    except Exception as exc:
+        log.warning("Failed to reload live supervisor after provider change: %s", exc, exc_info=True)
+        return {
+            "reloaded": False,
+            "recovered_tasks": 0,
+            "error": str(exc),
+        }
+
+
+def _ensure_supervisor_started(settings: dict) -> bool:
+    global _supervisor_thread, _supervisor_error
+
+    if not _settings_enable_supervisor(settings):
+        return False
+
+    if _supervisor_thread and _supervisor_thread.is_alive():
+        return False
+
+    _supervisor_ready.clear()
+    _supervisor_error = None
+    _supervisor_thread = threading.Thread(
+        target=_run_supervisor,
+        args=(settings,),
+        daemon=True,
+        name="supervisor-main",
+    )
+    _supervisor_thread.start()
+    return True
 
 
 def _run_supervisor(settings: dict) -> None:
     """Initialize and run the supervisor loop. Called in a background thread."""
-    global _supervisor_error
+    global _supervisor_error, _supervisor_ctx
 
     _apply_settings_to_env(settings)
 
@@ -245,8 +346,10 @@ def _run_supervisor(settings: dict) -> None:
             sort_pending=sort_pending, consciousness=_consciousness,
             request_restart=_request_restart_exit,
         )
+        _supervisor_ctx = _event_ctx
     except Exception as exc:
         _supervisor_error = f"Supervisor init failed: {exc}"
+        _supervisor_ctx = None
         log.critical("Supervisor initialization failed", exc_info=True)
         _supervisor_ready.set()
         return
@@ -574,6 +677,8 @@ async def api_settings_post(request: Request) -> JSONResponse:
     try:
         body = await request.json()
         current = load_settings()
+        supervisor_was_ready = _supervisor_ready.is_set()
+        previous_provider_snapshot = _provider_settings_snapshot(current)
         legacy_compatible_key = str(current.get("OPENAI_API_KEY", "") or "")
         legacy_compatible_base_url = str(current.get("OPENAI_BASE_URL", "") or "").strip()
         for key in _SETTINGS_DEFAULTS:
@@ -593,6 +698,11 @@ async def api_settings_post(request: Request) -> JSONResponse:
             current["OPENAI_COMPATIBLE_API_KEY"] = legacy_compatible_key
         save_settings(current)
         _apply_settings_to_env(current)
+        supervisor_started = _ensure_supervisor_started(current)
+        provider_settings_changed = previous_provider_snapshot != _provider_settings_snapshot(current)
+        provider_reload_result = {"reloaded": False, "recovered_tasks": 0, "error": None}
+        if provider_settings_changed and not supervisor_started:
+            provider_reload_result = _reload_live_supervisor_for_provider_change(current)
         warnings = []
         _repo_slug = current.get("GITHUB_REPO", "")
         _gh_token = current.get("GITHUB_TOKEN", "")
@@ -607,6 +717,21 @@ async def api_settings_post(request: Request) -> JSONResponse:
                 if not mig_ok:
                     log.warning("Credential migration failed: %s", mig_msg)
         resp = {"status": "saved"}
+        if supervisor_started:
+            resp["info"] = "Supervisor started with updated model/provider settings."
+        elif provider_reload_result.get("reloaded"):
+            recovered_tasks = int(provider_reload_result.get("recovered_tasks") or 0)
+            if recovered_tasks:
+                resp["info"] = (
+                    "Provider settings applied. Supervisor workers were reloaded and "
+                    f"{recovered_tasks} active task(s) were re-queued."
+                )
+            else:
+                resp["info"] = "Provider settings applied. Supervisor workers were reloaded."
+        elif provider_reload_result.get("error"):
+            warnings.append(f"Provider reload failed: {provider_reload_result['error']}")
+        elif not supervisor_was_ready and _settings_enable_supervisor(current):
+            resp["info"] = "Supervisor is already starting. Give it a moment."
         if warnings:
             resp["warnings"] = warnings
         return JSONResponse(resp)
@@ -1107,11 +1232,10 @@ async def lifespan(app):
     )
 
     settings = load_settings()
-    has_api_key = bool(settings.get("OPENROUTER_API_KEY"))
     has_local = has_local_routing(settings)
 
-    if has_api_key or has_local:
-        threading.Thread(target=_run_supervisor, args=(settings,), daemon=True).start()
+    if _settings_enable_supervisor(settings):
+        _ensure_supervisor_started(settings)
     else:
         _supervisor_ready.set()
         log.info("No API key or local model configured. Supervisor not started.")
