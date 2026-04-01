@@ -391,4 +391,4 @@ latest 2 major, 5 minor, and 5 patch entries.
 
 [MIT License](LICENSE)
 
-Created by [Anton Razzhigaev](https://t.me/abstractDL)
+Created by [Anton Razzhigaev](https://t.me/abstractDL) & Andrew Kaznacheev
