@@ -121,6 +121,16 @@ def test_live_card_has_inline_typing_dots_and_pulsing_phase_badge():
     assert "data-live-typing" in chat_source
 
 
+def test_live_card_timeline_body_renders_markdown():
+    """Live card timeline body must use renderMarkdown, not escapeHtml."""
+    source = _read("web/modules/chat.js")
+    # The body div inside the timeline must use renderMarkdown so that
+    # markdown formatting (bold, lists, etc.) is rendered correctly.
+    assert "renderMarkdown(displayBody)" in source
+    # escapeHtml must NOT be used for displayBody in the timeline
+    assert "escapeHtml(displayBody)" not in source
+
+
 def test_chat_history_replays_task_summaries_into_live_cards():
     history_source = _read("ouroboros/server_history_api.py")
     chat_source = _read("web/modules/chat.js")

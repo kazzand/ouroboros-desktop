@@ -541,7 +541,7 @@ export function initChat({ ws, state, updateUnreadBadge }) {
                     data-expanded="${expanded ? '1' : '0'}"
                 >
                     ${headHtml}
-                    ${displayBody ? `<div class="chat-live-line-body">${escapeHtml(displayBody)}</div>` : ''}
+                    ${displayBody ? `<div class="chat-live-line-body">${renderMarkdown(displayBody)}</div>` : ''}
                 </div>
             `;
         }).join('');
