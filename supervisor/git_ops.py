@@ -410,10 +410,9 @@ def checkout_and_reset(branch: str, reason: str = "unspecified",
                     "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
                     "type": "reset_fetch_failed",
                     "target_branch": branch, "reason": reason, "error": msg,
-                    "continuing_local_reset": True,
                 },
             )
-            log.warning("%s; continuing with local reset for branch %s", msg, branch)
+            return False, msg
 
     policy = str(unsynced_policy or "ignore").strip().lower()
     if policy not in {"ignore", "block", "rescue_and_block", "rescue_and_reset"}:

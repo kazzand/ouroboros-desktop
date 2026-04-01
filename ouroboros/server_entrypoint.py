@@ -7,37 +7,20 @@ import pathlib
 import socket
 
 
-def find_free_port(host: str, start: int = 8765, max_tries: int = 10,
-                   wait_retries: int = 20, wait_interval: float = 0.5) -> int:
-    """Try the preferred port first; wait for it to become free on restart.
+def find_free_port(host: str, start: int = 8765, max_tries: int = 10) -> int:
+    """Try the preferred port first, then scan nearby fallbacks."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            sock.bind((host, start))
+            return start
+        except OSError:
+            pass
 
-    During a restart the previous process may still be releasing the socket
-    (TIME_WAIT / lingering close).  Instead of silently moving to the next
-    port (which breaks WebSocket reconnect because the browser still points
-    at the old port), we retry the *preferred* port with short sleeps first.
-
-    Only if the preferred port is still occupied after ``wait_retries`` attempts
-    do we fall back to scanning nearby ports.
-    """
-    import time
-
-    for attempt in range(wait_retries):
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            try:
-                sock.bind((host, start))
-                return start
-            except OSError:
-                pass
-        if attempt < wait_retries - 1:
-            time.sleep(wait_interval)
-
-    # Preferred port still busy — scan nearby as last resort
     for offset in range(1, max_tries):
         port = start + offset
         try:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
                 sock.bind((host, port))
             return port
         except OSError:
