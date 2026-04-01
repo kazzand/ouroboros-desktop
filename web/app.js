@@ -53,6 +53,7 @@ async function showPage(name) {
     document.getElementById(`page-${name}`)?.classList.add('active');
     document.querySelector(`.nav-btn[data-page="${name}"]`)?.classList.add('active');
     state.activePage = name;
+    window.dispatchEvent(new CustomEvent('ouro:page-shown', { detail: { page: name } }));
     if (name === 'chat') {
         state.unreadCount = 0;
         updateUnreadBadge();

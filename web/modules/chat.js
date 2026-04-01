@@ -93,6 +93,16 @@ export function initChat({ ws, state, updateUnreadBadge }) {
 
     function buildMessageKey(role, text, timestamp, opts = {}) {
         if (opts.clientMessageId) return `client|${opts.clientMessageId}`;
+        if (role !== 'user' && !opts.isProgress && opts.taskId) {
+            return [
+                'task',
+                role,
+                opts.systemType || '',
+                opts.source || '',
+                opts.taskId,
+                text,
+            ].join('|');
+        }
         if (!timestamp) return '';
         return [
             role,
@@ -166,8 +176,10 @@ export function initChat({ ws, state, updateUnreadBadge }) {
             const cmd = button.dataset.chatCommand;
             if (cmd === 'evolve') {
                 button.classList.toggle('on', !!data?.evolution_enabled);
+                if (data?.evolution_state?.detail) button.title = data.evolution_state.detail;
             } else if (cmd === 'bg') {
                 button.classList.toggle('on', !!data?.bg_consciousness_enabled);
+                if (data?.bg_consciousness_state?.detail) button.title = data.bg_consciousness_state.detail;
             }
         });
     }
@@ -209,6 +221,10 @@ export function initChat({ ws, state, updateUnreadBadge }) {
         return taskId === 'bg-consciousness';
     }
 
+    function isTerminalTaskPhase(phase = '') {
+        return ['done', 'error', 'timeout'].includes(phase);
+    }
+
     function createTaskUiState(taskId) {
         if (!taskId) return null;
         const taskState = {
@@ -216,6 +232,8 @@ export function initChat({ ws, state, updateUnreadBadge }) {
             toolCalls: 0,
             forceCard: false,
             cardVisible: false,
+            completed: false,
+            completedPhase: '',
             bufferedLiveUpdates: [],
             cleanupTimer: null,
         };
@@ -263,6 +281,9 @@ export function initChat({ ws, state, updateUnreadBadge }) {
         for (const update of bufferedUpdates) {
             applyLiveCardState(update.summary, taskState.taskId, update.ts, update.dedupeKey);
         }
+        if (taskState.completed) {
+            finishLiveCard(taskState.taskId, taskState.completedPhase || 'done');
+        }
     }
 
     function markTaskToolCall(taskId, count = 1, minimumOnly = false) {
@@ -291,11 +312,20 @@ export function initChat({ ws, state, updateUnreadBadge }) {
         if (!resolvedTaskId) return;
         const taskState = getTaskUiState(resolvedTaskId, false);
         if (!taskState) return;
+        taskState.completed = true;
+        taskState.completedPhase = taskState.completedPhase || 'done';
         if (!taskState.cardVisible) {
-            taskUiStates.delete(resolvedTaskId);
+            scheduleTaskUiCleanup(taskState, 30000);
             return;
         }
         scheduleTaskUiCleanup(taskState);
+    }
+
+    function markTaskComplete(taskId = '', phase = '') {
+        const taskState = getTaskUiState(taskId, false);
+        if (!taskState) return;
+        taskState.completed = true;
+        if (phase) taskState.completedPhase = phase;
     }
 
     function queueTaskLiveUpdate(summary, taskId, ts, dedupeKey = '') {
@@ -303,6 +333,9 @@ export function initChat({ ws, state, updateUnreadBadge }) {
         if (!resolvedTaskId) return;
         const taskState = getTaskUiState(resolvedTaskId, true);
         if (!taskState) return;
+        if (taskState.completed && !isTerminalTaskPhase(summary.phase || '')) {
+            return;
+        }
         if (summary.phase === 'error' || summary.phase === 'timeout') {
             taskState.forceCard = true;
         }
@@ -447,8 +480,8 @@ export function initChat({ ws, state, updateUnreadBadge }) {
         const nextGroupId = groupId || activeLiveGroupId || 'active';
         const record = getLiveCardRecord(nextGroupId);
         const nextPhase = summary.phase || '';
-        if (record.finished && !['done', 'error', 'timeout'].includes(nextPhase)) {
-            resetLiveCardRecord(record);
+        if (record.finished && !isTerminalTaskPhase(nextPhase)) {
+            return;
         }
 
         activeLiveGroupId = nextGroupId;
@@ -509,6 +542,7 @@ export function initChat({ ws, state, updateUnreadBadge }) {
         hideTypingIndicatorOnly();
         const justFinished = record.finished && !wasFinished;
         if (record.finished) {
+            markTaskComplete(nextGroupId, summary.phase || 'done');
             if (justFinished) {
                 setLiveCardExpanded(record, false);
                 scheduleHistorySync();
@@ -534,6 +568,7 @@ export function initChat({ ws, state, updateUnreadBadge }) {
         record.phaseEl.dataset.phase = activePhase;
         record.phaseEl.textContent = formatLiveCardPhaseLabel(activePhase);
         record.phaseEl.className = `chat-live-phase ${activePhase}`;
+        markTaskComplete(record.groupId, activePhase);
         if (!wasFinished) {
             setLiveCardExpanded(record, false);
             scheduleHistorySync();
@@ -709,12 +744,14 @@ export function initChat({ ws, state, updateUnreadBadge }) {
                 for (const msg of messages) {
                     if (!includeUser && msg.role === 'user') continue;
                     if (msg.is_progress) {
-                        if (!getTaskUiState(msg.task_id || '', false)) continue;
+                        const taskState = getTaskUiState(msg.task_id || '', false);
+                        if (!taskState || taskState.completed) continue;
                         updateLiveCardFromProgressMessage(msg);
                         continue;
                     }
                     if (msg.system_type === 'task_summary') {
-                        if (!getTaskUiState(msg.task_id || '', false)) continue;
+                        const taskState = getTaskUiState(msg.task_id || '', false);
+                        if (!taskState || taskState.completed) continue;
                         appendTaskSummaryToLiveCard(msg);
                         continue;
                     }

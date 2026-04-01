@@ -271,18 +271,20 @@ def _handle_task_done(evt: Dict[str, Any], ctx: Any) -> None:
 
 
 def _handle_task_metrics(evt: Dict[str, Any], ctx: Any) -> None:
-    ctx.append_jsonl(
-        ctx.DRIVE_ROOT / "logs" / "supervisor.jsonl",
-        {
-            "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-            "type": "task_metrics_event",
-            "task_id": str(evt.get("task_id") or ""),
-            "task_type": str(evt.get("task_type") or ""),
-            "duration_sec": round(float(evt.get("duration_sec") or 0.0), 3),
-            "tool_calls": int(evt.get("tool_calls") or 0),
-            "tool_errors": int(evt.get("tool_errors") or 0),
-        },
-    )
+    payload = {
+        "ts": str(evt.get("ts") or datetime.datetime.now(datetime.timezone.utc).isoformat()),
+        "type": "task_metrics_event",
+        "task_id": str(evt.get("task_id") or ""),
+        "task_type": str(evt.get("task_type") or ""),
+        "duration_sec": round(float(evt.get("duration_sec") or 0.0), 3),
+        "tool_calls": int(evt.get("tool_calls") or 0),
+        "tool_errors": int(evt.get("tool_errors") or 0),
+    }
+    ctx.append_jsonl(ctx.DRIVE_ROOT / "logs" / "supervisor.jsonl", payload)
+    try:
+        ctx.bridge.push_log(payload)
+    except Exception:
+        log.debug("Failed to forward task_metrics to live logs", exc_info=True)
 
 
 def _handle_review_request(evt: Dict[str, Any], ctx: Any) -> None:

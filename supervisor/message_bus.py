@@ -443,6 +443,7 @@ class LocalChatBridge:
         parse_mode: str = "",
         ts: Optional[str] = None,
         is_progress: bool = False,
+        task_id: str = "",
     ) -> Tuple[bool, str]:
         """Put a message in the outbox for the UI to consume."""
         clean_text = _strip_markdown(text) if not parse_mode else text
@@ -453,6 +454,7 @@ class LocalChatBridge:
             "markdown": bool(parse_mode),
             "is_progress": bool(is_progress),
             "ts": message_ts,
+            "task_id": str(task_id or ""),
         }
         self._outbox.put(msg)
         if self._broadcast_fn:
@@ -463,6 +465,7 @@ class LocalChatBridge:
                 "markdown": bool(parse_mode),
                 "is_progress": bool(is_progress),
                 "ts": message_ts,
+                "task_id": str(task_id or ""),
             })
         self._send_telegram_text(_strip_markdown(clean_text), preferred_chat_id=chat_id)
         return True, "ok"
@@ -603,6 +606,7 @@ def _send_markdown(
     text: str,
     ts: Optional[str] = None,
     is_progress: bool = False,
+    task_id: str = "",
 ) -> Tuple[bool, str]:
     """Send markdown text to the UI."""
     bridge = get_bridge()
@@ -614,6 +618,7 @@ def _send_markdown(
         parse_mode="markdown",
         ts=ts,
         is_progress=is_progress,
+        task_id=task_id,
     )
 
 
@@ -665,6 +670,7 @@ def log_chat(
     sender_session_id: str = "",
     client_message_id: str = "",
     telegram_chat_id: int = 0,
+    task_id: str = "",
 ) -> None:
     if DATA_DIR:
         append_jsonl(DATA_DIR / "logs" / "chat.jsonl", {
@@ -680,6 +686,7 @@ def log_chat(
             "sender_session_id": sender_session_id,
             "client_message_id": client_message_id,
             "telegram_chat_id": int(telegram_chat_id or 0),
+            "task_id": str(task_id or ""),
         })
 
 
@@ -712,6 +719,7 @@ def send_with_budget(chat_id: int, text: str, log_text: Optional[str] = None,
             text if log_text is None else log_text,
             ts=msg_ts,
             fmt=fmt,
+            task_id=task_id,
         )
 
     if _text.strip() in ("", "\u200b"):
@@ -721,8 +729,14 @@ def send_with_budget(chat_id: int, text: str, log_text: Optional[str] = None,
     full = _text
 
     if fmt == "markdown":
-        ok, err = _send_markdown(chat_id, full, ts=msg_ts, is_progress=is_progress)
+        ok, err = _send_markdown(
+            chat_id,
+            full,
+            ts=msg_ts,
+            is_progress=is_progress,
+            task_id=task_id,
+        )
         return
 
     bridge = get_bridge()
-    bridge.send_message(chat_id, full, ts=msg_ts, is_progress=is_progress)
+    bridge.send_message(chat_id, full, ts=msg_ts, is_progress=is_progress, task_id=task_id)

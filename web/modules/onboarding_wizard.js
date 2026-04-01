@@ -12,26 +12,31 @@
     const STEP_META = {
         providers: {
             title: 'Add your access',
+            railCopy: 'Keys + local',
             copy: 'Fill at least one remote key or a local model source. The next step adapts to what you configured here.',
             footer: 'Paste only what you already have. OpenRouter, direct provider keys, and an optional local model can coexist.',
         },
         models: {
             title: 'Choose models',
+            railCopy: '4 model slots',
             copy: 'Review the visible model defaults derived from your current setup, then edit anything you want before launch.',
             footer: 'Plain openai/... or anthropic/... remains router-style. Direct values use openai::... and anthropic::....',
         },
         review_mode: {
             title: 'Choose review mode',
+            railCopy: 'Advisory vs blocking',
             copy: 'Decide how strict pre-commit review should be before Ouroboros starts modifying itself.',
             footer: 'You can change the enforcement mode later in Advanced settings.',
         },
         budget: {
             title: 'Set your budget',
+            railCopy: 'Session limits',
             copy: 'Budget is its own step because it directly shapes how far Ouroboros can go in one session and in a single task.',
             footer: 'Total budget is global. Per-task cost cap is a soft reminder, not a hard kill switch.',
         },
         summary: {
             title: 'Review before launch',
+            railCopy: 'Final check',
             copy: 'Check the final provider, model, review, and budget picture. Ouroboros will save exactly this snapshot before starting.',
             footer: 'The same values remain editable later in Settings.',
         },
@@ -616,7 +621,7 @@
                 <div class="wizard-step ${active ? 'active' : ''} ${done ? 'done' : ''}">
                     <div class="wizard-step-index">Step ${index + 1}</div>
                     <p class="wizard-step-title">${escapeHtml(meta.title)}</p>
-                    <p class="wizard-step-copy">${escapeHtml(meta.copy)}</p>
+                    <p class="wizard-step-copy">${escapeHtml(meta.railCopy || '')}</p>
                 </div>
             `;
         }).join('');

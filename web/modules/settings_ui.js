@@ -180,7 +180,7 @@ export function renderSettingsPage() {
                             label: 'Network Password (optional)',
                             placeholder: 'Leave blank to keep the network surface open',
                         })}</div>
-                        <div class="settings-inline-note">Adds a password wall only for non-localhost browser and API access. Leave it blank if you use Ouroboros only on this machine or inside a trusted private network.</div>
+                        <div class="settings-inline-note">Adds a password wall only for non-localhost app and API access. Leave it blank if you use Ouroboros only on this machine or inside a trusted private network.</div>
                     </div>
                 </section>
 

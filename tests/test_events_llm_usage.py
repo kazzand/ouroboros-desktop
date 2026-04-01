@@ -45,3 +45,43 @@ def test_llm_usage_writes_cached_tokens_and_cache_write_tokens(tmp_path):
     assert written.get("api_key_type") == "openrouter"
     assert written.get("cost_estimated") is False
     assert ctx.last_usage["cached_tokens"] == 1200
+
+
+def test_task_metrics_are_persisted_and_forwarded_to_live_logs(tmp_path):
+    from supervisor import events as ev_module
+
+    logs_dir = tmp_path / "logs"
+    logs_dir.mkdir()
+
+    pushed = []
+
+    class FakeBridge:
+        def push_log(self, payload):
+            pushed.append(payload)
+
+    class FakeCtx:
+        DRIVE_ROOT = tmp_path
+        bridge = FakeBridge()
+
+        @staticmethod
+        def append_jsonl(path, payload):
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(payload) + "\n")
+
+    evt = {
+        "ts": "2026-03-31T10:11:12Z",
+        "task_id": "task-99",
+        "task_type": "task",
+        "duration_sec": 3.14159,
+        "tool_calls": 4,
+        "tool_errors": 1,
+    }
+    ev_module._handle_task_metrics(evt, FakeCtx())
+
+    written = json.loads((tmp_path / "logs" / "supervisor.jsonl").read_text(encoding="utf-8").strip())
+    assert written["type"] == "task_metrics_event"
+    assert written["task_id"] == "task-99"
+    assert written["tool_calls"] == 4
+    assert written["duration_sec"] == 3.142
+    assert pushed[0]["task_id"] == "task-99"
+    assert pushed[0]["tool_errors"] == 1

@@ -429,6 +429,78 @@ def queue_review_task(reason: str, force: bool = False) -> Optional[str]:
     return tid
 
 
+def get_evolution_status_snapshot() -> Dict[str, Any]:
+    """Return a non-mutating snapshot of evolution scheduling state."""
+    st = load_state()
+    enabled = bool(st.get("evolution_mode_enabled"))
+    owner_chat_id = int(st.get("owner_chat_id") or 0)
+    consecutive_failures = int(st.get("evolution_consecutive_failures") or 0)
+    remaining = round(float(budget_remaining(st)), 2)
+    queued_task = next((t for t in PENDING if str(t.get("type") or "") == "evolution"), None)
+    running_task = next(
+        (
+            (meta.get("task") if isinstance(meta, dict) else None)
+            for meta in RUNNING.values()
+            if isinstance(meta, dict)
+            and isinstance(meta.get("task"), dict)
+            and str(meta["task"].get("type") or "") == "evolution"
+        ),
+        None,
+    )
+    status = "disabled"
+    detail = "Evolution mode is off."
+
+    if isinstance(running_task, dict):
+        status = "running"
+        detail = "Evolution task is running now."
+    elif isinstance(queued_task, dict):
+        status = "queued"
+        detail = "Evolution task is queued and waiting for a worker."
+    elif consecutive_failures >= 3:
+        status = "paused_failures"
+        detail = (
+            f"Paused after {consecutive_failures} consecutive failures. "
+            "Use Evolve again after investigating the failure."
+        )
+    elif enabled and not owner_chat_id:
+        status = "waiting_for_owner_chat"
+        detail = "Waiting for the first owner chat binding before scheduling evolution."
+    elif enabled and remaining < EVOLUTION_BUDGET_RESERVE:
+        status = "budget_blocked"
+        detail = (
+            f"Budget reserve active: ${remaining:.2f} remaining, "
+            f"${EVOLUTION_BUDGET_RESERVE:.0f} reserved for conversations."
+        )
+    elif enabled and (PENDING or RUNNING):
+        status = "waiting_for_idle"
+        detail = "Waiting for active tasks to finish before the next evolution cycle."
+    elif enabled:
+        status = "idle_ready"
+        detail = "Idle and ready to queue the next evolution cycle."
+    elif remaining < EVOLUTION_BUDGET_RESERVE and str(st.get("last_evolution_task_at") or "").strip():
+        status = "budget_stopped"
+        detail = (
+            f"Evolution auto-stopped because only ${remaining:.2f} remains, "
+            f"below the ${EVOLUTION_BUDGET_RESERVE:.0f} conversation reserve."
+        )
+
+    return {
+        "enabled": enabled,
+        "status": status,
+        "detail": detail,
+        "cycle": int(st.get("evolution_cycle") or 0),
+        "owner_chat_bound": bool(owner_chat_id),
+        "last_task_at": str(st.get("last_evolution_task_at") or ""),
+        "consecutive_failures": consecutive_failures,
+        "budget_remaining_usd": remaining,
+        "budget_reserve_usd": float(EVOLUTION_BUDGET_RESERVE),
+        "pending_count": len(PENDING),
+        "running_count": len(RUNNING),
+        "queued_task_id": str((queued_task or {}).get("id") or ""),
+        "running_task_id": str((running_task or {}).get("id") or ""),
+    }
+
+
 def enqueue_evolution_task_if_needed() -> None:
     """Enqueue evolution task if queue is empty and evolution mode is enabled.
 

@@ -79,6 +79,10 @@ class BackgroundConsciousness:
         self._bg_budget_pct: float = float(
             os.environ.get("OUROBOROS_BG_BUDGET_PCT", "10")
         )
+        self._last_cycle_started_at: str = ""
+        self._last_cycle_finished_at: str = ""
+        self._last_idle_reason: str = "stopped"
+        self._last_error: str = ""
 
     # -------------------------------------------------------------------
     # Lifecycle
@@ -89,14 +93,31 @@ class BackgroundConsciousness:
         return self._running and self._thread is not None and self._thread.is_alive()
 
     @property
+    def is_paused(self) -> bool:
+        return self._paused
+
+    @property
     def _model(self) -> str:
         return os.environ.get("OUROBOROS_MODEL_LIGHT", "") or DEFAULT_LIGHT_MODEL
+
+    def status_snapshot(self) -> Dict[str, Any]:
+        return {
+            "running": bool(self.is_running),
+            "paused": bool(self._paused),
+            "next_wakeup_sec": int(self._next_wakeup_sec),
+            "last_cycle_started_at": self._last_cycle_started_at,
+            "last_cycle_finished_at": self._last_cycle_finished_at,
+            "last_idle_reason": self._last_idle_reason,
+            "last_error": self._last_error,
+        }
 
     def start(self) -> str:
         if self.is_running:
             return "Background consciousness is already running."
         self._running = True
         self._paused = False
+        self._last_idle_reason = "starting"
+        self._last_error = ""
         self._stop_event.clear()
         self._thread = threading.Thread(target=self._loop, daemon=True)
         self._thread.start()
@@ -106,6 +127,7 @@ class BackgroundConsciousness:
         if not self.is_running:
             return "Background consciousness is not running."
         self._running = False
+        self._last_idle_reason = "stopping"
         self._stop_event.set()
         self._wakeup_event.set()  # Unblock sleep
         try:
@@ -117,6 +139,7 @@ class BackgroundConsciousness:
     def pause(self) -> None:
         """Pause during task execution to avoid budget contention."""
         self._paused = True
+        self._last_idle_reason = "paused_by_active_task"
 
     def resume(self) -> None:
         """Resume after task completes. Flush any deferred events first."""
@@ -125,6 +148,7 @@ class BackgroundConsciousness:
                 self._event_queue.put(evt)
             self._deferred_events.clear()
         self._paused = False
+        self._last_idle_reason = "waking"
         self._wakeup_event.set()
 
     def inject_observation(self, text: str) -> None:
@@ -167,16 +191,27 @@ class BackgroundConsciousness:
 
             # Skip if paused (task running)
             if self._paused:
+                self._last_idle_reason = "paused_by_active_task"
                 continue
 
             # Budget check
             if not self._check_budget():
+                self._last_idle_reason = "budget_blocked"
                 self._next_wakeup_sec = self._wakeup_max
                 continue
 
             try:
+                self._last_cycle_started_at = utc_now_iso()
+                self._last_idle_reason = "thinking"
+                self._last_error = ""
                 self._think()
+                self._last_cycle_finished_at = utc_now_iso()
+                if not self._stop_event.is_set() and not self._paused:
+                    self._last_idle_reason = "sleeping"
             except Exception as e:
+                self._last_cycle_finished_at = utc_now_iso()
+                self._last_idle_reason = "error_backoff"
+                self._last_error = repr(e)
                 append_jsonl(self._drive_root / "logs" / "events.jsonl", {
                     "ts": utc_now_iso(),
                     "type": "consciousness_error",
@@ -186,6 +221,7 @@ class BackgroundConsciousness:
                 self._next_wakeup_sec = min(
                     self._next_wakeup_sec * 2, self._wakeup_max
                 )
+        self._last_idle_reason = "stopped"
 
     def _check_budget(self) -> bool:
         """Check if background consciousness is within its budget allocation."""
@@ -249,6 +285,7 @@ class BackgroundConsciousness:
 
                 # Budget check between rounds
                 if not self._check_budget():
+                    self._last_idle_reason = "budget_blocked"
                     append_jsonl(self._drive_root / "logs" / "events.jsonl", {
                         "ts": utc_now_iso(),
                         "type": "bg_budget_exceeded_mid_cycle",

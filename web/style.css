@@ -1199,6 +1199,18 @@ body {
     margin-bottom: 16px;
 }
 
+.dashboard-runtime-status {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-top: -4px;
+}
+
+.dashboard-runtime-note {
+    color: var(--text-secondary);
+    line-height: 1.5;
+}
+
 /* Toggle switch */
 .toggle-wrapper {
     display: flex;
@@ -1651,6 +1663,10 @@ body {
 }
 
 /* Evolution Page */
+.evo-refresh-btn {
+    min-width: 92px;
+}
+
 .evolution-container {
     display: flex;
     flex-direction: column;
@@ -1659,19 +1675,114 @@ body {
     height: calc(100vh - 120px);
     overflow-y: auto;
 }
+
+.evo-runtime-card,
+.evo-chart-wrap {
+    background:
+        linear-gradient(180deg, rgba(255, 255, 255, 0.05), rgba(255, 255, 255, 0.02)),
+        rgba(255, 255, 255, 0.02);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 16px;
+    box-shadow: 0 14px 36px rgba(0, 0, 0, 0.18);
+    backdrop-filter: blur(14px);
+}
+
+.evo-runtime-card {
+    padding: 16px 18px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.evo-runtime-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 14px;
+    flex-wrap: wrap;
+}
+
+.evo-runtime-detail {
+    color: var(--text-secondary);
+    line-height: 1.6;
+    max-width: 880px;
+}
+
+.evo-runtime-pills,
+.evo-runtime-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.evo-runtime-pill,
+.evo-runtime-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 10px;
+    border-radius: 999px;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    background: rgba(255, 255, 255, 0.04);
+    color: var(--text-secondary);
+    font-size: 12px;
+}
+
+.evo-runtime-pill.online {
+    color: var(--green);
+    border-color: rgba(34, 197, 94, 0.22);
+    background: rgba(34, 197, 94, 0.10);
+}
+
+.evo-runtime-pill.starting {
+    color: var(--amber);
+    border-color: rgba(245, 158, 11, 0.25);
+    background: rgba(245, 158, 11, 0.10);
+}
+
+.evo-runtime-pill.error {
+    color: var(--red);
+    border-color: rgba(239, 68, 68, 0.25);
+    background: rgba(239, 68, 68, 0.10);
+}
+
+.evo-runtime-chip strong {
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
 .evo-chart-wrap {
     position: relative;
     width: 100%;
     min-height: 400px;
     max-height: 50vh;
-    background: var(--card-bg);
-    border: 1px solid var(--border);
-    border-radius: 8px;
     padding: 16px;
 }
+
 .evo-tags-list {
     overflow-x: auto;
 }
+
 .evo-tags-list table {
     width: 100%;
+}
+
+.evo-empty {
+    padding: 18px;
+    border-radius: 14px;
+    border: 1px dashed rgba(255, 255, 255, 0.12);
+    background: rgba(255, 255, 255, 0.03);
+    color: var(--text-secondary);
+    line-height: 1.6;
+}
+
+@media (max-width: 900px) {
+    .evo-runtime-head {
+        flex-direction: column;
+    }
+
+    .evo-chart-wrap {
+        min-height: 320px;
+        max-height: none;
+    }
 }

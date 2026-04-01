@@ -35,7 +35,13 @@ def test_chat_progress_updates_route_into_live_card():
     assert "taskState.forceCard || taskState.toolCalls > 1 || shouldAlwaysShowTaskCard(taskState.taskId)" in source
     assert "function forceTaskCard(taskId)" in source
     assert "function markAssistantReply(taskId = '')" in source
-    assert "if (!getTaskUiState(msg.task_id || '', false)) continue;" in source
+    assert "function isTerminalTaskPhase(phase = '') {" in source
+    assert "taskState.completed = true;" in source
+    assert "scheduleTaskUiCleanup(taskState, 30000);" in source
+    assert "if (taskState.completed && !isTerminalTaskPhase(summary.phase || '')) {" in source
+    assert "if (record.finished && !isTerminalTaskPhase(nextPhase)) {" in source
+    assert "const taskState = getTaskUiState(msg.task_id || '', false);" in source
+    assert "if (!taskState || taskState.completed) continue;" in source
     assert "const wasFinished = record.finished;" in source
     assert "const justFinished = record.finished && !wasFinished;" in source
     assert "if (justFinished) {" in source
@@ -96,3 +102,4 @@ def test_chat_history_replays_task_summaries_into_live_cards():
     assert '"task_id": str(entry.get("task_id", ""))' in history_source
     assert "appendTaskSummaryToLiveCard(msg);" in chat_source
     assert "taskId: msg.task_id || ''" in chat_source
+    assert "if (role !== 'user' && !opts.isProgress && opts.taskId) {" in chat_source

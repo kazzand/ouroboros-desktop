@@ -83,7 +83,9 @@ def test_build_onboarding_html_contains_multistep_markers():
 
     assert "bootstrap.stepOrder || ['providers', 'models', 'review_mode', 'budget', 'summary']" in html
     assert "Add your access" in html
+    assert "Keys + local" in html
     assert "Choose models" in html
+    assert "4 model slots" in html
     assert "Choose review mode" in html
     assert "Set your budget" in html
     assert "Local model settings" in html
@@ -97,6 +99,8 @@ def test_build_onboarding_html_accepts_web_host_mode():
 
     assert '"hostMode": "web"' in html
     assert '"supportsLocalRuntimeControls": true' in html
+    assert "@media (max-width: 720px)" in html
+    assert "scroll-snap-type: x proximity;" in html
 
 
 def test_build_onboarding_html_adapts_to_multi_provider_access():

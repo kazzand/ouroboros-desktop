@@ -7,9 +7,23 @@ export function initEvolution({ ws, state }) {
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
             <h2>Evolution</h2>
             <div class="spacer"></div>
+            <button id="evo-refresh" class="btn btn-default evo-refresh-btn" type="button">Refresh</button>
             <span id="evo-status" class="status-badge">Loading...</span>
         </div>
         <div class="evolution-container">
+            <div class="evo-runtime-card">
+                <div class="evo-runtime-head">
+                    <div>
+                        <div class="section-title">Runtime Status</div>
+                        <div id="evo-runtime-detail" class="evo-runtime-detail">Loading evolution and consciousness state...</div>
+                    </div>
+                    <div class="evo-runtime-pills">
+                        <span id="evo-mode-pill" class="evo-runtime-pill">Evolution</span>
+                        <span id="evo-bg-pill" class="evo-runtime-pill">Consciousness</span>
+                    </div>
+                </div>
+                <div id="evo-runtime-meta" class="evo-runtime-meta"></div>
+            </div>
             <div class="evo-chart-wrap">
                 <canvas id="evo-chart"></canvas>
             </div>
@@ -19,6 +33,14 @@ export function initEvolution({ ws, state }) {
     document.getElementById('content').appendChild(page);
 
     let evoChart = null;
+    let loadSequence = 0;
+    const refreshBtn = document.getElementById('evo-refresh');
+    const statusBadge = document.getElementById('evo-status');
+    const runtimeDetail = document.getElementById('evo-runtime-detail');
+    const runtimeMeta = document.getElementById('evo-runtime-meta');
+    const evolutionPill = document.getElementById('evo-mode-pill');
+    const consciousnessPill = document.getElementById('evo-bg-pill');
+    const tagsList = document.getElementById('evo-tags-list');
 
     const COLORS = {
         code_lines: '#60a5fa',
@@ -37,26 +59,121 @@ export function initEvolution({ ws, state }) {
         memory_kb:  'Memory (KB)',
     };
 
-    async function loadEvolution() {
-        const badge = document.getElementById('evo-status');
+    function setBadge(kind, text) {
+        if (!statusBadge) return;
+        statusBadge.textContent = text;
+        statusBadge.className = `status-badge ${kind}`;
+    }
+
+    function formatTs(value) {
+        if (!value) return '';
+        const parsed = new Date(value);
+        if (Number.isNaN(parsed.getTime())) return '';
+        return parsed.toLocaleString([], {
+            year: 'numeric',
+            month: 'short',
+            day: 'numeric',
+            hour: '2-digit',
+            minute: '2-digit',
+        });
+    }
+
+    function pillTone(status) {
+        if (['running', 'queued', 'idle_ready'].includes(status)) return 'online';
+        if (['waiting_for_idle', 'waiting_for_owner_chat', 'paused', 'starting'].includes(status)) return 'starting';
+        if (['budget_blocked', 'budget_stopped', 'paused_failures', 'error_backoff'].includes(status)) return 'error';
+        return 'offline';
+    }
+
+    function shortStatusLabel(status, fallback = 'off') {
+        if (status === 'running') return 'running';
+        if (status === 'queued') return 'queued';
+        if (status === 'idle_ready') return 'idle';
+        if (status === 'waiting_for_idle') return 'waiting';
+        if (status === 'waiting_for_owner_chat') return 'needs owner';
+        if (status === 'paused' || status === 'paused_failures') return 'paused';
+        if (status === 'budget_blocked' || status === 'budget_stopped') return 'budget';
+        if (status === 'error_backoff') return 'retrying';
+        if (status === 'stopped') return 'stopped';
+        return fallback;
+    }
+
+    function runtimeChip(label, value) {
+        if (value === null || value === undefined || value === '') return '';
+        return `<span class="evo-runtime-chip"><strong>${label}:</strong> ${value}</span>`;
+    }
+
+    function renderRuntimeState(runtime = {}, generatedAt = '') {
+        const evolution = runtime.evolution_state || {};
+        const consciousness = runtime.bg_consciousness_state || {};
+        const evolutionStatus = evolution.status || (runtime.evolution_enabled ? 'idle_ready' : 'disabled');
+        const consciousnessStatus = consciousness.status || (runtime.bg_consciousness_enabled ? 'running' : 'disabled');
+
+        evolutionPill.className = `evo-runtime-pill ${pillTone(evolutionStatus)}`;
+        evolutionPill.textContent = `Evolution ${shortStatusLabel(evolutionStatus, 'off')}`;
+
+        consciousnessPill.className = `evo-runtime-pill ${pillTone(consciousnessStatus)}`;
+        consciousnessPill.textContent = `Consciousness ${shortStatusLabel(consciousnessStatus, 'off')}`;
+
+        const lines = [];
+        if (evolution.detail) lines.push(evolution.detail);
+        if (consciousness.detail) lines.push(`Consciousness: ${consciousness.detail}`);
+        runtimeDetail.textContent = lines.filter(Boolean).join(' ');
+
+        runtimeMeta.innerHTML = [
+            runtimeChip('Cycle', evolution.cycle || 0),
+            runtimeChip('Queue', `${evolution.pending_count || 0} pending / ${evolution.running_count || 0} running`),
+            runtimeChip('Failures', evolution.consecutive_failures || 0),
+            runtimeChip('Budget left', Number.isFinite(Number(evolution.budget_remaining_usd)) ? `$${Number(evolution.budget_remaining_usd).toFixed(2)}` : ''),
+            runtimeChip('Last evolution', formatTs(evolution.last_task_at)),
+            runtimeChip('Next wakeup', consciousness.next_wakeup_sec ? `${consciousness.next_wakeup_sec}s` : ''),
+            runtimeChip('Last background cycle', formatTs(consciousness.last_cycle_finished_at || consciousness.last_cycle_started_at)),
+            runtimeChip('Updated', formatTs(generatedAt)),
+        ].filter(Boolean).join('');
+    }
+
+    function renderEmptyState(message) {
+        if (evoChart) {
+            evoChart.destroy();
+            evoChart = null;
+        }
+        tagsList.innerHTML = `<div class="evo-empty">${message}</div>`;
+    }
+
+    async function loadEvolution(force = false) {
+        const requestId = ++loadSequence;
+        refreshBtn.disabled = true;
+        setBadge('starting', force ? 'Refreshing...' : 'Loading...');
         try {
-            const resp = await fetch('/api/evolution-data');
-            if (!resp.ok) throw new Error('API error ' + resp.status);
-            const data = await resp.json();
+            const suffix = force ? '?force=1' : '';
+            const [stateResp, evoResp] = await Promise.all([
+                fetch('/api/state', { cache: 'no-store' }),
+                fetch(`/api/evolution-data${suffix}`, { cache: 'no-store' }),
+            ]);
+            if (!stateResp.ok) throw new Error('State API error ' + stateResp.status);
+            if (!evoResp.ok) throw new Error('Evolution API error ' + evoResp.status);
+            const runtime = await stateResp.json();
+            const data = await evoResp.json();
+            if (requestId !== loadSequence) return;
+            renderRuntimeState(runtime, data.generated_at || '');
             const points = data.points || [];
             if (points.length === 0) {
-                badge.textContent = 'No data';
-                badge.className = 'status-badge offline';
+                renderEmptyState('No evolution tags yet. When evolution commits start landing, the chart will appear here.');
+                setBadge('offline', 'No data');
                 return;
             }
-            badge.textContent = points.length + ' tags';
-            badge.className = 'status-badge online';
+            setBadge('online', data.cached ? `${points.length} tags (cached)` : `${points.length} tags`);
             renderChart(points);
             renderTagsList(points);
         } catch (err) {
             console.error('Evolution load error:', err);
-            badge.textContent = 'Error';
-            badge.className = 'status-badge offline';
+            if (requestId !== loadSequence) return;
+            renderEmptyState('Failed to load evolution data. Use Refresh to try again.');
+            setBadge('error', 'Error');
+            runtimeDetail.textContent = 'Failed to load evolution state. Try Refresh or wait for the runtime to reconnect.';
+            runtimeMeta.innerHTML = '';
+        } finally {
+            if (requestId === loadSequence) refreshBtn.disabled = false;
         }
     }
 
@@ -147,7 +264,6 @@ export function initEvolution({ ws, state }) {
     }
 
     function renderTagsList(points) {
-        const container = document.getElementById('evo-tags-list');
         const rows = points.map(p => {
             const d = new Date(p.date);
             const dateStr = d.toLocaleDateString() + ' ' + d.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'});
@@ -162,7 +278,7 @@ export function initEvolution({ ws, state }) {
                 <td>${(p.memory_kb || 0).toFixed(1)}</td>
             </tr>`;
         }).reverse().join('');
-        container.innerHTML = `
+        tagsList.innerHTML = `
             <table class="cost-table">
                 <thead><tr>
                     <th>Tag</th><th>Date</th><th>Code Lines</th>
@@ -174,5 +290,25 @@ export function initEvolution({ ws, state }) {
         `;
     }
 
-    loadEvolution();
+    refreshBtn.addEventListener('click', () => {
+        loadEvolution(true);
+    });
+
+    ws.on('open', () => {
+        if (state.activePage === 'evolution') loadEvolution(true);
+    });
+
+    window.addEventListener('ouro:page-shown', (event) => {
+        if (event?.detail?.page === 'evolution') {
+            loadEvolution(true);
+        }
+    });
+
+    document.addEventListener('visibilitychange', () => {
+        if (!document.hidden && state.activePage === 'evolution') {
+            loadEvolution(true);
+        }
+    });
+
+    loadEvolution(true);
 }

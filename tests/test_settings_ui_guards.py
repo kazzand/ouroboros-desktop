@@ -40,7 +40,7 @@ class TestSettingsUiGuards(unittest.TestCase):
 
     def test_strange_settings_have_inline_explainer_copy(self):
         source = self._read_settings_sources()["settings_ui"]
-        self.assertIn("Adds a password wall only for non-localhost browser and API access.", source)
+        self.assertIn("Adds a password wall only for non-localhost app and API access.", source)
         self.assertIn("keeps review visible but flexible", source)
         self.assertIn("Backward-compatibility escape hatch for older installs.", source)
 

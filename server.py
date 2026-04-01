@@ -185,6 +185,47 @@ _supervisor_ready = threading.Event()
 _supervisor_error: Optional[str] = None
 _event_loop: Optional[asyncio.AbstractEventLoop] = None
 _supervisor_thread: Optional[threading.Thread] = None
+_consciousness: Any = None
+
+
+def _describe_bg_consciousness_state(requested_enabled: bool) -> dict:
+    snapshot = _consciousness.status_snapshot() if _consciousness else {}
+    running = bool(snapshot.get("running"))
+    paused = bool(snapshot.get("paused"))
+    next_wakeup_sec = int(snapshot.get("next_wakeup_sec") or 0)
+    idle_reason = str(snapshot.get("last_idle_reason") or "")
+    detail = "Background consciousness is off."
+    status = "disabled"
+
+    if requested_enabled and running and paused:
+        status = "paused"
+        detail = "Paused while another foreground task is active."
+    elif requested_enabled and running and idle_reason == "thinking":
+        status = "running"
+        detail = "Background consciousness is thinking now."
+    elif requested_enabled and running and idle_reason == "budget_blocked":
+        status = "budget_blocked"
+        detail = "Background consciousness hit its budget allocation and is waiting."
+    elif requested_enabled and running:
+        status = "running"
+        detail = (
+            f"Background consciousness is idle between wakeups."
+            + (f" Next wakeup in {next_wakeup_sec}s." if next_wakeup_sec > 0 else "")
+        )
+    elif requested_enabled:
+        status = "stopped"
+        detail = "Enabled in state, but the background thread is not running."
+
+    if idle_reason == "error_backoff" and snapshot.get("last_error"):
+        status = "error_backoff"
+        detail = f"Waiting to retry after an internal error: {snapshot['last_error']}"
+
+    return {
+        "enabled": requested_enabled,
+        "status": status,
+        "detail": detail,
+        **snapshot,
+    }
 
 
 def _start_supervisor_if_needed(settings: dict) -> bool:
@@ -331,7 +372,7 @@ def _process_bridge_updates(bridge, offset: int, ctx: Any) -> int:
 
 def _run_supervisor(settings: dict) -> None:
     """Initialize and run the supervisor loop. Called in a background thread."""
-    global _supervisor_error, _supervisor_thread
+    global _supervisor_error, _supervisor_thread, _consciousness
 
     _apply_settings_to_env(settings)
 
@@ -444,6 +485,7 @@ def _run_supervisor(settings: dict) -> None:
         )
     except Exception as exc:
         _supervisor_error = f"Supervisor init failed: {exc}"
+        _consciousness = None
         log.critical("Supervisor initialization failed", exc_info=True)
         _supervisor_ready.set()
         _supervisor_thread = None
@@ -642,6 +684,7 @@ async def api_state(request: Request) -> JSONResponse:
     try:
         from supervisor.state import load_state, budget_remaining, budget_pct, TOTAL_BUDGET_LIMIT
         from supervisor.workers import WORKERS, PENDING, RUNNING
+        from supervisor.queue import get_evolution_status_snapshot
         st = load_state()
         alive = 0
         total_w = 0
@@ -652,6 +695,9 @@ async def api_state(request: Request) -> JSONResponse:
             pass
         spent = float(st.get("spent_usd") or 0.0)
         limit = float(TOTAL_BUDGET_LIMIT or 10.0)
+        evolution_state = get_evolution_status_snapshot()
+        bg_requested = bool(st.get("bg_consciousness_enabled"))
+        bg_state = _describe_bg_consciousness_state(bg_requested)
         return JSONResponse({
             "uptime": int(time.time() - APP_START),
             "workers_alive": alive,
@@ -664,8 +710,10 @@ async def api_state(request: Request) -> JSONResponse:
             "branch": st.get("current_branch", "ouroboros"),
             "sha": (st.get("current_sha") or "")[:8],
             "evolution_enabled": bool(st.get("evolution_mode_enabled")),
-            "bg_consciousness_enabled": bool(st.get("bg_consciousness_enabled")),
+            "bg_consciousness_enabled": bg_requested,
             "evolution_cycle": int(st.get("evolution_cycle") or 0),
+            "evolution_state": evolution_state,
+            "bg_consciousness_state": bg_state,
             "spent_calls": int(st.get("spent_calls") or 0),
             "supervisor_ready": _supervisor_ready.is_set(),
             "supervisor_error": _supervisor_error,
@@ -821,14 +869,24 @@ async def api_evolution_data(request: Request) -> JSONResponse:
     import time as _t
 
     now = _t.time()
-    if _evo_cache.get("ts") and now - _evo_cache["ts"] < 60:
-        return JSONResponse({"points": _evo_cache["points"]})
+    force_refresh = str(request.query_params.get("force") or "").strip().lower() in {"1", "true", "yes"}
+    if not force_refresh and _evo_cache.get("ts") and now - _evo_cache["ts"] < 60:
+        return JSONResponse({
+            "points": _evo_cache["points"],
+            "generated_at": _evo_cache.get("generated_at", ""),
+            "cached": True,
+        })
 
     data_dir = os.environ.get("OUROBOROS_DATA_DIR", os.path.expanduser("~/Ouroboros/data"))
     data_points = await collect_evolution_metrics(str(REPO_DIR), data_dir=data_dir)
     _evo_cache["ts"] = now
     _evo_cache["points"] = data_points
-    return JSONResponse({"points": data_points})
+    _evo_cache["generated_at"] = datetime.now(timezone.utc).isoformat()
+    return JSONResponse({
+        "points": data_points,
+        "generated_at": _evo_cache["generated_at"],
+        "cached": False,
+    })
 
 
 from ouroboros.local_model_api import (

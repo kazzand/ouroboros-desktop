@@ -104,6 +104,8 @@ def test_telegram_bridge_routes_web_messages_replies_actions_and_photos(monkeypa
         "TELEGRAM_CHAT_ID": "555",
     })
 
+    broadcasts = []
+    bridge._broadcast_fn = broadcasts.append
     sent_text = []
     sent_actions = []
     sent_photos = []
@@ -131,10 +133,11 @@ def test_telegram_bridge_routes_web_messages_replies_actions_and_photos(monkeypa
     assert sent_text[0][1] == 555
     assert sent_text[0][0].startswith("WebUI (session-")
 
-    bridge.send_message(555, "assistant reply")
+    bridge.send_message(555, "assistant reply", task_id="task-42")
     bridge.send_chat_action(555, "typing")
     bridge.send_photo(555, b"img", caption="caption")
 
     assert sent_text[1] == ("assistant reply", 555)
+    assert broadcasts[1]["task_id"] == "task-42"
     assert sent_actions == [("typing", 555)]
     assert sent_photos == [(b"img", "caption", "image/png", 555)]
