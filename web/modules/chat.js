@@ -90,6 +90,7 @@ export function initChat({ ws, state, updateUnreadBadge }) {
     const taskUiStates = new Map();
     let activeLiveGroupId = '';
     let historySyncTimer = null;
+    let pendingReconnectBannerText = readPendingReconnectBanner();
 
     function buildMessageKey(role, text, timestamp, opts = {}) {
         if (opts.clientMessageId) return `client|${opts.clientMessageId}`;
@@ -115,6 +116,31 @@ export function initChat({ ws, state, updateUnreadBadge }) {
             timestamp,
             text,
         ].join('|');
+    }
+
+    function reconnectBannerText(reason = '') {
+        if (reason === 'sha-change') return '♻️ Restart complete';
+        if (reason) return '♻️ Reconnected';
+        return '';
+    }
+
+    function readPendingReconnectBanner() {
+        try {
+            const url = new URL(window.location.href);
+            return reconnectBannerText(url.searchParams.get('_ouro_reason') || '');
+        } catch {
+            return '';
+        }
+    }
+
+    function clearPendingReconnectBanner() {
+        try {
+            const url = new URL(window.location.href);
+            if (!url.searchParams.has('_ouro_reason') && !url.searchParams.has('_ouro_refresh')) return;
+            url.searchParams.delete('_ouro_reason');
+            url.searchParams.delete('_ouro_refresh');
+            window.history.replaceState({}, '', url);
+        } catch {}
     }
 
     function rememberMessageKey(key) {
@@ -386,9 +412,20 @@ export function initChat({ ws, state, updateUnreadBadge }) {
             finished: false,
             items: [],
             lastHumanHeadline: '',
+            expandedLineKeys: new Set(),
         };
         record.summaryButtonEl?.addEventListener('click', () => {
             setLiveCardExpanded(record, record.root.dataset.expanded !== '1');
+        });
+        record.timelineEl?.addEventListener('click', (event) => {
+            const button = event.target.closest('[data-live-line-toggle]');
+            if (!button) return;
+            const lineKey = button.dataset.liveLineToggle || '';
+            if (!lineKey) return;
+            if (record.expandedLineKeys.has(lineKey)) record.expandedLineKeys.delete(lineKey);
+            else record.expandedLineKeys.add(lineKey);
+            renderLiveCardTimeline(record);
+            syncLiveCardLayout(record);
         });
         liveCardRecords.set(normalizedGroupId, record);
         resetLiveCardRecord(record);
@@ -405,6 +442,7 @@ export function initChat({ ws, state, updateUnreadBadge }) {
         record.finished = false;
         record.items = [];
         record.lastHumanHeadline = '';
+        record.expandedLineKeys.clear();
         record.titleEl.textContent = 'Working...';
         record.phaseEl.dataset.phase = 'working';
         record.phaseEl.textContent = 'Working';
@@ -440,6 +478,13 @@ export function initChat({ ws, state, updateUnreadBadge }) {
         }
     }
 
+    function isLiveLineExpandable(item) {
+        return Boolean(
+            (item.fullHeadline && item.fullHeadline !== item.headline)
+            || (item.fullBody && item.fullBody !== item.body)
+        );
+    }
+
     function syncLiveCardToggle(record) {
         if (!record?.toggleEl) return;
         record.toggleEl.textContent = record.root.dataset.expanded === '1' ? 'Hide details' : 'Show details';
@@ -456,16 +501,40 @@ export function initChat({ ws, state, updateUnreadBadge }) {
     }
 
     function renderLiveCardTimeline(record) {
-        record.timelineEl.innerHTML = record.items.map((item) => `
-            <div class="chat-live-line ${item.phase || 'working'}">
-                <div class="chat-live-line-head">
-                    <span class="chat-live-line-title">${escapeHtml(item.headline)}</span>
-                    <span class="chat-live-line-repeat" ${item.count > 1 ? '' : 'hidden'}>${item.count > 1 ? `${item.count}x` : ''}</span>
-                    ${item.ts ? `<span class="chat-live-line-time">${escapeHtml(item.ts)}</span>` : ''}
+        record.timelineEl.innerHTML = record.items.map((item) => {
+            const expandable = isLiveLineExpandable(item);
+            const expanded = expandable && record.expandedLineKeys.has(item.lineKey);
+            const displayHeadline = expanded && item.fullHeadline ? item.fullHeadline : item.headline;
+            const displayBody = expanded && item.fullBody ? item.fullBody : item.body;
+            const headContent = `
+                <span class="chat-live-line-title">${escapeHtml(displayHeadline)}</span>
+                <span class="chat-live-line-repeat" ${item.count > 1 ? '' : 'hidden'}>${item.count > 1 ? `${item.count}x` : ''}</span>
+                ${item.ts ? `<span class="chat-live-line-time">${escapeHtml(item.ts)}</span>` : ''}
+            `;
+            const headHtml = expandable
+                ? `
+                    <button
+                        type="button"
+                        class="chat-live-line-toggle"
+                        data-live-line-toggle="${escapeHtml(item.lineKey)}"
+                        aria-expanded="${expanded ? 'true' : 'false'}"
+                    >
+                        <span class="chat-live-line-head">${headContent}</span>
+                        <span class="chat-live-line-expand-label">${expanded ? 'Collapse' : 'Expand'}</span>
+                    </button>
+                `
+                : `<div class="chat-live-line-head">${headContent}</div>`;
+            return `
+                <div
+                    class="chat-live-line ${item.phase || 'working'}${expandable ? ' expandable' : ''}"
+                    data-live-line-key="${escapeHtml(item.lineKey || '')}"
+                    data-expanded="${expanded ? '1' : '0'}"
+                >
+                    ${headHtml}
+                    ${displayBody ? `<div class="chat-live-line-body">${escapeHtml(displayBody)}</div>` : ''}
                 </div>
-                ${item.body ? `<div class="chat-live-line-body">${escapeHtml(item.body)}</div>` : ''}
-            </div>
-        `).join('');
+            `;
+        }).join('');
     }
 
     function scheduleHistorySync() {
@@ -518,16 +587,25 @@ export function initChat({ ws, state, updateUnreadBadge }) {
             if (last && last.dedupeKey === syntheticKey) {
                 last.count += 1;
                 last.ts = ts || last.ts;
+                last.fullHeadline = summary.fullHeadline || last.fullHeadline || last.headline;
+                last.fullBody = summary.fullBody || last.fullBody || last.body;
             } else {
+                const lineKey = `line-${Date.now()}-${Math.random().toString(16).slice(2)}`;
                 record.items.push({
                     phase: summary.phase || 'working',
                     headline: headline || 'Update',
+                    fullHeadline: summary.fullHeadline || headline || 'Update',
                     body: summary.body || '',
+                    fullBody: summary.fullBody || summary.body || '',
                     ts: ts || '',
                     count: 1,
                     dedupeKey: syntheticKey,
+                    lineKey,
                 });
-                if (record.items.length > 20) record.items.shift();
+                if (record.items.length > 20) {
+                    const removed = record.items.shift();
+                    if (removed?.lineKey) record.expandedLineKeys.delete(removed.lineKey);
+                }
             }
         }
         record.countEl.hidden = record.items.length < 2;
@@ -1024,15 +1102,26 @@ export function initChat({ ws, state, updateUnreadBadge }) {
     ws.on('open', () => {
         setStatus('online', 'Online');
         refreshHeaderControlState(true);
-        if (wsHasConnectedOnce) {
-            addMessage('♻️ Reconnected', 'system', false, null, false, { ephemeral: true, systemType: 'reconnect' });
-        }
+        const reconnectBanner =
+            pendingReconnectBannerText
+            || (wsHasConnectedOnce ? '♻️ Reconnected' : '');
+        const shouldClearReconnectParams = Boolean(pendingReconnectBannerText);
+        pendingReconnectBannerText = '';
         wsHasConnectedOnce = true;
         syncHistory({ includeUser: !historyLoaded })
             .then((hasMessages) => {
                 if (!hasMessages) ensureWelcomeMessage();
+                if (reconnectBanner) {
+                    addMessage(reconnectBanner, 'system', false, null, false, { ephemeral: true, systemType: 'reconnect' });
+                    if (shouldClearReconnectParams) clearPendingReconnectBanner();
+                }
             })
-            .catch(() => {});
+            .catch(() => {
+                if (reconnectBanner) {
+                    addMessage(reconnectBanner, 'system', false, null, false, { ephemeral: true, systemType: 'reconnect' });
+                    if (shouldClearReconnectParams) clearPendingReconnectBanner();
+                }
+            });
     });
 
     ws.on('close', () => {

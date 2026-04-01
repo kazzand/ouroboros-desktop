@@ -37,6 +37,15 @@ function shortText(text, maxLen = 180) {
     return s.length > maxLen ? s.slice(0, maxLen - 3) + '...' : s;
 }
 
+function describeText(text, maxLen = 180) {
+    const full = String(text || '').replace(/\s+/g, ' ').trim();
+    if (!full) return { preview: '', full: '' };
+    return {
+        preview: full.length > maxLen ? full.slice(0, maxLen - 3) + '...' : full,
+        full,
+    };
+}
+
 export function formatLogMoney(value) {
     const num = Number(value);
     if (!Number.isFinite(num) || num <= 0) return '';
@@ -389,17 +398,18 @@ export function summarizeLogEvent(evt) {
 
 export function summarizeChatLiveEvent(evt) {
     const t = evt.type || evt.event || 'unknown';
-    const progressText = shortText(String(evt.content || evt.text || '').replace(/^💬\s*/, ''), 240);
+    const progressText = describeText(String(evt.content || evt.text || '').replace(/^💬\s*/, ''), 240);
 
     if (evt.is_progress || t === 'send_message') {
         return {
             phase: evt.task_id === 'bg-consciousness' ? 'thinking' : 'working',
-            headline: progressText || 'Working...',
+            headline: progressText.preview || 'Working...',
+            fullHeadline: progressText.full || '',
             body: '',
-            visible: Boolean(progressText),
+            visible: Boolean(progressText.preview),
             promote: true,
             human: true,
-            dedupeKey: progressText ? `progress:${progressText}` : `progress:${evt.task_id || ''}`,
+            dedupeKey: progressText.full ? `progress:${progressText.full}` : `progress:${evt.task_id || ''}`,
         };
     }
 
@@ -476,10 +486,12 @@ export function summarizeChatLiveEvent(evt) {
     }
 
     if (t === 'llm_round_error' || t === 'llm_api_error') {
+        const errorText = describeText(evt.error, 220);
         return {
             phase: 'error',
             headline: 'Ran into an issue while thinking',
-            body: shortText(evt.error, 220),
+            body: errorText.preview,
+            fullBody: errorText.full,
             visible: true,
             promote: true,
             human: false,
@@ -500,10 +512,12 @@ export function summarizeChatLiveEvent(evt) {
     }
 
     if (t === 'tool_call_finished' && evt.is_error) {
+        const errorResult = describeText(evt.result_preview || evt.error, 220);
         return {
             phase: 'error',
             headline: 'One of the steps failed',
-            body: shortText(evt.result_preview || evt.error, 220),
+            body: errorResult.preview,
+            fullBody: errorResult.full,
             visible: true,
             promote: true,
             human: false,
@@ -524,10 +538,12 @@ export function summarizeChatLiveEvent(evt) {
     }
 
     if (t.includes('error') || t.includes('crash') || t.includes('fail')) {
+        const genericError = describeText(evt.error || evt.result_preview || evt.text || '', 220);
         return {
             phase: 'error',
             headline: 'Ran into an issue',
-            body: shortText(evt.error || evt.result_preview || evt.text || '', 220),
+            body: genericError.preview,
+            fullBody: genericError.full,
             visible: true,
             promote: true,
             human: false,

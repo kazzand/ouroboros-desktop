@@ -944,12 +944,12 @@ body {
 }
 
 .chat-live-title {
-    font-size: 15px;
+    font-size: 13px;
     font-weight: 400;
-    color: var(--text-primary);
+    color: rgba(226, 232, 240, 0.68);
     flex: 1;
     min-width: 0;
-    line-height: 1.5;
+    line-height: 1.45;
     white-space: pre-wrap;
 }
 
@@ -1004,7 +1004,7 @@ body {
     padding-top: 10px;
     display: flex;
     flex-direction: column;
-    gap: 4px;
+    gap: 6px;
 }
 
 .chat-live-line:first-child {
@@ -1012,18 +1012,47 @@ body {
     padding-top: 0;
 }
 
+.chat-live-line.expandable {
+    border-radius: 12px;
+    transition: background 0.18s ease;
+}
+
+.chat-live-line.expandable:hover {
+    background: rgba(255,255,255,0.02);
+}
+
+.chat-live-line.expandable[data-expanded="1"] {
+    background: rgba(59, 130, 246, 0.08);
+}
+
+.chat-live-line-toggle {
+    width: 100%;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: inherit;
+    cursor: pointer;
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+    text-align: left;
+}
+
 .chat-live-line-head {
     display: flex;
     align-items: center;
     gap: 8px;
     flex-wrap: wrap;
+    flex: 1;
+    min-width: 0;
 }
 
 .chat-live-line-title {
-    color: var(--text-primary);
-    font-size: 15px;
+    color: rgba(226, 232, 240, 0.72);
+    font-size: 13px;
     font-weight: 400;
-    line-height: 1.5;
+    line-height: 1.45;
     white-space: pre-wrap;
 }
 
@@ -1038,12 +1067,28 @@ body {
     font-size: 11px;
 }
 
+.chat-live-line-expand-label {
+    color: var(--text-secondary);
+    font-size: 11px;
+    white-space: nowrap;
+    flex-shrink: 0;
+    padding-top: 1px;
+}
+
 .chat-live-line-body {
-    color: var(--text-primary);
+    color: rgba(226, 232, 240, 0.64);
     white-space: pre-wrap;
     word-break: break-word;
-    font-size: 15px;
+    font-size: 13px;
     line-height: 1.5;
+}
+
+.chat-live-line[data-expanded="1"] .chat-live-line-title {
+    color: rgba(239, 246, 255, 0.9);
+}
+
+.chat-live-line[data-expanded="1"] .chat-live-line-body {
+    color: rgba(239, 246, 255, 0.82);
 }
 
 .chat-live-line.error .chat-live-line-title,

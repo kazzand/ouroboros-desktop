@@ -119,11 +119,14 @@ def test_find_free_port_falls_back_when_stuck():
         blocker.close()
 
 
-def test_chat_shows_reconnect_banner_only_after_first_connection():
-    """chat.js should track first-open state and show reconnect banner only on re-open."""
+def test_chat_shows_reconnect_banner_after_reconnect_and_reload():
+    """chat.js should show reconnect status after both soft reconnect and restart reload."""
     source = _read("web/modules/chat.js")
     assert "wsHasConnectedOnce" in source, "Missing reconnect-once tracking flag"
     assert "Reconnected" in source, "Missing reconnect banner text"
+    assert "Restart complete" in source, "Missing restart-complete banner text"
+    assert "_ouro_reason" in source, "Missing restart reload reason handling"
+    assert "history.replaceState" in source, "Reconnect params should be cleared after showing banner"
     # Ensure banner is ephemeral (not persisted to history)
     assert "ephemeral: true" in source
 
@@ -133,6 +136,32 @@ def test_progress_bubbles_have_subdued_styling():
     css = _read("web/style.css")
     assert ".chat-bubble.progress .message" in css, "Missing progress-specific message style"
     assert "font-size: 13px" in css, "Progress font should be smaller than default 15.5px"
+
+
+def test_working_live_cards_are_subdued_and_expandable():
+    """Visible working/thinking cards should stay compact but support expanding per block."""
+    css = _read("web/style.css")
+    assert ".chat-live-title" in css, "Missing live-card title styling"
+    assert ".chat-live-line-toggle" in css, "Missing clickable live-line toggle"
+    assert ".chat-live-line-expand-label" in css, "Missing expand/collapse label"
+    assert '.chat-live-line[data-expanded="1"] .chat-live-line-body' in css
+
+
+def test_live_card_blocks_can_expand_to_full_text():
+    """chat.js should preserve expansion state and render per-block toggles."""
+    source = _read("web/modules/chat.js")
+    assert "expandedLineKeys" in source, "Missing per-line expansion state"
+    assert "data-live-line-toggle" in source, "Missing per-block toggle markup"
+    assert "fullHeadline" in source, "Missing full headline preservation"
+    assert "fullBody" in source, "Missing full body preservation"
+
+
+def test_live_event_summaries_preserve_full_text_for_expansion():
+    """log event summaries should keep full text so expanded live blocks can reveal it."""
+    source = _read("web/modules/log_events.js")
+    assert "describeText" in source
+    assert "fullHeadline" in source
+    assert "fullBody" in source
 
 
 def test_restart_watchdog_waits_for_uvicorn_exit():
