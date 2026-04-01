@@ -59,6 +59,21 @@ class TestReflectionTrigger:
         assert should_generate_reflection({"tool_calls": []}) is False
         assert should_generate_reflection({}) is False
 
+    def test_structured_non_zero_exit_triggers_reflection(self):
+        from ouroboros.reflection import should_generate_reflection
+        trace = {"tool_calls": [
+            {
+                "tool": "run_shell",
+                "args": {},
+                "result": "exit_code=-9",
+                "is_error": False,
+                "status": "non_zero_exit",
+                "exit_code": -9,
+                "signal": "SIGKILL",
+            },
+        ]}
+        assert should_generate_reflection(trace) is True
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Helper functions
@@ -112,6 +127,22 @@ class TestHelperFunctions:
         details = _collect_error_details(trace)
         assert "repo_read" not in details
         assert "run_shell" in details
+
+    def test_collect_error_details_includes_structured_status(self):
+        from ouroboros.reflection import _collect_error_details
+        trace = {"tool_calls": [
+            {
+                "tool": "run_shell",
+                "is_error": True,
+                "status": "non_zero_exit",
+                "exit_code": -9,
+                "signal": "SIGKILL",
+                "result": "⚠️ SHELL_EXIT_ERROR: command exited with exit_code=-9 (signal=SIGKILL).",
+            },
+        ]}
+        details = _collect_error_details(trace)
+        assert "status=non_zero_exit" in details
+        assert "signal=SIGKILL" in details
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -28,6 +28,12 @@ _ERROR_MARKERS = frozenset({
     "REVIEW_MAX_ITERATIONS",
     "TOOL_ERROR",
     "TOOL_TIMEOUT",
+    "SHELL_EXIT_ERROR",
+    "SHELL_ERROR",
+    "CLAUDE_CODE_ERROR",
+    "CLAUDE_CODE_TIMEOUT",
+    "CLAUDE_CODE_INSTALL_ERROR",
+    "CLAUDE_CODE_UNAVAILABLE",
 })
 
 REFLECTIONS_FILENAME = "task_reflections.jsonl"
@@ -70,7 +76,7 @@ def should_generate_reflection(llm_trace: Dict[str, Any]) -> bool:
     for tc in tool_calls:
         if not isinstance(tc, dict):
             continue
-        if tc.get("is_error"):
+        if _tool_call_is_failure(tc):
             return True
         result_str = str(tc.get("result", ""))
         for marker in _ERROR_MARKERS:
@@ -78,6 +84,14 @@ def should_generate_reflection(llm_trace: Dict[str, Any]) -> bool:
                 return True
 
     return False
+
+
+def _tool_call_is_failure(tc: Dict[str, Any]) -> bool:
+    """Return True when structured tool facts indicate a failed outcome."""
+    if tc.get("is_error"):
+        return True
+    status = str(tc.get("status") or "").strip().lower()
+    return status not in {"", "ok"}
 
 
 def _collect_error_details(llm_trace: Dict[str, Any], cap: int = 3000) -> str:
@@ -90,11 +104,20 @@ def _collect_error_details(llm_trace: Dict[str, Any], cap: int = 3000) -> str:
         if not isinstance(tc, dict):
             continue
         result_str = str(tc.get("result", ""))
-        is_relevant = tc.get("is_error") or any(m in result_str for m in _ERROR_MARKERS)
+        is_relevant = _tool_call_is_failure(tc) or any(m in result_str for m in _ERROR_MARKERS)
         if not is_relevant:
             continue
         tool_name = tc.get("tool", "unknown")
-        snippet = f"[{tool_name}]: {result_str}"
+        facts = []
+        status = str(tc.get("status") or "").strip()
+        if status:
+            facts.append(f"status={status}")
+        if tc.get("exit_code") not in (None, ""):
+            facts.append(f"exit_code={tc.get('exit_code')}")
+        if tc.get("signal"):
+            facts.append(f"signal={tc.get('signal')}")
+        fact_prefix = f" ({', '.join(facts)})" if facts else ""
+        snippet = f"[{tool_name}{fact_prefix}]: {result_str}"
         if total + len(snippet) > cap:
             remaining = cap - total
             if remaining > 50:
@@ -135,7 +158,7 @@ def generate_reflection(
     markers = _detect_markers(llm_trace)
     error_count = sum(
         1 for tc in (llm_trace.get("tool_calls") or [])
-        if isinstance(tc, dict) and tc.get("is_error")
+        if isinstance(tc, dict) and _tool_call_is_failure(tc)
     )
 
     prompt = _REFLECTION_PROMPT.format(

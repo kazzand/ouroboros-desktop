@@ -1,4 +1,4 @@
-"""Control tools: restart, promote, schedule, cancel, review, chat_history, update_scratchpad, switch_model."""
+"""Control tools: restart, timeout settings, scheduling, review, chat history, model switching."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict, List
 
+from ouroboros.config import apply_settings_to_env, load_settings, save_settings
 from ouroboros.task_results import (
     STATUS_CANCELLED,
     STATUS_COMPLETED,
@@ -42,9 +43,25 @@ def _request_restart(ctx: ToolContext, reason: str) -> str:
     except Exception:
         log.debug("Failed to read VERSION file or git ref for restart verification", exc_info=True)
         pass
-    ctx.pending_events.append({"type": "restart_request", "reason": reason, "ts": utc_now_iso()})
+    ctx.pending_restart_reason = str(reason or "").strip() or "agent_requested_restart"
     ctx.last_push_succeeded = False
     return f"Restart requested: {reason}"
+
+
+def _set_tool_timeout(ctx: ToolContext, seconds: int) -> str:
+    """Persist and hot-apply the global tool timeout."""
+    try:
+        timeout_sec = int(seconds)
+    except (TypeError, ValueError):
+        return f"⚠️ TOOL_ARG_ERROR (set_tool_timeout): invalid seconds={seconds!r}"
+    if timeout_sec < 1:
+        return "⚠️ TOOL_ARG_ERROR (set_tool_timeout): seconds must be >= 1"
+
+    settings = load_settings()
+    settings["OUROBOROS_TOOL_TIMEOUT_SEC"] = timeout_sec
+    save_settings(settings)
+    apply_settings_to_env(settings)
+    return f"OK: OUROBOROS_TOOL_TIMEOUT_SEC set to {timeout_sec}s and applied immediately."
 
 
 def _promote_to_stable(ctx: ToolContext, reason: str) -> str:
@@ -279,6 +296,13 @@ def _wait_for_task(ctx: ToolContext, task_id: str) -> str:
 
 def get_tools() -> List[ToolEntry]:
     return [
+        ToolEntry("set_tool_timeout", {
+            "name": "set_tool_timeout",
+            "description": "Update the global tool timeout in settings.json and apply it immediately without restart.",
+            "parameters": {"type": "object", "properties": {
+                "seconds": {"type": "integer", "description": "New timeout in seconds (>= 1)"},
+            }, "required": ["seconds"]},
+        }, _set_tool_timeout),
         ToolEntry("request_restart", {
             "name": "request_restart",
             "description": "Ask supervisor to restart runtime (after successful push).",

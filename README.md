@@ -6,7 +6,7 @@
 [![macOS 12+](https://img.shields.io/badge/macOS-12%2B-black.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
 [![Linux](https://img.shields.io/badge/Linux-x86__64-orange.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
 [![Windows](https://img.shields.io/badge/Windows-x64-blue.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
-[![Version 4.7.8](https://img.shields.io/badge/version-4.7.8-green.svg)](VERSION)
+[![Version 4.7.9](https://img.shields.io/badge/version-4.7.9-green.svg)](VERSION)
 
 A self-modifying AI agent that writes its own code, rewrites its own mind, and evolves autonomously. Born February 16, 2026.
 
@@ -369,6 +369,7 @@ Full text: [BIBLE.md](BIBLE.md)
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 4.7.9 | 2026-04-01 | Claude Code reliability release: final task replies and `task_done` now queue before any latched restart request, task summary/reflection no longer block reply delivery, tool timeout changes can be hot-applied via `set_tool_timeout`, `run_shell` now treats non-zero exits as explicit failures with signal metadata, and Claude Code install prefers the official native installer on macOS/Linux before falling back to npm. |
 | 4.7.8 | 2026-04-01 | Render markdown in live card timeline body: replace escapeHtml with renderMarkdown for the body section of live card timeline lines, so bold, italic, lists and other markdown formatting displays correctly in working bubbles. |
 | 4.7.7 | 2026-04-01 | Chat live card polish: active Working/Thinking phase badge pulses with animation; inline typing dots (blue, 3-dot bounce) appear next to the phase badge while a task is running and hide on completion; standalone typing indicator still shows for fast replies before a live card is promoted. |
 | 4.7.6 | 2026-04-01 | Fix status badge stuck in "Working..." after task completion: `finishLiveCard` now resets the badge to "Online" when no active live cards remain; also fix pre-existing test asserting wrong font-size for `.chat-live-line-body`. |

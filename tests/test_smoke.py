@@ -2,7 +2,7 @@
 
 Tests core invariants:
 - All modules import cleanly
-- Tool registry discovers all 48 tools
+- Tool registry discovers all expected tools
 - Utility functions work correctly
 - Memory operations don't crash
 - Context builder produces valid structure
@@ -89,11 +89,11 @@ EXPECTED_TOOLS = [
     "data_read", "data_write", "data_list",
     "git_status", "git_diff",
     "pull_from_remote", "restore_to_head", "revert_commit",
-    "run_shell", "claude_code_edit",
+    "run_shell", "ensure_claude_cli", "claude_code_edit",
     "browse_page", "browser_action",
     "web_search",
     "chat_history", "update_scratchpad", "update_identity",
-    "request_restart", "promote_to_stable", "request_review",
+    "set_tool_timeout", "request_restart", "promote_to_stable", "request_review",
     "schedule_task", "cancel_task",
     "switch_model", "toggle_evolution", "toggle_consciousness",
     "send_user_message", "send_photo",

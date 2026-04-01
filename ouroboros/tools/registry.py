@@ -117,6 +117,7 @@ class ToolContext:
     pending_events: List[Dict[str, Any]] = field(default_factory=list)
     current_chat_id: Optional[int] = None
     current_task_type: Optional[str] = None
+    pending_restart_reason: Optional[str] = None
     last_push_succeeded: bool = False
     emit_progress_fn: Callable[[str], None] = field(default=lambda _: None)
 
@@ -181,9 +182,11 @@ CORE_TOOL_NAMES = {
     "repo_read", "repo_list", "repo_write", "repo_write_commit", "repo_commit",
     "data_read", "data_list", "data_write",
     "run_shell", "claude_code_edit",
+    "ensure_claude_cli",
     "git_status", "git_diff",
     "pull_from_remote", "restore_to_head", "revert_commit",
     "schedule_task", "wait_for_task", "get_task_result",
+    "set_tool_timeout",
     "update_scratchpad", "update_identity",
     "chat_history", "web_search",
     "send_user_message", "switch_model",

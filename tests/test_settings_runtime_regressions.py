@@ -1,6 +1,7 @@
 import asyncio
 import importlib
 import json
+import os
 import pathlib
 import sys
 
@@ -183,3 +184,33 @@ def test_launcher_marks_server_as_managed():
     launcher_source = (pathlib.Path(__file__).resolve().parents[1] / "launcher.py").read_text(encoding="utf-8")
 
     assert 'env["OUROBOROS_MANAGED_BY_LAUNCHER"] = "1"' in launcher_source
+
+
+def test_set_tool_timeout_persists_and_applies_immediately(monkeypatch, tmp_path):
+    config_module, settings_path = _reload_config(monkeypatch, tmp_path)
+    import ouroboros.tools.control as control_module
+
+    control_module = importlib.reload(control_module)
+    result = control_module._set_tool_timeout(object(), 777)
+
+    assert "777s" in result
+    saved = json.loads(settings_path.read_text(encoding="utf-8"))
+    assert saved["OUROBOROS_TOOL_TIMEOUT_SEC"] == 777
+    assert os.environ["OUROBOROS_TOOL_TIMEOUT_SEC"] == "777"
+    assert config_module.load_settings()["OUROBOROS_TOOL_TIMEOUT_SEC"] == 777
+
+
+def test_get_tool_timeout_prefers_settings_file_over_stale_env(monkeypatch, tmp_path):
+    _config_module, settings_path = _reload_config(monkeypatch, tmp_path)
+    settings_path.write_text(json.dumps({"OUROBOROS_TOOL_TIMEOUT_SEC": 888}), encoding="utf-8")
+    monkeypatch.setenv("OUROBOROS_TOOL_TIMEOUT_SEC", "120")
+
+    import ouroboros.loop_tool_execution as loop_tool_execution_module
+
+    loop_tool_execution_module = importlib.reload(loop_tool_execution_module)
+
+    class _Tools:
+        def get_timeout(self, name):
+            return 360
+
+    assert loop_tool_execution_module._get_tool_timeout(_Tools(), "run_shell") == 888

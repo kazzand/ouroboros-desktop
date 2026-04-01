@@ -1,4 +1,5 @@
 import json
+from types import SimpleNamespace
 
 import ouroboros.agent_task_pipeline as pipeline
 
@@ -49,3 +50,61 @@ def test_task_summary_keeps_openrouter_model_when_key_present(monkeypatch):
         pipeline._resolve_task_summary_model("google/gemini-3-flash-preview")
         == "google/gemini-3-flash-preview"
     )
+
+
+def test_emit_task_results_queues_restart_after_final_events(tmp_path, monkeypatch):
+    monkeypatch.setattr(pipeline, "_store_task_result", lambda *args, **kwargs: None)
+    monkeypatch.setattr(pipeline, "_run_chat_consolidation", lambda *args, **kwargs: None)
+    monkeypatch.setattr(pipeline, "_run_scratchpad_consolidation", lambda *args, **kwargs: None)
+    monkeypatch.setattr(pipeline, "_run_post_task_processing_async", lambda *args, **kwargs: None)
+
+    pending_events = []
+    ctx = SimpleNamespace(pending_restart_reason="apply timeout fix")
+    env = SimpleNamespace(drive_root=tmp_path)
+    drive_logs = tmp_path / "logs"
+    drive_logs.mkdir(parents=True)
+
+    pipeline.emit_task_results(
+        env=env,
+        memory=object(),
+        llm=object(),
+        pending_events=pending_events,
+        task={"id": "task-1", "type": "task", "chat_id": 1, "text": "do it"},
+        text="All done",
+        usage={"rounds": 2, "cost": 0.2},
+        llm_trace={"tool_calls": [], "reasoning_notes": []},
+        start_time=0.0,
+        drive_logs=drive_logs,
+        ctx=ctx,
+    )
+
+    assert [evt["type"] for evt in pending_events] == [
+        "send_message",
+        "task_metrics",
+        "task_done",
+        "restart_request",
+    ]
+    assert pending_events[-1]["reason"] == "apply timeout fix"
+    assert ctx.pending_restart_reason is None
+
+
+def test_build_trace_summary_shows_structured_failure_facts():
+    trace = {
+        "tool_calls": [{
+            "tool": "run_shell",
+            "args": {"cmd": ["npm", "install", "-g", "@anthropic-ai/claude-code"]},
+            "result": "⚠️ SHELL_EXIT_ERROR: command exited with exit_code=-9 (signal=SIGKILL).",
+            "is_error": True,
+            "status": "non_zero_exit",
+            "exit_code": -9,
+            "signal": "SIGKILL",
+        }],
+        "reasoning_notes": ["Thought this might still work."],
+    }
+
+    summary = pipeline.build_trace_summary(trace)
+
+    assert "status=non_zero_exit" in summary
+    assert "exit_code=-9" in summary
+    assert "signal=SIGKILL" in summary
+    assert "Agent notes (supplementary, not source of truth)" in summary

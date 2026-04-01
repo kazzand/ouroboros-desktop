@@ -323,6 +323,7 @@ class OuroborosAgent:
                 self.env, self.memory, self.llm,
                 self._pending_events, task, text,
                 usage, llm_trace, start_time, drive_logs,
+                ctx=ctx,
             )
             return list(self._pending_events)
 

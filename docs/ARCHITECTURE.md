@@ -1,4 +1,4 @@
-# Ouroboros v4.7.8 — Architecture & Reference
+# Ouroboros v4.7.9 — Architecture & Reference
 
 This document describes every component, page, button, API endpoint, and data flow.
 It is the single source of truth for how the system works. Keep it updated.
@@ -264,7 +264,7 @@ Navigation is a left sidebar with 9 pages.
 - **Telegram**: Bot Token, primary chat id, legacy allowed chat ids. If no primary chat id is pinned, the bridge binds to the first active Telegram chat and keeps replies attached there.
 - **GitHub**: Token + Repo (for remote sync).
 - **Save Settings** button → POST `/api/settings`. Applies to env immediately.
-  Budget changes take effect immediately; provider/runtime changes may still require restart.
+  Budget and tool-timeout changes take effect immediately; provider/runtime changes may still require restart.
 - **Reset All Data** button (Danger Zone) → POST `/api/reset`.
   Deletes: state/, memory/, logs/, archive/, settings.json.
   Keeps: repo/ (agent code).
@@ -414,7 +414,8 @@ Each iteration (0.5s sleep):
 3. `OuroborosAgent.handle_task(task)` →
    a. Build context (`context.py`): system prompt + bible + identity + scratchpad + runtime info + Memory Registry digest
    b. `run_llm_loop()`: LLM call → tool execution → repeat until final text response
-   c. Emit events: send_message, task_metrics, task_done
+   c. Emit final `send_message`, `task_metrics`, and `task_done`; any restart request is latched until after those final events are queued
+   d. Store task result synchronously; task summary and reflection run off the user-reply critical path
 4. Events flow back to supervisor via event queue
 
 ### Tool execution (loop.py)
@@ -426,9 +427,12 @@ Each iteration (0.5s sleep):
 - Core tools always available; extra tools discoverable via `list_available_tools`/`enable_tools`
 - Read-only tools can run in parallel (ThreadPoolExecutor)
 - Browser tools use thread-sticky executor (Playwright greenlet affinity)
-- All tools have hard timeout (default 360s, per-tool overrides for browser/search/vision)
+- All tools have hard timeout (default 360s, per-tool overrides for browser/search/vision); `OUROBOROS_TOOL_TIMEOUT_SEC` in `settings.json` is the runtime SSOT override read on each tool call.
 - Multi-layer safety: hardcoded sandbox (registry.py) → deterministic whitelist → LLM safety supervisor
 - Tool results use explicit per-tool caps with visible truncation markers (`repo_read`/`data_read`/`knowledge_read`/`run_shell`: 80k, default: 15k chars). Cognitive reads (`memory/*`, prompts, BIBLE/docs, commit/review outputs) are exempt from silent clipping.
+- `run_shell` now treats non-zero exits as explicit failed tool outcomes and records exit/signal metadata in the tool trace.
+- `set_tool_timeout` persists `OUROBOROS_TOOL_TIMEOUT_SEC` to `settings.json` and hot-applies it without restart.
+- `ensure_claude_cli` / `claude_code_edit` prefer the official Claude Code native installer on macOS/Linux and keep npm as a compatibility fallback.
 - Context compaction kicks in after round 8 (summarizes old tool results)
 
 ### Git tools (tools/git.py + tools/review.py + supervisor/git_ops.py)
@@ -587,6 +591,7 @@ Settings file: `~/Ouroboros/data/settings.json`. File-locked for concurrent acce
 | OUROBOROS_MAX_WORKERS | 5 | Worker process pool size |
 | TOTAL_BUDGET | 10.0 | Total budget in USD |
 | OUROBOROS_PER_TASK_COST_USD | 20.0 | Per-task soft threshold in USD |
+| OUROBOROS_TOOL_TIMEOUT_SEC | 600 | Global tool timeout override (read live from settings.json on each tool call) |
 | OUROBOROS_WEBSEARCH_MODEL | gpt-5.2 | Official OpenAI Responses model for `web_search` when `OPENAI_BASE_URL` is empty |
 | OUROBOROS_REVIEW_MODELS | openai/gpt-5.4,google/gemini-3.1-pro-preview,anthropic/claude-opus-4.6 | Comma-separated OpenRouter model IDs for pre-commit review (min 2 for quorum) |
 | OUROBOROS_REVIEW_ENFORCEMENT | blocking | Pre-commit review enforcement: `advisory` or `blocking` |
@@ -688,7 +693,7 @@ On next manual launch:
 
 ### 9.3 Subprocess Process Group Management
 
-All subprocesses spawned by agent tools (`run_shell`, `claude_code_edit`)
+All subprocesses spawned by agent tools (`run_shell`, `ensure_claude_cli`, `claude_code_edit`)
 use `start_new_session=True` (via `_tracked_subprocess_run()` in
 `ouroboros/tools/shell.py`). This creates a separate process group for each
 subprocess and all its children.
@@ -699,6 +704,8 @@ subprocess trees (e.g., Claude CLI spawning node processes).
 
 Active subprocesses are tracked in a thread-safe global set and cleaned up
 automatically on completion or via `kill_all_tracked_subprocesses()` on panic.
+`run_shell` surfaces timeout-vs-signal distinctions in its result text so
+`exit_code=-9` no longer looks like a silent success in summaries/reflections.
 
 ---
 

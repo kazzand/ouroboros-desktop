@@ -110,3 +110,29 @@ def test_handle_text_response_keeps_full_reasoning_note():
     _, _, updated = _handle_text_response(content, llm_trace, {})
 
     assert updated["reasoning_notes"] == [content]
+
+
+def test_request_restart_latches_reason_until_task_end(tmp_path, monkeypatch):
+    from ouroboros.tools import control as control_module
+
+    monkeypatch.setattr(control_module, "run_cmd", lambda *args, **kwargs: "value")
+    written = {}
+    monkeypatch.setattr(control_module, "write_text", lambda path, text: written.setdefault(str(path), text))
+
+    class _Ctx:
+        current_task_type = "task"
+        last_push_succeeded = True
+        pending_events = []
+        pending_restart_reason = None
+        repo_dir = tmp_path
+
+        def drive_path(self, rel):
+            return tmp_path / rel
+
+    ctx = _Ctx()
+    result = control_module._request_restart(ctx, "reload runtime")
+
+    assert "Restart requested" in result
+    assert ctx.pending_events == []
+    assert ctx.pending_restart_reason == "reload runtime"
+    assert written
