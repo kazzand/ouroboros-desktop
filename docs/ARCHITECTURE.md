@@ -150,6 +150,10 @@ Shown when `settings.json` does not contain any supported remote provider key an
 - Existing OpenRouter, OpenAI, OpenAI-compatible, Cloud.ru, or local-model-source settings skip the wizard automatically.
 - The wizard is shared between desktop and web: one HTML/CSS/JS onboarding flow is rendered directly in pywebview for desktop and injected into a blocking web overlay for Docker/browser runs.
 - The wizard is multi-step and provider-aware: it starts with a single access step that accepts multiple remote keys plus optional local-model setup, then shows visible model defaults, a dedicated review-mode step, a dedicated budget step, and the final summary before save.
+- When an Anthropic key is present, onboarding shows an optional `Install Claude Code CLI` CTA plus `Skip for now`.
+  The copy is explicitly about the CLI, not the SDK.
+- Desktop first-run uses the same onboarding bundle and talks to Claude CLI install/status through `pywebview` bridge methods.
+  Web onboarding uses `/api/claude-code/status` and `/api/claude-code/install`.
 - The wizard blocks progression if nothing runnable is configured.
 - When OpenRouter is absent and official OpenAI is the only configured remote runtime, untouched default model values are auto-remapped to `openai::gpt-5.4` / `openai::gpt-5.4-mini` so first-run startup does not strand the app on OpenRouter-only defaults.
 - `web_search` uses the official OpenAI Responses API only. It requires `OPENAI_API_KEY` and treats any non-empty `OPENAI_BASE_URL` as an incompatible custom runtime configuration rather than a fallback.
@@ -200,6 +204,8 @@ Navigation is a left sidebar with 9 pages.
 - **Timestamps**: smart relative formatting (today: "HH:MM", yesterday: "Yesterday, HH:MM", older: "Mon DD, HH:MM"). Shown on hover.
 - **Live task card**: reasoning/progress/tool chatter no longer spams the transcript as many assistant bubbles.
   Chat listens to `log_event`/task events plus progress messages and collapses them into one expandable task card with a timeline of steps.
+- **Recoverable step failures**: step-level shell/tool failures stay as timeline notes and no longer freeze the card in a terminal `Issue` state.
+  Later progress updates can retake the headline until the task actually finishes.
 - **System summaries**: `direction="system"` entries from `chat.jsonl` are shown in the same timeline with a 📋 label instead of being hidden or treated as user text.
 - **Typing indicator**: animated "thinking dots" bubble appears when the agent is processing.
 - **Persistence**: chat history loaded from server on page load (`/api/chat/history`), survives app restarts. Fallback to sessionStorage.
@@ -242,6 +248,8 @@ Navigation is a left sidebar with 9 pages.
 - **Provider cards**: OpenRouter, OpenAI, OpenAI-compatible, Cloud.ru, Anthropic, plus optional Network Password. Cards are collapsible and use masked-secret inputs with show/hide toggles.
 - **API Keys**: OpenRouter, OpenAI, OpenAI-compatible, Cloud.ru, Anthropic, Telegram Bot Token, GitHub Token, and Network Password.
   Keys are displayed as masked values (e.g., `sk-or-v1...`), can be explicitly cleared, and are only overwritten on save if the user enters a new value (not containing `...`).
+- **Claude Code CLI CTA**: when Anthropic is configured, the Anthropic card exposes `Install Claude Code CLI` plus live install/status text.
+  This installs the `claude` binary, not the SDK.
 - **Models**: Main, Code, Light, Fallback.
 - **Model catalog**: optional `Refresh Model Catalog` action calls `/api/model-catalog`. Failures are non-fatal and surfaced as inline warnings.
 - **Model pickers**: searchable provider-aware pickers replace legacy raw dropdowns for remote models.
@@ -344,6 +352,8 @@ authentication. If the password is blank, non-loopback access stays open by desi
 | POST | `/api/files/upload` | Multipart upload into current Files directory |
 | GET | `/api/settings` | Current settings with masked API keys |
 | POST | `/api/settings` | Update settings (partial update, only provided keys) |
+| GET | `/api/claude-code/status` | Claude Code CLI installed/busy/progress status |
+| POST | `/api/claude-code/install` | Run the shared native-first Claude Code CLI install flow |
 | GET | `/api/model-catalog` | Optional provider model catalog (OpenRouter/OpenAI/compatible/Cloud.ru) |
 | POST | `/api/command` | Send a slash command `{cmd: "/status"}` |
 | POST | `/api/reset` | Delete all runtime data, restart for fresh onboarding |
@@ -432,7 +442,8 @@ Each iteration (0.5s sleep):
 - Tool results use explicit per-tool caps with visible truncation markers (`repo_read`/`data_read`/`knowledge_read`/`run_shell`: 80k, default: 15k chars). Cognitive reads (`memory/*`, prompts, BIBLE/docs, commit/review outputs) are exempt from silent clipping.
 - `run_shell` now treats non-zero exits as explicit failed tool outcomes and records exit/signal metadata in the tool trace.
 - `set_tool_timeout` persists `OUROBOROS_TOOL_TIMEOUT_SEC` to `settings.json` and hot-applies it without restart.
-- `ensure_claude_cli` / `claude_code_edit` prefer the official Claude Code native installer on macOS/Linux and keep npm as a compatibility fallback.
+- `ensure_claude_cli`, `/api/claude-code/*`, and desktop onboarding all reuse the same Claude Code install/status helpers.
+- Claude Code install remains native-first (`install.sh` → Homebrew on macOS → npm fallback) and `claude_code_edit` still uses the installed CLI afterward.
 - Context compaction kicks in after round 8 (summarizes old tool results)
 
 ### Git tools (tools/git.py + tools/review.py + supervisor/git_ops.py)

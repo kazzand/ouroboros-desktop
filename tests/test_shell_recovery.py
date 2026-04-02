@@ -12,6 +12,8 @@ from ouroboros.tools.shell import (
     _format_claude_code_error,
     _run_shell,
     _should_retry_claude_first_run,
+    ensure_claude_code_cli,
+    get_claude_code_cli_status,
 )
 
 
@@ -181,3 +183,33 @@ def test_ensure_claude_cli_falls_back_to_npm(monkeypatch):
 
     assert err is None
     assert freshly_installed is True
+
+
+def test_get_claude_code_cli_status_reports_missing(monkeypatch):
+    monkeypatch.setattr("ouroboros.tools.shell._ensure_path", lambda force_refresh=False: None)
+    monkeypatch.setattr("ouroboros.tools.shell.shutil.which", lambda name: None)
+
+    status = get_claude_code_cli_status()
+
+    assert status["status"] == "missing"
+    assert status["installed"] is False
+    assert "not installed" in status["message"].lower()
+
+
+def test_ensure_claude_code_cli_wrapper_returns_shared_payload(monkeypatch):
+    monkeypatch.setattr("ouroboros.tools.shell._ensure_claude_cli", lambda ctx: (None, True))
+    monkeypatch.setattr("ouroboros.tools.shell.get_claude_code_cli_status", lambda: {
+        "status": "installed",
+        "installed": True,
+        "busy": False,
+        "path": "/usr/local/bin/claude",
+        "version": "1.2.3",
+        "message": "Installed: 1.2.3",
+        "error": "",
+    })
+
+    status = ensure_claude_code_cli()
+
+    assert status["freshly_installed"] is True
+    assert status["installed"] is True
+    assert status["message"] == "Claude Code CLI installed: 1.2.3"

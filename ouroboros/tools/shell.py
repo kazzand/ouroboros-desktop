@@ -15,6 +15,7 @@ import subprocess
 import threading
 import time
 from subprocess import Popen, CompletedProcess
+from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Tuple
 
 from ouroboros.compat import IS_WINDOWS, PATH_SEP, kill_process_tree, node_download_info
@@ -520,6 +521,96 @@ def _ensure_path(force_refresh: bool = False):
     _path_initialized = True
 
 
+def _claude_version_timeout_sec() -> int:
+    """Keep version probes short even when the global tool timeout is large."""
+    return min(_resolve_effective_timeout(_CLAUDE_CODE_DEFAULT_TIMEOUT_SEC), 60)
+
+
+def get_claude_code_cli_status() -> Dict[str, Any]:
+    """Return the current Claude Code CLI availability and version details."""
+    _ensure_path()
+    claude_bin = shutil.which("claude")
+    status: Dict[str, Any] = {
+        "status": "missing",
+        "installed": bool(claude_bin),
+        "busy": False,
+        "path": claude_bin or "",
+        "version": "",
+        "message": "Claude Code CLI is not installed.",
+        "error": "",
+    }
+    if not claude_bin:
+        return status
+
+    version_timeout = _claude_version_timeout_sec()
+    try:
+        res = _tracked_subprocess_run(
+            [claude_bin, "--version"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=version_timeout,
+            env={**os.environ, "PATH": _build_augmented_path()},
+        )
+    except subprocess.TimeoutExpired:
+        status.update({
+            "status": "error",
+            "message": f"`claude --version` timed out after {version_timeout}s.",
+            "error": f"⚠️ CLAUDE_CODE_INSTALL_ERROR: `claude --version` timed out after {version_timeout}s.",
+        })
+        return status
+    except Exception as e:
+        status.update({
+            "status": "error",
+            "message": f"Claude Code version check failed: {type(e).__name__}: {e}",
+            "error": f"⚠️ CLAUDE_CODE_INSTALL_ERROR: version check failed: {type(e).__name__}: {e}",
+        })
+        return status
+
+    if res.returncode != 0:
+        rendered = _format_process_failure(
+            "⚠️ CLAUDE_CODE_INSTALL_ERROR",
+            "version check exited",
+            res,
+        )
+        status.update({
+            "status": "error",
+            "message": "Claude Code CLI is present but failed its version check.",
+            "error": rendered,
+        })
+        return status
+
+    version = (res.stdout or res.stderr or "").strip() or "version unknown"
+    status.update({
+        "status": "installed",
+        "version": version,
+        "message": f"Installed: {version}",
+        "error": "",
+    })
+    return status
+
+
+def ensure_claude_code_cli(progress_cb: Optional[Any] = None) -> Dict[str, Any]:
+    """Install Claude Code CLI if needed and return a shared status payload."""
+    progress_fn = progress_cb if callable(progress_cb) else (lambda _text: None)
+    install_err, freshly_installed = _ensure_claude_cli(SimpleNamespace(emit_progress_fn=progress_fn))
+    status = get_claude_code_cli_status()
+    status["freshly_installed"] = bool(freshly_installed)
+    if install_err:
+        status.update({
+            "status": "error",
+            "message": "Claude Code CLI installation failed.",
+            "error": install_err,
+        })
+        return status
+    if status.get("status") == "error":
+        return status
+    version = status.get("version") or "version unknown"
+    state = "installed" if freshly_installed else "already available"
+    status["message"] = f"Claude Code CLI {state}: {version}"
+    return status
+
+
 # ---------------------------------------------------------------------------
 # Claude Code CLI: run + parse
 # ---------------------------------------------------------------------------
@@ -618,40 +709,13 @@ def _format_claude_code_error(res: CompletedProcess) -> str:
 
 def _ensure_claude_cli_tool(ctx: ToolContext) -> str:
     """Ensure Claude Code CLI is installed and available on PATH."""
-    install_err, freshly_installed = _ensure_claude_cli(ctx)
-    if install_err:
-        return install_err
-
-    claude_bin = shutil.which("claude")
-    if not claude_bin:
+    status = ensure_claude_code_cli(progress_cb=ctx.emit_progress_fn)
+    if status.get("status") == "error":
+        return str(status.get("error") or "⚠️ CLAUDE_CODE_INSTALL_ERROR: installation failed.")
+    if not status.get("installed"):
         return "⚠️ CLAUDE_CODE_INSTALL_ERROR: `claude` is still not available on PATH."
-
-    version_timeout = min(_resolve_effective_timeout(_CLAUDE_CODE_DEFAULT_TIMEOUT_SEC), 60)
-    try:
-        res = _tracked_subprocess_run(
-            [claude_bin, "--version"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            timeout=version_timeout,
-            env={**os.environ, "PATH": _build_augmented_path()},
-        )
-    except subprocess.TimeoutExpired:
-        return (
-            f"⚠️ CLAUDE_CODE_INSTALL_ERROR: `claude --version` timed out after {version_timeout}s."
-        )
-    except Exception as e:
-        return f"⚠️ CLAUDE_CODE_INSTALL_ERROR: version check failed: {type(e).__name__}: {e}"
-
-    if res.returncode != 0:
-        return _format_process_failure(
-            "⚠️ CLAUDE_CODE_INSTALL_ERROR",
-            "version check exited",
-            res,
-        )
-
-    version = (res.stdout or res.stderr or "").strip() or "version unknown"
-    state = "installed" if freshly_installed else "already available"
+    version = str(status.get("version") or "version unknown")
+    state = "installed" if status.get("freshly_installed") else "already available"
     return f"OK: Claude Code CLI {state}: {version}"
 
 

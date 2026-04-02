@@ -361,6 +361,7 @@ def _execute_with_timeout(
         future = stateful_executor.submit(_execute_single_tool, tools, tc, drive_logs, task_id)
         try:
             result = future.result(timeout=timeout_sec)
+            result_meta = result.get("result_meta") or {}
             _emit_live_log(tools, {
                 "type": "tool_call_finished",
                 "task_id": task_id,
@@ -368,6 +369,9 @@ def _execute_with_timeout(
                 "args": result.get("args_for_log", args_for_log),
                 "duration_sec": round(time.perf_counter() - started_at, 3),
                 "is_error": bool(result.get("is_error")),
+                "status": result_meta.get("status"),
+                "exit_code": result_meta.get("exit_code"),
+                "signal": result_meta.get("signal"),
                 "result_preview": sanitize_tool_result_for_log(
                     truncate_for_log(result.get("result", ""), 500)
                 ),
@@ -395,6 +399,7 @@ def _execute_with_timeout(
             future = executor.submit(_execute_single_tool, tools, tc, drive_logs, task_id)
             try:
                 result = future.result(timeout=timeout_sec)
+                result_meta = result.get("result_meta") or {}
                 _emit_live_log(tools, {
                     "type": "tool_call_finished",
                     "task_id": task_id,
@@ -402,6 +407,9 @@ def _execute_with_timeout(
                     "args": result.get("args_for_log", args_for_log),
                     "duration_sec": round(time.perf_counter() - started_at, 3),
                     "is_error": bool(result.get("is_error")),
+                    "status": result_meta.get("status"),
+                    "exit_code": result_meta.get("exit_code"),
+                    "signal": result_meta.get("signal"),
                     "result_preview": sanitize_tool_result_for_log(
                         truncate_for_log(result.get("result", ""), 500)
                     ),

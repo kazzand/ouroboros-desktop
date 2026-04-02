@@ -53,9 +53,17 @@
         localTestResult: '',
         localTestTone: 'muted',
         localRuntimeReady: false,
+        claudeCliInstalled: false,
+        claudeCliBusy: false,
+        claudeCliStatus: '',
+        claudeCliStatusText: 'Claude Code CLI is not installed.',
+        claudeCliTone: 'muted',
+        claudeCliError: '',
+        claudeCliDismissed: false,
     }, INITIAL_STATE);
 
     let localStatusPollStarted = false;
+    let claudeCliPollStarted = false;
 
     function trim(value) {
         return String(value || '').trim();
@@ -76,6 +84,14 @@
 
     function hasLocalModel() {
         return trim(state.localSource).length > 0;
+    }
+
+    function hasAnthropicKeyConfigured() {
+        return trim(state.anthropicKey).length >= 10;
+    }
+
+    function shouldShowClaudeCliCta() {
+        return hasAnthropicKeyConfigured() && !state.claudeCliDismissed;
     }
 
     function isLocalFilesystemSource(value) {
@@ -265,6 +281,92 @@
         return data;
     }
 
+    function applyClaudeCliStatus(payload = {}) {
+        const installed = Boolean(payload.installed);
+        const busy = Boolean(payload.busy);
+        const errorText = trim(payload.error);
+        const message = trim(payload.message)
+            || (installed ? 'Claude Code CLI is installed.' : 'Claude Code CLI is not installed.');
+        state.claudeCliInstalled = installed;
+        state.claudeCliBusy = busy;
+        state.claudeCliStatus = trim(payload.status) || (installed ? 'installed' : 'missing');
+        state.claudeCliError = errorText;
+        state.claudeCliTone = installed ? 'ok' : (errorText ? 'error' : 'muted');
+        state.claudeCliStatusText = message;
+        renderClaudeCliStatus();
+    }
+
+    async function claudeCliRequestStatus() {
+        if (HOST_MODE === 'web') {
+            return apiRequest('/api/claude-code/status', { cache: 'no-store' });
+        }
+        if (!window.pywebview?.api?.claude_code_status) {
+            throw new Error('Desktop Claude Code bridge is unavailable.');
+        }
+        return window.pywebview.api.claude_code_status();
+    }
+
+    async function claudeCliStartInstall() {
+        if (HOST_MODE === 'web') {
+            return apiRequest('/api/claude-code/install', { method: 'POST' });
+        }
+        if (!window.pywebview?.api?.install_claude_code) {
+            throw new Error('Desktop Claude Code install bridge is unavailable.');
+        }
+        return window.pywebview.api.install_claude_code();
+    }
+
+    async function updateClaudeCliStatus() {
+        if (!shouldShowClaudeCliCta()) return;
+        try {
+            applyClaudeCliStatus(await claudeCliRequestStatus());
+        } catch (error) {
+            state.claudeCliInstalled = false;
+            state.claudeCliBusy = false;
+            state.claudeCliStatus = 'error';
+            state.claudeCliError = String(error?.message || error || '');
+            state.claudeCliTone = 'error';
+            state.claudeCliStatusText = `Claude Code CLI status failed: ${state.claudeCliError}`;
+            renderClaudeCliStatus();
+        }
+    }
+
+    function startClaudeCliStatusPolling() {
+        if (claudeCliPollStarted) return;
+        claudeCliPollStarted = true;
+        updateClaudeCliStatus();
+        setInterval(() => {
+            if (shouldShowClaudeCliCta()) updateClaudeCliStatus();
+        }, 3000);
+    }
+
+    function syncClaudeCliVisibility() {
+        const card = document.getElementById('wizard-claude-card');
+        if (card) card.style.display = shouldShowClaudeCliCta() ? '' : 'none';
+        renderClaudeCliStatus();
+    }
+
+    function renderClaudeCliStatus() {
+        const card = document.getElementById('wizard-claude-card');
+        const statusEl = document.getElementById('wizard-claude-status');
+        const installButton = document.getElementById('wizard-claude-install');
+        const skipButton = document.getElementById('wizard-claude-skip');
+        if (card) card.style.display = shouldShowClaudeCliCta() ? '' : 'none';
+        if (statusEl) {
+            statusEl.textContent = state.claudeCliStatusText || 'Claude Code CLI is not installed.';
+            statusEl.dataset.tone = state.claudeCliTone || 'muted';
+        }
+        if (installButton) {
+            installButton.disabled = state.claudeCliBusy || state.claudeCliInstalled;
+            installButton.textContent = state.claudeCliBusy
+                ? 'Installing...'
+                : (state.claudeCliInstalled ? 'Installed' : 'Install Claude Code CLI');
+        }
+        if (skipButton) {
+            skipButton.hidden = state.claudeCliBusy || state.claudeCliInstalled;
+        }
+    }
+
     function renderLocalStatus() {
         const statusEl = document.getElementById('wizard-local-status');
         const stopButton = document.getElementById('wizard-local-stop');
@@ -338,6 +440,22 @@
                 <span id="wizard-local-status" class="wizard-runtime-status">Status: Offline</span>
             </div>
             <div id="wizard-local-test-result" class="wizard-test-result"></div>
+        `;
+    }
+
+    function renderClaudeCliControls() {
+        return `
+            <div class="panel-card" id="wizard-claude-card" style="${shouldShowClaudeCliCta() ? '' : 'display:none;'}">
+                <h3>Claude Code CLI</h3>
+                <p>Optional. This installs the <code>claude</code> CLI, not the SDK. Ouroboros can use it later for Claude tooling with the Anthropic key above.</p>
+                <div class="wizard-runtime-strip">
+                    <button type="button" class="btn ghost" id="wizard-claude-install" ${state.claudeCliBusy || state.claudeCliInstalled ? 'disabled' : ''}>
+                        ${escapeHtml(state.claudeCliBusy ? 'Installing...' : (state.claudeCliInstalled ? 'Installed' : 'Install Claude Code CLI'))}
+                    </button>
+                    <button type="button" class="btn secondary" id="wizard-claude-skip" ${state.claudeCliBusy || state.claudeCliInstalled ? 'hidden' : ''}>Skip for now</button>
+                    <span id="wizard-claude-status" class="wizard-runtime-status" data-tone="${escapeHtml(state.claudeCliTone || 'muted')}">${escapeHtml(state.claudeCliStatusText || 'Claude Code CLI is not installed.')}</span>
+                </div>
+            </div>
         `;
     }
 
@@ -417,6 +535,7 @@
                     <div class="field-note">Optional. Saved for direct <code>anthropic::...</code> models and Claude tooling.</div>
                 </div>
             </div>
+            ${renderClaudeCliControls()}
             <details class="wizard-collapse" ${localSourceOpen ? 'open' : ''}>
                 <summary>
                     <span>Local model settings</span>
@@ -661,6 +780,7 @@
         `;
         bindEvents();
         renderLocalStatus();
+        renderClaudeCliStatus();
     }
 
     function bindClearButtons() {
@@ -705,7 +825,18 @@
 
         if (openrouterInput) openrouterInput.addEventListener('input', () => { state.openrouterKey = openrouterInput.value; state.error = ''; syncCurrentStepActionState(); });
         if (openaiInput) openaiInput.addEventListener('input', () => { state.openaiKey = openaiInput.value; state.error = ''; syncCurrentStepActionState(); });
-        if (anthropicInput) anthropicInput.addEventListener('input', () => { state.anthropicKey = anthropicInput.value; state.error = ''; syncCurrentStepActionState(); });
+        if (anthropicInput) anthropicInput.addEventListener('input', () => {
+            const wasConfigured = hasAnthropicKeyConfigured();
+            state.anthropicKey = anthropicInput.value;
+            if (!wasConfigured && hasAnthropicKeyConfigured()) {
+                state.claudeCliDismissed = false;
+                startClaudeCliStatusPolling();
+                updateClaudeCliStatus();
+            }
+            state.error = '';
+            syncClaudeCliVisibility();
+            syncCurrentStepActionState();
+        });
         if (localPreset) localPreset.addEventListener('change', () => { applyPresetSelection(localPreset.value); state.error = ''; render(); });
         if (localSource) localSource.addEventListener('input', () => {
             state.localSource = localSource.value;
@@ -770,6 +901,33 @@
                     setLocalTestResult(`Test failed: ${error.message}`, 'error');
                 }
             });
+        }
+        document.getElementById('wizard-claude-install')?.addEventListener('click', async () => {
+            state.claudeCliBusy = true;
+            state.claudeCliTone = 'muted';
+            state.claudeCliStatusText = 'Starting Claude Code CLI installation...';
+            renderClaudeCliStatus();
+            try {
+                applyClaudeCliStatus(await claudeCliStartInstall());
+                if (state.claudeCliBusy) updateClaudeCliStatus();
+            } catch (error) {
+                state.claudeCliBusy = false;
+                state.claudeCliStatus = 'error';
+                state.claudeCliError = String(error?.message || error || '');
+                state.claudeCliTone = 'error';
+                state.claudeCliStatusText = `Claude Code CLI install failed: ${state.claudeCliError}`;
+                renderClaudeCliStatus();
+            }
+        });
+        document.getElementById('wizard-claude-skip')?.addEventListener('click', () => {
+            state.claudeCliDismissed = true;
+            syncClaudeCliVisibility();
+        });
+        if (shouldShowClaudeCliCta()) {
+            startClaudeCliStatusPolling();
+            updateClaudeCliStatus();
+        } else {
+            renderClaudeCliStatus();
         }
         syncCurrentStepActionState();
     }

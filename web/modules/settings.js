@@ -67,6 +67,80 @@ export function initSettings({ state }) {
     bindModelPickers(page);
     bindLocalModelControls({ state });
     let currentSettings = {};
+    let claudeCodePollStarted = false;
+
+    function anthropicKeyConfigured() {
+        const input = byId('s-anthropic');
+        if (!input) return Boolean(String(currentSettings.ANTHROPIC_API_KEY || '').trim());
+        if (input.dataset.forceClear === '1') return false;
+        const liveValue = String(input.value || '').trim();
+        if (liveValue) return true;
+        return Boolean(String(currentSettings.ANTHROPIC_API_KEY || '').trim());
+    }
+
+    function renderClaudeCodeUi() {
+        const panel = byId('settings-claude-code-panel');
+        const note = byId('settings-claude-code-copy');
+        const button = byId('btn-claude-code-install');
+        const visible = anthropicKeyConfigured();
+        if (panel) panel.hidden = !visible;
+        if (note) note.hidden = !visible;
+        if (!visible) return;
+        if (button && button.dataset.busy !== '1' && button.dataset.installed !== '1') {
+            button.disabled = false;
+            button.textContent = 'Install Claude Code CLI';
+        }
+    }
+
+    function applyClaudeCodeStatus(payload = {}) {
+        const button = byId('btn-claude-code-install');
+        const status = byId('settings-claude-code-status');
+        const installed = Boolean(payload.installed);
+        const busy = Boolean(payload.busy);
+        const error = String(payload.error || '').trim();
+        const message = String(payload.message || '').trim()
+            || (installed ? 'Claude Code CLI is installed.' : 'Claude Code CLI is not installed.');
+        if (status) {
+            status.textContent = message;
+            status.dataset.tone = installed ? 'ok' : (error ? 'error' : 'muted');
+        }
+        if (button) {
+            button.dataset.busy = busy ? '1' : '0';
+            button.dataset.installed = installed ? '1' : '0';
+            button.disabled = busy || installed;
+            button.textContent = busy ? 'Installing...' : (installed ? 'Installed' : 'Install Claude Code CLI');
+        }
+        renderClaudeCodeUi();
+    }
+
+    async function refreshClaudeCodeStatus() {
+        if (!anthropicKeyConfigured()) {
+            renderClaudeCodeUi();
+            return;
+        }
+        try {
+            const resp = await fetch('/api/claude-code/status', { cache: 'no-store' });
+            const data = await resp.json().catch(() => ({}));
+            if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+            applyClaudeCodeStatus(data);
+        } catch (error) {
+            applyClaudeCodeStatus({
+                installed: false,
+                busy: false,
+                error: String(error?.message || error || ''),
+                message: `Claude Code CLI status failed: ${String(error?.message || error || '')}`,
+            });
+        }
+    }
+
+    function startClaudeCodePolling() {
+        if (claudeCodePollStarted) return;
+        claudeCodePollStarted = true;
+        refreshClaudeCodeStatus();
+        setInterval(() => {
+            if (anthropicKeyConfigured()) refreshClaudeCodeStatus();
+        }, 3000);
+    }
 
     function applySettings(s) {
         applyInputValue('s-openrouter', s.OPENROUTER_API_KEY);
@@ -123,6 +197,11 @@ export function initSettings({ state }) {
         if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
         currentSettings = data;
         applySettings(data);
+        renderClaudeCodeUi();
+        if (anthropicKeyConfigured()) {
+            startClaudeCodePolling();
+            refreshClaudeCodeStatus();
+        }
     }
 
     function collectBody() {
@@ -178,6 +257,48 @@ export function initSettings({ state }) {
     loadSettings()
         .then(() => refreshModelCatalog())
         .catch(() => {});
+
+    byId('s-anthropic')?.addEventListener('input', () => {
+        renderClaudeCodeUi();
+        if (anthropicKeyConfigured()) {
+            startClaudeCodePolling();
+            refreshClaudeCodeStatus();
+        }
+    });
+
+    page.addEventListener('click', (event) => {
+        if (event.target.closest('.secret-clear[data-target="s-anthropic"]')) {
+            queueMicrotask(() => {
+                renderClaudeCodeUi();
+                refreshClaudeCodeStatus();
+            });
+        }
+    });
+
+    byId('btn-claude-code-install')?.addEventListener('click', async () => {
+        applyClaudeCodeStatus({
+            installed: false,
+            busy: true,
+            message: 'Starting Claude Code CLI installation...',
+            error: '',
+        });
+        try {
+            const resp = await fetch('/api/claude-code/install', { method: 'POST' });
+            const data = await resp.json().catch(() => ({}));
+            if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+            applyClaudeCodeStatus(data);
+            setStatus(data.freshly_installed ? 'Claude Code CLI installed.' : 'Claude Code CLI already available.', 'ok');
+        } catch (error) {
+            const message = String(error?.message || error || '');
+            applyClaudeCodeStatus({
+                installed: false,
+                busy: false,
+                error: message,
+                message: `Claude Code CLI install failed: ${message}`,
+            });
+            setStatus('Claude Code CLI install failed.', 'warn');
+        }
+    });
 
     byId('btn-refresh-model-catalog').addEventListener('click', async () => {
         await refreshModelCatalog();

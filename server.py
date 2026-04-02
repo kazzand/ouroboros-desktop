@@ -94,6 +94,14 @@ _SECRET_SETTING_KEYS = {
 # ---------------------------------------------------------------------------
 _ws_clients: List[WebSocket] = []
 _ws_lock = threading.Lock()
+_claude_code_state_lock = threading.Lock()
+_claude_code_state: Dict[str, Any] = {
+    "busy": False,
+    "status": "",
+    "message": "",
+    "error": "",
+    "freshly_installed": False,
+}
 
 
 def _has_ws_clients() -> bool:
@@ -160,6 +168,45 @@ def _merge_settings_payload(current: Dict[str, Any], body: Dict[str, Any]) -> Di
 
 def _restart_current_process(host: str, port: int) -> None:
     _restart_current_process_impl(host, port, repo_dir=REPO_DIR, log=log)
+
+
+def _update_claude_code_state(**updates: Any) -> Dict[str, Any]:
+    with _claude_code_state_lock:
+        _claude_code_state.update(updates)
+        return dict(_claude_code_state)
+
+
+def _get_claude_code_state() -> Dict[str, Any]:
+    with _claude_code_state_lock:
+        return dict(_claude_code_state)
+
+
+def _claude_code_status_payload() -> Dict[str, Any]:
+    from ouroboros.tools.shell import get_claude_code_cli_status
+
+    payload = dict(get_claude_code_cli_status())
+    transient = _get_claude_code_state()
+    if transient.get("busy"):
+        payload.update({
+            "status": "installing",
+            "busy": True,
+            "message": transient.get("message") or "Installing Claude Code CLI...",
+            "error": "",
+        })
+        return payload
+
+    payload["busy"] = False
+    if transient.get("status") == "error" and not payload.get("installed"):
+        payload.update({
+            "status": "error",
+            "message": transient.get("message") or payload.get("message"),
+            "error": transient.get("error") or payload.get("error", ""),
+        })
+    elif transient.get("message"):
+        payload["message"] = transient["message"]
+    if transient.get("freshly_installed"):
+        payload["freshly_installed"] = True
+    return payload
 
 
 # ---------------------------------------------------------------------------
@@ -700,6 +747,68 @@ async def api_onboarding(request: Request) -> Response:
     return HTMLResponse(build_onboarding_html(settings, host_mode="web"))
 
 
+async def api_claude_code_status(request: Request) -> JSONResponse:
+    try:
+        payload = await asyncio.to_thread(_claude_code_status_payload)
+        return JSONResponse(payload)
+    except Exception as e:
+        return JSONResponse({
+            "status": "error",
+            "installed": False,
+            "busy": False,
+            "message": "Failed to read Claude Code CLI status.",
+            "error": str(e),
+        }, status_code=500)
+
+
+async def api_claude_code_install(request: Request) -> JSONResponse:
+    state = _get_claude_code_state()
+    if state.get("busy"):
+        payload = await asyncio.to_thread(_claude_code_status_payload)
+        return JSONResponse(payload, status_code=202)
+
+    def _progress(text: str) -> None:
+        _update_claude_code_state(
+            busy=True,
+            status="installing",
+            message=str(text or "").strip() or "Installing Claude Code CLI...",
+            error="",
+            freshly_installed=False,
+        )
+
+    _update_claude_code_state(
+        busy=True,
+        status="installing",
+        message="Starting Claude Code CLI installation...",
+        error="",
+        freshly_installed=False,
+    )
+
+    try:
+        from ouroboros.tools.shell import ensure_claude_code_cli
+
+        result = await asyncio.to_thread(ensure_claude_code_cli, _progress)
+    except Exception as e:
+        result = {
+            "status": "error",
+            "installed": False,
+            "busy": False,
+            "message": "Claude Code CLI installation failed.",
+            "error": f"{type(e).__name__}: {e}",
+            "freshly_installed": False,
+        }
+
+    _update_claude_code_state(
+        busy=False,
+        status=result.get("status") or "",
+        message=result.get("message") or "",
+        error=result.get("error") or "",
+        freshly_installed=bool(result.get("freshly_installed")),
+    )
+    status_code = 500 if result.get("status") == "error" else 200
+    return JSONResponse(result, status_code=status_code)
+
+
 async def api_settings_post(request: Request) -> JSONResponse:
     try:
         body = await request.json()
@@ -872,6 +981,8 @@ routes = [
     Route("/api/state", endpoint=api_state),
     *file_browser_routes(),
     Route("/api/onboarding", endpoint=api_onboarding),
+    Route("/api/claude-code/status", endpoint=api_claude_code_status),
+    Route("/api/claude-code/install", endpoint=api_claude_code_install, methods=["POST"]),
     Route("/api/settings", endpoint=api_settings_get, methods=["GET"]),
     Route("/api/settings", endpoint=api_settings_post, methods=["POST"]),
     Route("/api/model-catalog", endpoint=api_model_catalog),

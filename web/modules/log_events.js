@@ -81,6 +81,16 @@ function compactJson(value, maxLen = 220) {
     return shortText(txt, maxLen);
 }
 
+function extractCommandText(args) {
+    if (!args || typeof args !== 'object') return '';
+    const cmd = args.cmd;
+    if (Array.isArray(cmd)) {
+        return cmd.map((part) => String(part || '').trim()).filter(Boolean).join(' ');
+    }
+    if (typeof cmd === 'string') return cmd;
+    return '';
+}
+
 function describeStartupChecks(checks) {
     if (!checks || typeof checks !== 'object') return '';
     const parts = [];
@@ -512,16 +522,45 @@ export function summarizeChatLiveEvent(evt) {
     }
 
     if (t === 'tool_call_finished' && evt.is_error) {
+        const commandText = describeText(extractCommandText(evt.args), 120);
         const errorResult = describeText(evt.result_preview || evt.error, 220);
+        if (evt.status === 'non_zero_exit') {
+            const exitCode = Number(evt.exit_code);
+            const exitLabel = Number.isFinite(exitCode)
+                ? `exit code ${exitCode}`
+                : 'a non-zero exit code';
+            const bodyParts = [];
+            const fullBodyParts = [];
+            if (commandText.preview) bodyParts.push(`Command: ${commandText.preview}`);
+            if (errorResult.preview) bodyParts.push(errorResult.preview);
+            if (commandText.full) fullBodyParts.push(`Command: ${commandText.full}`);
+            if (errorResult.full) fullBodyParts.push(errorResult.full);
+            return {
+                phase: 'warn',
+                headline: `A command returned ${exitLabel}`,
+                body: shortText(bodyParts.join(' '), 220),
+                fullBody: fullBodyParts.join('\n\n'),
+                visible: true,
+                promote: false,
+                human: false,
+                dedupeKey: `${t}:${getLogTaskGroupId(evt)}:${evt.tool || ''}:${evt.status || ''}:${evt.exit_code || ''}:${commandText.full || errorResult.full}`,
+            };
+        }
+        const bodyParts = [];
+        const fullBodyParts = [];
+        if (commandText.preview) bodyParts.push(`Command: ${commandText.preview}`);
+        if (errorResult.preview) bodyParts.push(errorResult.preview);
+        if (commandText.full) fullBodyParts.push(`Command: ${commandText.full}`);
+        if (errorResult.full) fullBodyParts.push(errorResult.full);
         return {
             phase: 'error',
             headline: 'One of the steps failed',
-            body: errorResult.preview,
-            fullBody: errorResult.full,
+            body: shortText(bodyParts.join(' '), 220),
+            fullBody: fullBodyParts.join('\n\n'),
             visible: true,
             promote: true,
             human: false,
-            dedupeKey: `${t}:${getLogTaskGroupId(evt)}:${evt.tool || ''}:error`,
+            dedupeKey: `${t}:${getLogTaskGroupId(evt)}:${evt.tool || ''}:${evt.status || ''}:${evt.exit_code || ''}:${commandText.full || errorResult.full}`,
         };
     }
 

@@ -53,6 +53,21 @@ def test_chat_progress_updates_route_into_live_card():
     assert "record.root.style.minHeight = `${Math.max(summaryHeight + timelineHeight, 0)}px`;" in source
 
 
+def test_live_card_recovery_keeps_step_failures_non_terminal():
+    chat_source = _read("web/modules/chat.js")
+    log_source = _read("web/modules/log_events.js")
+
+    assert "return phase === 'done';" in chat_source
+    assert "if (phase === 'warn') return 'Notice';" in chat_source
+    assert "record.finished = isTerminalTaskPhase(nextPhase);" in chat_source
+    assert "const activePhase = ['error', 'timeout'].includes(phase) ? phase : 'done';" in chat_source
+    assert "function extractCommandText(args) {" in log_source
+    assert "evt.status === 'non_zero_exit'" in log_source
+    assert "phase: 'warn'" in log_source
+    assert "A command returned" in log_source
+    assert "commandText.full || errorResult.full" in log_source
+
+
 def test_logs_use_shared_log_event_helpers_and_group_task_cards():
     logs_source = _read("web/modules/logs.js")
     shared_source = _read("web/modules/log_events.js")

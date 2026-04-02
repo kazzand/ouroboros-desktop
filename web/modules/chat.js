@@ -248,7 +248,7 @@ export function initChat({ ws, state, updateUnreadBadge }) {
     }
 
     function isTerminalTaskPhase(phase = '') {
-        return ['done', 'error', 'timeout'].includes(phase);
+        return phase === 'done';
     }
 
     function createTaskUiState(taskId) {
@@ -474,6 +474,7 @@ export function initChat({ ws, state, updateUnreadBadge }) {
         if (phase === 'thinking') return 'Thinking';
         if (phase === 'working') return 'Working';
         if (phase === 'done') return 'Done';
+        if (phase === 'warn') return 'Notice';
         if (phase === 'error' || phase === 'timeout') return 'Issue';
         if (!phase) return 'Working';
         return phase.charAt(0).toUpperCase() + phase.slice(1);
@@ -567,7 +568,7 @@ export function initChat({ ws, state, updateUnreadBadge }) {
         ensureLiveCardVisible(record);
         record.updates += 1;
         const wasFinished = record.finished;
-        record.finished = ['done', 'error', 'timeout'].includes(nextPhase);
+        record.finished = isTerminalTaskPhase(nextPhase);
         record.root.dataset.finished = record.finished ? '1' : '0';
         const headline = summary.headline || 'Working...';
         if (summary.human && headline) {
@@ -652,9 +653,7 @@ export function initChat({ ws, state, updateUnreadBadge }) {
         const wasFinished = record.finished;
         record.finished = true;
         record.root.dataset.finished = '1';
-        const activePhase = ['error', 'timeout'].includes(phase)
-            ? phase
-            : (['error', 'timeout'].includes(record.phaseEl.dataset.phase || '') ? record.phaseEl.dataset.phase : 'done');
+        const activePhase = ['error', 'timeout'].includes(phase) ? phase : 'done';
         record.phaseEl.dataset.phase = activePhase;
         record.phaseEl.textContent = formatLiveCardPhaseLabel(activePhase);
         record.phaseEl.className = `chat-live-phase ${activePhase}`;

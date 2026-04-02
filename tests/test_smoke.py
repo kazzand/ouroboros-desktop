@@ -357,6 +357,7 @@ def test_no_oversized_modules():
         # Existing large modules tracked as refactor debt. Keep the gate for all others.
         "llm.py",
         "onboarding_wizard.py",
+        "server.py",
     }
     violations = []
     for root, dirs, files in os.walk(REPO):

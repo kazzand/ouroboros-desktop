@@ -29,3 +29,13 @@ def test_shell_and_claude_failures_are_treated_as_tool_failures():
         True,
         "⚠️ CLAUDE_CODE_UNAVAILABLE: ANTHROPIC_API_KEY not set.",
     )
+
+
+def test_live_tool_log_payload_includes_structured_result_metadata():
+    import pathlib
+
+    source = (pathlib.Path(__file__).resolve().parents[1] / "ouroboros" / "loop_tool_execution.py").read_text(encoding="utf-8")
+
+    assert '"status": result_meta.get("status")' in source
+    assert '"exit_code": result_meta.get("exit_code")' in source
+    assert '"signal": result_meta.get("signal")' in source
