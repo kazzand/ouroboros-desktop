@@ -1,4 +1,4 @@
-# Ouroboros v4.10.5 — Architecture & Reference
+# Ouroboros v4.7.1 — Architecture & Reference
 
 This document describes every component, page, button, API endpoint, and data flow.
 It is the single source of truth for how the system works. Keep it updated.
@@ -455,19 +455,19 @@ backward compatibility but is not the runtime authority.
 - **Per-task soft threshold**: Each task has a soft threshold (default $20, env `OUROBOROS_PER_TASK_COST_USD`). When a task exceeds this, the LLM is asked to wrap up soon. This is a reminder, not a hard stop.
 - **`memory_tools.py`**: Provides `memory_map` (read the metacognitive registry of all data sources) and `memory_update_registry` (add/update entries). Part of the Memory Registry system (v3.16.0).
 - **`tool_discovery.py`**: Provides `list_available_tools` (discover non-core tools) and `enable_tools` (activate extra tools for the current task). Enables dynamic tool set management.
-- **`code_search`** (v4.10.0): First-class code search tool in `tools/core.py`. Literal search by default, regex optional. Skips binaries, caches, vendor dirs. Bounded output (max 200 results, 80K chars). Available from round 1 as a core tool. Replaces the pattern of using `run_shell` with `grep`/`rg` for code search.
+- **`code_search`**: First-class code search tool in `tools/core.py`. Literal search by default, regex optional. Skips binaries, caches, vendor dirs. Bounded output (max 200 results, 80K chars). Available from round 1 as a core tool. Replaces the pattern of using `run_shell` with `grep`/`rg` for code search.
 - Core tools always available; extra tools discoverable via `list_available_tools`/`enable_tools`
 - Read-only tools can run in parallel (ThreadPoolExecutor)
 - Browser tools use thread-sticky executor (Playwright greenlet affinity)
-- All tools have hard timeout (default 360s, per-tool overrides for browser/search/vision); `OUROBOROS_TOOL_TIMEOUT_SEC` in `settings.json` is the runtime SSOT override read on each tool call.
+- All tools have hard timeout (default 600s, per-tool overrides for browser/search/vision); `OUROBOROS_TOOL_TIMEOUT_SEC` in `settings.json` is the runtime SSOT override read on each tool call.
 - Multi-layer safety: hardcoded sandbox (registry.py) → deterministic whitelist → LLM safety supervisor
 - Tool results use explicit per-tool caps with visible truncation markers (`repo_read`/`data_read`/`knowledge_read`/`run_shell`: 80k, default: 15k chars). Cognitive reads (`memory/*`, prompts, BIBLE/docs, commit/review outputs) are exempt from silent clipping.
 - `run_shell` now treats non-zero exits as explicit failed tool outcomes and records exit/signal metadata in the tool trace.
-- `run_shell` rejects `cmd` as a plain string with a clear error (v4.10.0). The `cmd` parameter must always be a JSON array of strings.
+- `run_shell` rejects `cmd` as a plain string with a clear error. The `cmd` parameter must always be a JSON array of strings.
 - `set_tool_timeout` persists `OUROBOROS_TOOL_TIMEOUT_SEC` to `settings.json` and hot-applies it without restart.
 - `ensure_claude_cli`, `/api/claude-code/*`, and desktop onboarding all reuse the same Claude Code install/status helpers.
 - Claude Code install remains native-first (`install.sh` → Homebrew on macOS → npm fallback) and `claude_code_edit` still uses the installed CLI afterward.
-- **`seal_task_transcript`** (v4.10.2): called after compaction and before each `call_llm_with_retry`. Marks one stable tool-result boundary with `cache_control: ephemeral` to improve Anthropic prompt cache hits. Reverts all previous seals first so compaction always sees plain strings. Provider handling: OpenRouter (Anthropic models) passes list content blocks through as-is; direct Anthropic path preserves list content for `tool_result` (Anthropic API supports content blocks there); `_strip_cache_control` in `llm.py` now flattens tool-role list content back to a plain string for OpenAI, OpenAI-compatible, Cloud.ru, and local providers.
+- **`seal_task_transcript`**: called after compaction and before each `call_llm_with_retry`. Marks one stable tool-result boundary with `cache_control: ephemeral` to improve Anthropic prompt cache hits. Reverts all previous seals first so compaction always sees plain strings. Provider handling: OpenRouter (Anthropic models) passes list content blocks through as-is; direct Anthropic path preserves list content for `tool_result` (Anthropic API supports content blocks there); `_strip_cache_control` in `llm.py` now flattens tool-role list content back to a plain string for OpenAI, OpenAI-compatible, Cloud.ru, and local providers.
 - Context compaction kicks in after round 8 (summarizes old tool results)
 
 ### Git tools (tools/git.py + tools/review.py + supervisor/git_ops.py)
@@ -687,7 +687,7 @@ Settings file: `~/Ouroboros/data/settings.json`. File-locked for concurrent acce
 | OUROBOROS_TOOL_TIMEOUT_SEC | 600 | Global tool timeout override (read live from settings.json on each tool call) |
 | OUROBOROS_WEBSEARCH_MODEL | gpt-5.2 | Official OpenAI Responses model for `web_search` when `OPENAI_BASE_URL` is empty |
 | OUROBOROS_REVIEW_MODELS | openai/gpt-5.4,google/gemini-3.1-pro-preview,anthropic/claude-opus-4.6 | Comma-separated OpenRouter model IDs for pre-commit review (min 2 for quorum) |
-| OUROBOROS_REVIEW_ENFORCEMENT | blocking | Pre-commit review enforcement: `advisory` or `blocking` |
+| OUROBOROS_REVIEW_ENFORCEMENT | advisory | Pre-commit review enforcement: `advisory` or `blocking` |
 | OUROBOROS_SCOPE_REVIEW_MODEL | anthropic/claude-opus-4.6 | Single model for the blocking scope reviewer |
 | OUROBOROS_EFFORT_TASK | medium | Reasoning effort for task/chat: none, low, medium, high |
 | OUROBOROS_EFFORT_EVOLUTION | high | Reasoning effort for evolution tasks |

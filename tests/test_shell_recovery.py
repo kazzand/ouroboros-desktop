@@ -16,7 +16,7 @@ from ouroboros.tools.shell import (
 
 
 class TestShellArgContract:
-    """run_shell must reject string cmd with a clear error (v4.10.0+)."""
+    """run_shell must reject string cmd with a clear error."""
 
     def test_string_cmd_returns_hard_error(self):
         """Passing cmd as a plain string must return SHELL_ARG_ERROR, not recover."""

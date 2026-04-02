@@ -4,7 +4,7 @@ Every hardcoded set that classifies tool behavior (core visibility,
 parallelism, truncation policy, result size limits) lives HERE and
 only here.  Other modules import from this file.
 
-Why this exists: before v4.10, CORE_TOOL_NAMES was duplicated between
+Why this exists: before the tool-capabilities consolidation, CORE_TOOL_NAMES was duplicated between
 ``ouroboros/tools/registry.py`` and ``ouroboros/tool_policy.py``, while
 ``READ_ONLY_PARALLEL_TOOLS``, ``_UNTRUNCATED_TOOL_RESULTS``, and
 ``_UNTRUNCATED_REPO_READ_PATHS`` were hardcoded in
