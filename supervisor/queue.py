@@ -261,6 +261,10 @@ def cancel_task_by_id(task_id: str) -> bool:
                 if w.proc.is_alive():
                     w.proc.terminate()
                 w.proc.join(timeout=5)
+                if w.proc.is_alive() and w.proc.pid:
+                    from ouroboros.compat import kill_pid_tree
+                    kill_pid_tree(w.proc.pid)
+                    w.proc.join(timeout=2)
                 workers.respawn_worker(w.wid)
                 persist_queue_snapshot(reason="cancel_running")
                 return True
@@ -323,9 +327,12 @@ def enforce_task_timeouts() -> None:
                 if w.proc.is_alive():
                     w.proc.terminate()
                 w.proc.join(timeout=5)
+                if w.proc.is_alive() and w.proc.pid:
+                    from ouroboros.compat import kill_pid_tree
+                    kill_pid_tree(w.proc.pid)
+                    w.proc.join(timeout=2)
             except Exception:
                 log.warning("Failed to terminate worker %d during hard timeout", worker_id, exc_info=True)
-                pass
             workers.respawn_worker(worker_id)
 
         try:

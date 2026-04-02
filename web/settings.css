@@ -329,6 +329,25 @@
 
 .model-picker input {
     width: 100%;
+    min-width: 0;
+    padding: 10px 12px;
+    border-radius: 12px;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    background: rgba(26, 21, 32, 0.88);
+    color: var(--text-primary);
+    font-size: 14px;
+    font-family: inherit;
+    outline: none;
+    transition: border-color 0.2s, box-shadow 0.2s, background 0.2s;
+}
+
+.model-picker input:focus {
+    border-color: rgba(232, 93, 111, 0.4);
+    box-shadow: 0 0 0 3px rgba(232, 93, 111, 0.10);
+}
+
+.model-picker input::placeholder {
+    color: rgba(255, 255, 255, 0.24);
 }
 
 .model-picker-results {

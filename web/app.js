@@ -12,12 +12,12 @@ import { createWS } from './modules/ws.js';
 import { loadVersion, initMatrixRain } from './modules/utils.js';
 import { initChat } from './modules/chat.js';
 import { initFiles } from './modules/files.js';
-import { initDashboard } from './modules/dashboard.js';
+
 import { initLogs } from './modules/logs.js';
 import { initEvolution } from './modules/evolution.js';
 import { initSettings } from './modules/settings.js';
 import { initCosts } from './modules/costs.js';
-import { initVersions } from './modules/versions.js';
+
 import { initAbout } from './modules/about.js';
 import { initOnboardingOverlay } from './modules/onboarding_overlay.js';
 
@@ -95,12 +95,12 @@ const ctx = {
 
 initChat(ctx);
 initFiles(ctx);
-initDashboard(ctx);
+
 initLogs(ctx);
 initEvolution(ctx);
 initSettings(ctx);
 initCosts(ctx);
-initVersions(ctx);
+
 initAbout(ctx);
 initOnboardingOverlay();
 

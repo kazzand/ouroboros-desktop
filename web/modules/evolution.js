@@ -1,3 +1,5 @@
+import { escapeHtml } from './utils.js';
+
 export function initEvolution({ ws, state }) {
     const page = document.createElement('div');
     page.id = 'page-evolution';
@@ -7,10 +9,15 @@ export function initEvolution({ ws, state }) {
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
             <h2>Evolution</h2>
             <div class="spacer"></div>
+            <div class="evo-subtabs">
+                <button class="evo-subtab active" data-subtab="chart">Chart</button>
+                <button class="evo-subtab" data-subtab="versions">Versions</button>
+            </div>
             <button id="evo-refresh" class="btn btn-default evo-refresh-btn" type="button">Refresh</button>
             <span id="evo-status" class="status-badge">Loading...</span>
         </div>
-        <div class="evolution-container">
+        <!-- Chart sub-tab -->
+        <div id="evo-chart-content" class="evolution-container">
             <div class="evo-runtime-card">
                 <div class="evo-runtime-head">
                     <div>
@@ -29,9 +36,49 @@ export function initEvolution({ ws, state }) {
             </div>
             <div id="evo-tags-list" class="evo-tags-list"></div>
         </div>
+        <!-- Versions sub-tab -->
+        <div id="evo-versions-content" style="display:none;flex:1;flex-direction:column;overflow:hidden;padding:20px">
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:16px">
+                <div id="ver-current" style="flex:1;font-size:13px;color:var(--text-secondary)"></div>
+                <button class="btn btn-primary" id="btn-promote">Promote to Stable</button>
+            </div>
+            <div style="display:flex;gap:24px;flex:1;overflow:hidden">
+                <div style="flex:1;display:flex;flex-direction:column;overflow:hidden">
+                    <h3 style="margin-bottom:8px;font-size:14px;color:var(--text-secondary)">Recent Commits</h3>
+                    <div id="ver-commits" class="log-scroll" style="flex:1;overflow-y:auto"></div>
+                </div>
+                <div style="flex:1;display:flex;flex-direction:column;overflow:hidden">
+                    <h3 style="margin-bottom:8px;font-size:14px;color:var(--text-secondary)">Tags</h3>
+                    <div id="ver-tags" class="log-scroll" style="flex:1;overflow-y:auto"></div>
+                </div>
+            </div>
+        </div>
     `;
     document.getElementById('content').appendChild(page);
 
+    // -----------------------------------------------------------------------
+    // Sub-tab switching
+    // -----------------------------------------------------------------------
+    let activeSubtab = 'chart';
+    const subtabButtons = page.querySelectorAll('.evo-subtab');
+    const chartContent = document.getElementById('evo-chart-content');
+    const versionsContent = document.getElementById('evo-versions-content');
+
+    function showSubtab(name) {
+        activeSubtab = name;
+        subtabButtons.forEach(btn => btn.classList.toggle('active', btn.dataset.subtab === name));
+        chartContent.style.display = name === 'chart' ? '' : 'none';
+        versionsContent.style.display = name === 'versions' ? 'flex' : 'none';
+        if (name === 'versions' && !versionsLoaded) loadVersions();
+    }
+
+    subtabButtons.forEach(btn => {
+        btn.addEventListener('click', () => showSubtab(btn.dataset.subtab));
+    });
+
+    // -----------------------------------------------------------------------
+    // Chart sub-tab (existing evolution logic)
+    // -----------------------------------------------------------------------
     let evoChart = null;
     let loadSequence = 0;
     const refreshBtn = document.getElementById('evo-refresh');
@@ -213,7 +260,6 @@ export function initEvolution({ ws, state }) {
                             padding: 16,
                             font: { size: 12, family: 'JetBrains Mono, monospace' },
                         },
-
                     },
                     tooltip: {
                         backgroundColor: '#1e293b',
@@ -290,23 +336,110 @@ export function initEvolution({ ws, state }) {
         `;
     }
 
+    // -----------------------------------------------------------------------
+    // Versions sub-tab (merged from versions.js)
+    // -----------------------------------------------------------------------
+    const commitsDiv = document.getElementById('ver-commits');
+    const tagsDiv = document.getElementById('ver-tags');
+    const currentDiv = document.getElementById('ver-current');
+    let versionsLoaded = false;
+
+    function renderRow(item, labelText, targetId) {
+        const row = document.createElement('div');
+        row.className = 'log-entry';
+        row.style.display = 'flex';
+        row.style.alignItems = 'center';
+        row.style.gap = '8px';
+        const date = (item.date || '').slice(0, 16).replace('T', ' ');
+        const msg = escapeHtml((item.message || '').slice(0, 60));
+        row.innerHTML = `
+            <span class="log-type tools" style="min-width:70px;text-align:center">${escapeHtml(labelText)}</span>
+            <span class="log-ts">${date}</span>
+            <span class="log-msg" style="flex:1">${msg}</span>
+            <button class="btn btn-danger" style="padding:2px 8px;font-size:11px" data-target="${escapeHtml(targetId)}">Restore</button>
+        `;
+        row.querySelector('button').addEventListener('click', () => rollback(targetId));
+        return row;
+    }
+
+    async function loadVersions() {
+        try {
+            const resp = await fetch('/api/git/log');
+            const data = await resp.json();
+            currentDiv.textContent = `Branch: ${data.branch || '?'} @ ${data.sha || '?'}`;
+
+            commitsDiv.innerHTML = '';
+            (data.commits || []).forEach(c => {
+                commitsDiv.appendChild(renderRow(c, c.short_sha || c.sha?.slice(0, 8), c.sha));
+            });
+            if (!data.commits?.length) commitsDiv.innerHTML = '<div style="color:var(--text-muted);padding:12px">No commits found</div>';
+
+            tagsDiv.innerHTML = '';
+            (data.tags || []).forEach(t => {
+                tagsDiv.appendChild(renderRow(t, t.tag, t.tag));
+            });
+            if (!data.tags?.length) tagsDiv.innerHTML = '<div style="color:var(--text-muted);padding:12px">No tags found</div>';
+            versionsLoaded = true;
+        } catch (e) {
+            commitsDiv.innerHTML = `<div style="color:var(--red);padding:12px">Failed to load: ${e.message}</div>`;
+        }
+    }
+
+    async function rollback(target) {
+        if (!confirm(`Roll back to ${target}?\n\nA rescue snapshot of the current state will be saved. The server will restart.`)) return;
+        try {
+            const resp = await fetch('/api/git/rollback', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ target }),
+            });
+            const data = await resp.json();
+            if (data.status === 'ok') {
+                alert('Rollback successful: ' + data.message + '\n\nServer is restarting...');
+            } else {
+                alert('Rollback failed: ' + (data.error || 'unknown error'));
+            }
+        } catch (e) {
+            alert('Rollback failed: ' + e.message);
+        }
+    }
+
+    document.getElementById('btn-promote').addEventListener('click', async () => {
+        if (!confirm('Promote current ouroboros branch to ouroboros-stable?')) return;
+        try {
+            const resp = await fetch('/api/git/promote', { method: 'POST' });
+            const data = await resp.json();
+            alert(data.status === 'ok' ? data.message : 'Error: ' + (data.error || 'unknown'));
+        } catch (e) {
+            alert('Failed: ' + e.message);
+        }
+    });
+
+    // -----------------------------------------------------------------------
+    // Refresh button + event listeners
+    // -----------------------------------------------------------------------
     refreshBtn.addEventListener('click', () => {
-        loadEvolution(true);
+        if (activeSubtab === 'chart') loadEvolution(true);
+        else loadVersions();
     });
 
     ws.on('open', () => {
-        if (state.activePage === 'evolution') loadEvolution(true);
+        if (state.activePage === 'evolution') {
+            loadEvolution(true);
+            if (activeSubtab === 'versions') loadVersions();
+        }
     });
 
     window.addEventListener('ouro:page-shown', (event) => {
         if (event?.detail?.page === 'evolution') {
-            loadEvolution(true);
+            if (activeSubtab === 'chart') loadEvolution(true);
+            else loadVersions();
         }
     });
 
     document.addEventListener('visibilitychange', () => {
         if (!document.hidden && state.activePage === 'evolution') {
-            loadEvolution(true);
+            if (activeSubtab === 'chart') loadEvolution(true);
         }
     });
 

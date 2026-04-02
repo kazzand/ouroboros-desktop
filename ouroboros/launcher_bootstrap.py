@@ -277,34 +277,13 @@ def commit_bundle_sync(context: BootstrapContext, old_version: str, new_version:
 
 
 def sync_existing_repo_from_bundle(context: BootstrapContext) -> None:
-    """Sync an existing repo from the bundle without clobbering user edits.
+    """Sync safety-critical files from the bundle into an existing repo.
 
-    Default behavior is conservative:
-    - always force-sync the 3 protected core files
-    - fill in any missing managed paths
-    - commit only the protected core-file sync
-
-    If the bundle version differs from the repo version *and* the repo is clean,
-    create a backup branch first, then perform a full managed-path overwrite and
-    commit the bundle sync as an explicit upgrade commit.
+    Only the 3 protected core files (safety.py, SAFETY.md, registry.py) are
+    overwritten — everything else in the repo is left untouched so that the
+    agent's self-modifications are never clobbered by an older bundle.
     """
-    bundle_version = read_version_file(context.bundle_dir)
-    repo_version = read_version_file(context.repo_dir)
-    version_mismatch = bool(bundle_version and repo_version and bundle_version != repo_version)
-    repo_dirty = repo_has_pending_changes(context)
-    backup_branch = ""
-
-    if version_mismatch and not repo_dirty:
-        backup_branch = create_bundle_backup_branch(context, repo_version)
-
     sync_core_files(context)
-    sync_bundle_managed_paths(context, overwrite_existing=False)
-
-    if version_mismatch and not repo_dirty and backup_branch:
-        sync_bundle_managed_paths(context, overwrite_existing=True)
-        commit_bundle_sync(context, repo_version, bundle_version)
-        return
-
     commit_synced_files(context)
 
 
@@ -319,7 +298,7 @@ def _migrate_old_settings(context: BootstrapContext) -> None:
         "OPENAI_COMPATIBLE_API_KEY", "OPENAI_COMPATIBLE_BASE_URL",
         "CLOUDRU_FOUNDATION_MODELS_API_KEY", "CLOUDRU_FOUNDATION_MODELS_BASE_URL",
         "ANTHROPIC_API_KEY",
-        "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID", "TELEGRAM_ALLOWED_CHAT_IDS",
+        "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID",
         "OUROBOROS_NETWORK_PASSWORD", "OUROBOROS_FILE_BROWSER_DEFAULT",
         "OUROBOROS_MODEL", "OUROBOROS_MODEL_CODE", "OUROBOROS_MODEL_LIGHT",
         "OUROBOROS_MODEL_FALLBACK", "TOTAL_BUDGET", "OUROBOROS_MAX_WORKERS",

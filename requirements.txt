@@ -6,6 +6,9 @@ python-multipart
 uvicorn[standard]
 websockets
 huggingface_hub
+# optional: Claude Agent SDK for delegated code editing and advisory review (Python 3.10+)
+# Falls back to CLI subprocess if not installed
+# pip install claude-agent-sdk>=0.1.50
 # optional: browser automation tools (for browse_page/browser_action)
 playwright
 playwright-stealth

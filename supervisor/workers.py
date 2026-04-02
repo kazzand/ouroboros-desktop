@@ -293,6 +293,8 @@ def auto_resume_after_restart() -> None:
 # ---------------------------------------------------------------------------
 
 def worker_main(wid: int, in_q: Any, out_q: Any, repo_dir: str, drive_root: str) -> None:
+    if sys.platform != "win32":
+        os.setsid()
     import sys as _sys
     import traceback as _tb
     import pathlib as _pathlib
@@ -480,7 +482,7 @@ def spawn_workers(n: int = 0) -> None:
     threading.Thread(target=_verify_worker_sha_after_spawn, args=(events_offset,), daemon=True).start()
 
 
-def kill_workers(force: bool = False) -> None:
+def kill_workers(force: bool = True) -> None:
     from supervisor import queue
     with _queue_lock:
         cleared_running = len(RUNNING)
@@ -489,8 +491,7 @@ def kill_workers(force: bool = False) -> None:
                 w.proc.terminate()
         for w in WORKERS.values():
             w.proc.join(timeout=3)
-        if force:
-            _kill_survivors()
+        _kill_survivors()
         WORKERS.clear()
         # --- Zombie prevention: write failure results before clearing ---
         try:
@@ -537,16 +538,15 @@ def kill_workers(force: bool = False) -> None:
 
 
 def _kill_survivors() -> None:
-    """Force-kill any workers still alive after graceful termination."""
-    from ouroboros.compat import force_kill_pid
+    """Force-kill any workers and their entire descendant trees."""
+    from ouroboros.compat import kill_pid_tree
     for w in WORKERS.values():
-        if not w.proc.is_alive():
-            continue
         pid = w.proc.pid
         if pid is None:
             continue
-        force_kill_pid(pid)
-        w.proc.join(timeout=2)
+        if w.proc.is_alive():
+            kill_pid_tree(pid)
+            w.proc.join(timeout=2)
 
 
 def respawn_worker(wid: int) -> None:

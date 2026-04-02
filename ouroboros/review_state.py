@@ -47,10 +47,25 @@ class AdvisoryRunRecord:
 
 
 @dataclass
+class CommitAttemptRecord:
+    """Tracks a single repo_commit / repo_write_commit attempt."""
+
+    ts: str
+    commit_message: str
+    status: str  # "pending" | "reviewing" | "blocked" | "succeeded" | "failed"
+    snapshot_hash: str = ""
+    block_reason: str = ""  # "no_advisory" | "review_quorum" | "critical_findings" | "parse_failure" | "infra_failure" | "scope_blocked" | "preflight"
+    block_details: str = ""  # the full blocking message
+    duration_sec: float = 0.0
+    task_id: str = ""
+
+
+@dataclass
 class AdvisoryReviewState:
     """Top-level state container."""
 
     runs: List[AdvisoryRunRecord] = field(default_factory=list)
+    last_commit_attempt: Optional[CommitAttemptRecord] = field(default=None)
 
     def latest(self) -> Optional[AdvisoryRunRecord]:
         """Return the most recent run, or None."""
@@ -105,6 +120,19 @@ def _record_from_dict(d: Dict[str, Any]) -> AdvisoryRunRecord:
     )
 
 
+def _commit_attempt_from_dict(d: Dict[str, Any]) -> CommitAttemptRecord:
+    return CommitAttemptRecord(
+        ts=str(d.get("ts", "")),
+        commit_message=str(d.get("commit_message", "")),
+        status=str(d.get("status", "failed")),
+        snapshot_hash=str(d.get("snapshot_hash", "")),
+        block_reason=str(d.get("block_reason", "")),
+        block_details=str(d.get("block_details", "")),
+        duration_sec=float(d.get("duration_sec", 0.0)),
+        task_id=str(d.get("task_id", "")),
+    )
+
+
 def load_state(drive_root: pathlib.Path) -> AdvisoryReviewState:
     """Load advisory review state from disk. Returns empty state on any error."""
     path = drive_root / _STATE_RELPATH
@@ -114,7 +142,10 @@ def load_state(drive_root: pathlib.Path) -> AdvisoryReviewState:
         raw = path.read_text(encoding="utf-8")
         data = json.loads(raw)
         runs = [_record_from_dict(r) for r in (data.get("runs") or [])]
-        return AdvisoryReviewState(runs=runs)
+        last_commit = None
+        if data.get("last_commit_attempt"):
+            last_commit = _commit_attempt_from_dict(data["last_commit_attempt"])
+        return AdvisoryReviewState(runs=runs, last_commit_attempt=last_commit)
     except Exception as e:
         log.warning("Failed to load advisory review state from %s: %s", path, e)
         return AdvisoryReviewState()
@@ -125,8 +156,9 @@ def save_state(drive_root: pathlib.Path, state: AdvisoryReviewState) -> None:
     path = drive_root / _STATE_RELPATH
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        data = {
+        data: Dict[str, Any] = {
             "runs": [asdict(r) for r in state.runs],
+            "last_commit_attempt": asdict(state.last_commit_attempt) if state.last_commit_attempt else None,
             "saved_at": _utc_now(),
         }
         tmp = path.with_suffix(".tmp")
@@ -234,12 +266,14 @@ def compute_snapshot_hash(
 def format_status_section(state: AdvisoryReviewState) -> str:
     """Render a compact section for LLM context injection.
 
-    Shows the last 3 runs with their status, hash, and key findings.
+    Shows the last 3 advisory runs with their status, hash, and key findings,
+    plus the last commit attempt if it was blocked or failed.
     """
-    if not state.runs:
+    if not state.runs and not state.last_commit_attempt:
         return "## Advisory Pre-Review Status\n\nNo advisory runs recorded yet."
 
     lines = ["## Advisory Pre-Review Status"]
+
     for run in state.runs[-3:]:
         status_icon = {
             "fresh": "✅",
@@ -272,6 +306,23 @@ def format_status_section(state: AdvisoryReviewState) -> str:
                 lines.append(f"     ... and {len(findings) - 5} more")
         elif run.status == "fresh":
             lines.append("   No findings.")
+
+    # Show last commit attempt if blocked or failed
+    ca = state.last_commit_attempt
+    if ca and ca.status in ("blocked", "failed"):
+        icon = "🚫" if ca.status == "blocked" else "❌"
+        ts_short = ca.ts[:16] if len(ca.ts) >= 16 else ca.ts
+        msg_short = ca.commit_message[:60] + ("..." if len(ca.commit_message) > 60 else "")
+        lines.append(f"\n{icon} **Last commit {ca.status.upper()}** | {ts_short}")
+        lines.append(f"   Commit: {msg_short}")
+        if ca.block_reason:
+            lines.append(f"   Reason: {ca.block_reason}")
+        if ca.block_details:
+            # Show first 200 chars of details
+            preview = ca.block_details[:200].replace("\n", " ")
+            lines.append(f"   Details: {preview}")
+        if ca.duration_sec > 0:
+            lines.append(f"   Duration: {ca.duration_sec:.1f}s")
 
     return "\n".join(lines)
 

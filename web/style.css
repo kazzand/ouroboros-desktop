@@ -65,10 +65,10 @@ body {
     align-items: center;
     padding: 12px 0;
     gap: 4px;
-    background: linear-gradient(180deg, rgba(255, 255, 255, 0.06), rgba(255, 255, 255, 0.02));
-    backdrop-filter: blur(16px);
-    border-right: 1px solid rgba(255, 255, 255, 0.08);
-    box-shadow: inset -1px 0 0 rgba(255, 255, 255, 0.03);
+    background: linear-gradient(180deg, rgba(255, 255, 255, 0.04), rgba(255, 255, 255, 0.01));
+    backdrop-filter: blur(20px);
+    border-right: none;
+    box-shadow: none;
     flex-shrink: 0;
     z-index: 2;
 }
@@ -111,13 +111,14 @@ body {
     align-items: center;
     gap: 4px;
     padding: 10px 6px;
-    width: 68px;
-    border: none;
-    background: transparent;
+    width: 64px;
+    border: 1px solid rgba(255, 255, 255, 0.04);
+    background: rgba(255, 255, 255, 0.03);
+    backdrop-filter: blur(8px);
     color: var(--text-secondary);
     cursor: pointer;
-    border-radius: var(--radius-sm);
-    transition: all 0.15s;
+    border-radius: var(--radius-lg);
+    transition: all 0.2s ease;
     font-size: 11px;
     font-family: inherit;
     position: relative;
@@ -141,18 +142,24 @@ body {
     line-height: 1;
 }
 
-.nav-btn:hover { background: var(--bg-hover); color: var(--text-primary); }
+.nav-btn:hover {
+    background: rgba(255, 255, 255, 0.08);
+    border-color: rgba(255, 255, 255, 0.10);
+    color: var(--text-primary);
+    transform: scale(1.04);
+    box-shadow: 0 2px 12px rgba(0, 0, 0, 0.2);
+}
 .nav-btn.active {
-    background: var(--accent-dim);
+    background: rgba(201, 53, 69, 0.12);
+    border-color: rgba(201, 53, 69, 0.25);
     color: var(--accent);
-    box-shadow: 0 0 12px var(--accent-glow);
+    box-shadow:
+        0 0 16px rgba(201, 53, 69, 0.10),
+        inset 0 0 12px rgba(201, 53, 69, 0.05);
 }
 
 #divider {
-    width: 1px;
-    background: var(--divider);
-    flex-shrink: 0;
-    z-index: 2;
+    display: none;
 }
 
 /* Main content */
@@ -595,6 +602,75 @@ body {
 .chat-header-btn.danger:hover {
     border-color: rgba(239, 68, 68, 0.40);
     background: rgba(239, 68, 68, 0.08);
+}
+
+/* Budget pill in chat header */
+.chat-budget-pill {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 3px;
+    padding: 4px 12px;
+    border-radius: 999px;
+    border: 1px solid rgba(245, 158, 11, 0.18);
+    background: rgba(245, 158, 11, 0.08);
+    cursor: default;
+    min-width: 100px;
+}
+
+.chat-budget-text {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--amber);
+    white-space: nowrap;
+    letter-spacing: 0.02em;
+}
+
+.chat-budget-bar {
+    width: 100%;
+    height: 2px;
+    border-radius: 1px;
+    background: rgba(245, 158, 11, 0.12);
+    overflow: hidden;
+}
+
+.chat-budget-bar-fill {
+    height: 100%;
+    border-radius: 1px;
+    background: var(--amber);
+    transition: width 0.4s ease;
+    width: 0;
+}
+
+/* Evolution sub-tabs */
+.evo-subtabs {
+    display: flex;
+    gap: 4px;
+    padding: 0 4px;
+}
+
+.evo-subtab {
+    padding: 6px 16px;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 999px;
+    background: transparent;
+    color: var(--text-secondary);
+    font-size: 12px;
+    font-weight: 600;
+    font-family: inherit;
+    cursor: pointer;
+    transition: all 0.15s;
+}
+
+.evo-subtab:hover {
+    border-color: rgba(255, 255, 255, 0.16);
+    color: var(--text-primary);
+}
+
+.evo-subtab.active {
+    border-color: rgba(201, 53, 69, 0.38);
+    background: rgba(201, 53, 69, 0.14);
+    color: var(--accent-light);
 }
 
 /* Status badge */
@@ -1217,20 +1293,7 @@ body {
     box-shadow: 0 0 10px var(--accent-glow);
 }
 
-/* Dashboard */
-.dashboard-scroll {
-    flex: 1;
-    overflow-y: auto;
-    padding: 20px;
-}
-
-.stats-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-    gap: 16px;
-    margin-bottom: 24px;
-}
-
+/* Shared UI components (stat cards used by Costs, section titles by Evolution) */
 .stat-card {
     background: linear-gradient(180deg, rgba(255, 255, 255, 0.05), rgba(255, 255, 255, 0.02));
     border-radius: var(--radius);
@@ -1261,44 +1324,11 @@ body {
     font-weight: 700;
 }
 
-.progress-bar {
-    height: 4px;
-    border-radius: 2px;
-    background: rgba(255, 255, 255, 0.08);
-    margin-top: 8px;
-    overflow: hidden;
-}
-
-.progress-bar .fill {
-    height: 100%;
-    border-radius: 2px;
-    transition: width 0.3s ease;
-}
-
 .section-title {
     font-size: 14px;
     font-weight: 600;
     color: var(--text-secondary);
     margin: 16px 0 12px;
-}
-
-.controls-row {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 12px;
-    margin-bottom: 16px;
-}
-
-.dashboard-runtime-status {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-    margin-top: -4px;
-}
-
-.dashboard-runtime-note {
-    color: var(--text-secondary);
-    line-height: 1.5;
 }
 
 /* Toggle switch */

@@ -252,6 +252,21 @@ def verify_system_state(env: Any, git_sha: str) -> None:
     if issues > 0:
         log.warning(f"Startup verification found {issues} issue(s): {checks}")
 
+    # Reconcile stale 'reviewing' commit attempts left by abrupt process death
+    try:
+        import pathlib
+        from ouroboros.review_state import load_state, save_state
+        drive_root = pathlib.Path(env.drive_root) if hasattr(env, "drive_root") else env.drive_path("").parent
+        st = load_state(drive_root)
+        if st.last_commit_attempt and st.last_commit_attempt.status == "reviewing":
+            st.last_commit_attempt.status = "failed"
+            st.last_commit_attempt.block_reason = "infra_failure"
+            st.last_commit_attempt.block_details = "Process died while reviewing (reconciled on startup)"
+            save_state(drive_root, st)
+            log.warning("Reconciled stale 'reviewing' commit attempt → failed")
+    except Exception:
+        log.debug("Failed to reconcile commit attempt state", exc_info=True)
+
 
 def inject_crash_report(env: Any) -> None:
     """If a crash report exists from a rollback, log it to events.

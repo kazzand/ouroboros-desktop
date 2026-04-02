@@ -58,6 +58,12 @@ export function initChat({ ws, state, updateUnreadBadge }) {
                 <button class="chat-header-btn" type="button" data-chat-command="restart" title="Restart agent">Restart</button>
                 <button class="chat-header-btn danger" type="button" data-chat-command="panic" title="Stop all workers">Panic</button>
             </div>
+            <div class="chat-budget-pill" id="chat-budget-pill" title="Budget">
+                <span class="chat-budget-text" id="chat-budget-text">$0 / $0</span>
+                <div class="chat-budget-bar">
+                    <div class="chat-budget-bar-fill" id="chat-budget-bar-fill"></div>
+                </div>
+            </div>
             <span id="chat-status" class="status-badge offline">Connecting...</span>
         </div>
         <div id="chat-messages"></div>
@@ -208,6 +214,13 @@ export function initChat({ ws, state, updateUnreadBadge }) {
                 if (data?.bg_consciousness_state?.detail) button.title = data.bg_consciousness_state.detail;
             }
         });
+        // Update budget pill
+        const spent = data?.spent_usd || 0;
+        const limit = data?.budget_limit || 10;
+        const budgetText = document.getElementById('chat-budget-text');
+        const budgetFill = document.getElementById('chat-budget-bar-fill');
+        if (budgetText) budgetText.textContent = `$${spent.toFixed(0)} / $${limit.toFixed(0)}`;
+        if (budgetFill) budgetFill.style.width = `${Math.min(100, (spent / limit) * 100)}%`;
     }
 
     async function refreshHeaderControlState(force = false) {
@@ -710,6 +723,10 @@ export function initChat({ ws, state, updateUnreadBadge }) {
     function updateLiveCardFromProgressMessage(msg) {
         const taskId = msg?.task_id || activeLiveGroupId || '';
         if (!taskId) return;
+        // Progress messages are user-facing status updates (e.g. "🔍 Searching...")
+        // that should always be visible — force the live card open immediately.
+        const taskState = getTaskUiState(taskId, true);
+        if (taskState) taskState.forceCard = true;
         const summary = summarizeChatLiveEvent({
             type: 'send_message',
             is_progress: true,

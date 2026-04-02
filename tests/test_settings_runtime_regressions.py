@@ -182,6 +182,10 @@ def test_api_command_uses_local_enqueue_semantics(monkeypatch, tmp_path):
     assert captured == {"text": "status", "kwargs": {"broadcast": False}}
 
 
+@pytest.mark.skipif(
+    not (pathlib.Path(__file__).resolve().parents[1] / "launcher.py").exists(),
+    reason="launcher.py not present in repo (bundle-only)",
+)
 def test_launcher_marks_server_as_managed():
     launcher_source = (pathlib.Path(__file__).resolve().parents[1] / "launcher.py").read_text(encoding="utf-8")
 

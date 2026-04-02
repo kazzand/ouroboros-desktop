@@ -8,6 +8,34 @@ def _make_bridge(monkeypatch, settings=None):
     return message_bus.LocalChatBridge(settings or {})
 
 
+def test_parse_single_chat_id_valid(monkeypatch):
+    bridge = _make_bridge(monkeypatch)
+    assert bridge._parse_single_chat_id("12345") == 12345
+
+
+def test_parse_single_chat_id_empty(monkeypatch):
+    bridge = _make_bridge(monkeypatch)
+    assert bridge._parse_single_chat_id("") == 0
+    assert bridge._parse_single_chat_id("   ") == 0
+
+
+def test_parse_single_chat_id_invalid(monkeypatch):
+    bridge = _make_bridge(monkeypatch)
+    assert bridge._parse_single_chat_id("not-a-number") == 0
+
+
+def test_configure_from_settings_without_legacy_field(monkeypatch):
+    """After removing TELEGRAM_ALLOWED_CHAT_IDS, configure_from_settings
+    should work with only TELEGRAM_CHAT_ID."""
+    bridge = _make_bridge(monkeypatch)
+    bridge.configure_from_settings({
+        "TELEGRAM_BOT_TOKEN": "",
+        "TELEGRAM_CHAT_ID": "999",
+    })
+    assert bridge._telegram_chat_id == 999
+    assert bridge._telegram_active_chat_id == 999
+
+
 def test_ui_send_enqueues_structured_message_and_broadcasts(monkeypatch):
     bridge = _make_bridge(monkeypatch)
     broadcasts = []

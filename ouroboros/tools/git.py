@@ -19,15 +19,30 @@ from typing import Any, Dict, List, Optional
 
 from ouroboros.tools.registry import ToolContext, ToolEntry, SAFETY_CRITICAL_PATHS
 from ouroboros.utils import utc_now_iso, write_text, safe_relpath, run_cmd
-
 _CONTENT_OMITTED_PREFIX = "<<CONTENT_OMITTED"
-
 log = logging.getLogger(__name__)
 
 
 def _sanitize_git_error(msg: str) -> str:
     return re.sub(r"(https?://)([^@\s]+@)", r"\1<redacted>@", msg)
 
+
+def _record_commit_attempt(ctx: ToolContext, commit_message: str, status: str,
+                           block_reason: str = "", block_details: str = "",
+                           duration_sec: float = 0.0, snapshot_hash: str = "") -> None:
+    """Record a commit attempt in the durable review state."""
+    try:
+        from ouroboros.review_state import CommitAttemptRecord, load_state, save_state, _utc_now
+        state = load_state(pathlib.Path(ctx.drive_root))
+        state.last_commit_attempt = CommitAttemptRecord(
+            ts=_utc_now(), commit_message=commit_message[:200], status=status,
+            snapshot_hash=snapshot_hash, block_reason=block_reason,
+            block_details=block_details[:2000], duration_sec=duration_sec,
+            task_id=str(getattr(ctx, "task_id", "") or ""),
+        )
+        save_state(pathlib.Path(ctx.drive_root), state)
+    except Exception as e:
+        log.warning("Failed to record commit attempt: %s", e)
 
 def _auto_tag_on_version_bump(repo_dir: pathlib.Path, commit_message: str) -> str:
     try:
@@ -54,7 +69,6 @@ def _auto_tag_on_version_bump(repo_dir: pathlib.Path, commit_message: str) -> st
         log.warning("Auto-tag check failed: %s", e)
         return ""
 
-
 def _auto_push(repo_dir: pathlib.Path) -> str:
     try:
         from supervisor.git_ops import push_to_remote
@@ -66,23 +80,16 @@ def _auto_push(repo_dir: pathlib.Path) -> str:
         log.debug("Auto-push failed (non-fatal): %s", e)
         return " [push failed — will retry later]"
 
-
 _BINARY_EXTENSIONS = frozenset({
     ".so", ".dylib", ".dll", ".a", ".lib", ".o", ".obj",
     ".pyc", ".pyo", ".whl", ".egg",
 })
 
-
 def _ensure_gitignore(repo_dir) -> None:
     gi = pathlib.Path(repo_dir) / ".gitignore"
-    if gi.exists():
-        return
-    gi.write_text(
-        "__pycache__/\n*.pyc\n*.pyo\n*.so\n*.dylib\n*.dll\n"
-        "*.dist-info/\nbase_library.zip\n.DS_Store\n",
-        encoding="utf-8",
-    )
-
+    if not gi.exists():
+        gi.write_text("__pycache__/\n*.pyc\n*.pyo\n*.so\n*.dylib\n*.dll\n"
+                       "*.dist-info/\nbase_library.zip\n.DS_Store\n", encoding="utf-8")
 
 def _unstage_binaries(repo_dir) -> List[str]:
     try:
@@ -135,9 +142,6 @@ def _release_git_lock(lock_path: pathlib.Path) -> None:
         lock_path.unlink()
     except FileNotFoundError:
         pass
-
-
-# --- Pre-push test gate ---
 
 MAX_TEST_OUTPUT = 8000
 _consecutive_test_failures: int = 0
@@ -491,20 +495,34 @@ def _repo_write_commit(ctx: ToolContext, path: str, content: str,
     shrink_warning = _check_shrink_guard(ctx, path, content)
     if shrink_warning:
         return shrink_warning
-    lock = _acquire_git_lock(ctx)
+    _commit_start = time.time()
+    _record_commit_attempt(ctx, commit_message, "reviewing")
+    try:
+        lock = _acquire_git_lock(ctx)
+    except (TimeoutError, Exception) as e:
+        _record_commit_attempt(ctx, commit_message, "failed",
+                               block_reason="infra_failure",
+                               block_details=f"Git lock: {e}",
+                               duration_sec=time.time() - _commit_start)
+        return f"⚠️ GIT_ERROR (lock): {e}"
     test_warning_ref = [""]
+    _fail = lambda msg: (_record_commit_attempt(ctx, commit_message, "failed",
+        block_reason="infra_failure", block_details=msg,
+        duration_sec=time.time() - _commit_start), msg)[1]
     try:
         try:
             run_cmd(["git", "checkout", ctx.branch_dev], cwd=ctx.repo_dir)
         except Exception as e:
-            return f"⚠️ GIT_ERROR (checkout): {_sanitize_git_error(str(e))}"
-        # Write file inside lock so advisory snapshot is accurate
+            return _fail(f"⚠️ GIT_ERROR (checkout): {_sanitize_git_error(str(e))}")
         try:
             write_text(ctx.repo_path(path), content)
         except Exception as e:
-            return f"⚠️ FILE_WRITE_ERROR: {e}"
+            return _fail(f"⚠️ FILE_WRITE_ERROR: {e}")
         advisory_err = _check_advisory_freshness(ctx, commit_message)
         if advisory_err:
+            _record_commit_attempt(ctx, commit_message, "blocked",
+                                   block_reason="no_advisory", block_details=advisory_err,
+                                   duration_sec=time.time() - _commit_start)
             return (
                 advisory_err + "\n\n"
                 "Note: the file has been written to disk inside the git lock. "
@@ -513,7 +531,7 @@ def _repo_write_commit(ctx: ToolContext, path: str, content: str,
         try:
             run_cmd(["git", "add", safe_relpath(path)], cwd=ctx.repo_dir)
         except Exception as e:
-            return f"⚠️ GIT_ERROR (add): {_sanitize_git_error(str(e))}"
+            return _fail(f"⚠️ GIT_ERROR (add): {_sanitize_git_error(str(e))}")
         if also_stage:
             for extra in also_stage:
                 extra = extra.strip()
@@ -529,15 +547,24 @@ def _repo_write_commit(ctx: ToolContext, path: str, content: str,
         review_err = _run_unified_review(ctx, commit_message)
         if review_err:
             run_cmd(["git", "reset", "HEAD"], cwd=ctx.repo_dir)
+            block_reason = getattr(ctx, "_last_review_block_reason", "critical_findings")
+            _record_commit_attempt(ctx, commit_message, "blocked",
+                                   block_reason=block_reason, block_details=review_err,
+                                   duration_sec=time.time() - _commit_start)
             return review_err
 
         try:
             run_cmd(["git", "commit", "-m", commit_message], cwd=ctx.repo_dir)
         except Exception as e:
-            return f"⚠️ GIT_ERROR (commit): {_sanitize_git_error(str(e))}"
-
+            err_msg = f"⚠️ GIT_ERROR (commit): {_sanitize_git_error(str(e))}"
+            _record_commit_attempt(ctx, commit_message, "failed",
+                                   block_reason="infra_failure", block_details=err_msg,
+                                   duration_sec=time.time() - _commit_start)
+            return err_msg
+        _record_commit_attempt(ctx, commit_message, "succeeded",
+                               duration_sec=time.time() - _commit_start)
         _post_commit_result(ctx, commit_message, skip_tests, test_warning_ref)
-        tag_info = _auto_tag_on_version_bump(ctx.repo_dir, commit_message) if not test_warning_ref[0] else ""
+        tag_info = _auto_tag_on_version_bump(ctx.repo_dir, commit_message)
     finally:
         _release_git_lock(lock)
     push_status = _auto_push(ctx.repo_dir)
@@ -555,20 +582,32 @@ def _repo_commit_push(ctx: ToolContext, commit_message: str,
     """Stage, review, and commit files with unified pre-commit review."""
     ctx.last_push_succeeded = False
     ctx._review_advisory = []
+    _commit_start = time.time()
     if not commit_message.strip():
         return "⚠️ ERROR: commit_message must be non-empty."
-    lock = _acquire_git_lock(ctx)
+    _record_commit_attempt(ctx, commit_message, "reviewing")
+    try:
+        lock = _acquire_git_lock(ctx)
+    except (TimeoutError, Exception) as e:
+        _record_commit_attempt(ctx, commit_message, "failed",
+                               block_reason="infra_failure",
+                               block_details=f"Git lock: {e}",
+                               duration_sec=time.time() - _commit_start)
+        return f"⚠️ GIT_ERROR (lock): {e}"
     test_warning_ref = [""]
+    _fail = lambda msg: (_record_commit_attempt(ctx, commit_message, "failed",
+        block_reason="infra_failure", block_details=msg,
+        duration_sec=time.time() - _commit_start), msg)[1]
     try:
         try:
             run_cmd(["git", "checkout", ctx.branch_dev], cwd=ctx.repo_dir)
         except Exception as e:
-            return f"⚠️ GIT_ERROR (checkout): {_sanitize_git_error(str(e))}"
+            return _fail(f"⚠️ GIT_ERROR (checkout): {_sanitize_git_error(str(e))}")
         if paths:
             try:
                 safe_paths = [safe_relpath(p) for p in paths if str(p).strip()]
             except ValueError as e:
-                return f"⚠️ PATH_ERROR: {e}"
+                return _fail(f"⚠️ PATH_ERROR: {e}")
             add_cmd = ["git", "add"] + safe_paths
         else:
             _ensure_gitignore(ctx.repo_dir)
@@ -576,7 +615,7 @@ def _repo_commit_push(ctx: ToolContext, commit_message: str,
         try:
             run_cmd(add_cmd, cwd=ctx.repo_dir)
         except Exception as e:
-            return f"⚠️ GIT_ERROR (add): {_sanitize_git_error(str(e))}"
+            return _fail(f"⚠️ GIT_ERROR (add): {_sanitize_git_error(str(e))}")
         if not paths:
             removed = _unstage_binaries(ctx.repo_dir)
             if removed:
@@ -584,19 +623,28 @@ def _repo_commit_push(ctx: ToolContext, commit_message: str,
         try:
             status = run_cmd(["git", "status", "--porcelain"], cwd=ctx.repo_dir)
         except Exception as e:
-            return f"⚠️ GIT_ERROR (status): {_sanitize_git_error(str(e))}"
+            return _fail(f"⚠️ GIT_ERROR (status): {_sanitize_git_error(str(e))}")
         if not status.strip():
+            _record_commit_attempt(ctx, commit_message, "failed",
+                block_reason="infra_failure", block_details="No changes to commit",
+                duration_sec=time.time() - _commit_start)
             return "⚠️ GIT_NO_CHANGES: nothing to commit."
-
         advisory_err = _check_advisory_freshness(ctx, commit_message, skip_advisory_pre_review, paths=paths)
         if advisory_err:
             run_cmd(["git", "reset", "HEAD"], cwd=ctx.repo_dir)
+            _record_commit_attempt(ctx, commit_message, "blocked",
+                                   block_reason="no_advisory", block_details=advisory_err,
+                                   duration_sec=time.time() - _commit_start)
             return advisory_err
 
         review_err = _run_unified_review(ctx, commit_message, review_rebuttal=review_rebuttal,
                                           goal=goal, scope=scope)
         if review_err:
             run_cmd(["git", "reset", "HEAD"], cwd=ctx.repo_dir)
+            block_reason = getattr(ctx, "_last_review_block_reason", "critical_findings")
+            _record_commit_attempt(ctx, commit_message, "blocked",
+                                   block_reason=block_reason, block_details=review_err,
+                                   duration_sec=time.time() - _commit_start)
             return review_err
 
         # Scope review (blocking, fail-closed) — runs AFTER triad review
@@ -609,25 +657,37 @@ def _repo_commit_push(ctx: ToolContext, commit_message: str,
             )
             if scope_err:
                 run_cmd(["git", "reset", "HEAD"], cwd=ctx.repo_dir)
+                _record_commit_attempt(ctx, commit_message, "blocked",
+                                       block_reason="scope_blocked", block_details=scope_err,
+                                       duration_sec=time.time() - _commit_start)
                 return scope_err
         except ImportError:
             log.debug("scope_review module not available — skipping scope gate")
         except Exception as e:
             # Scope review is fail-closed: any error blocks
             run_cmd(["git", "reset", "HEAD"], cwd=ctx.repo_dir)
-            return (
+            err_msg = (
                 f"⚠️ SCOPE_REVIEW_BLOCKED: Scope review failed with error — commit blocked.\n"
                 f"Error: {e}\n"
                 "Fix the issue and retry."
             )
+            _record_commit_attempt(ctx, commit_message, "blocked",
+                                   block_reason="scope_blocked", block_details=err_msg,
+                                   duration_sec=time.time() - _commit_start)
+            return err_msg
 
         try:
             run_cmd(["git", "commit", "-m", commit_message], cwd=ctx.repo_dir)
         except Exception as e:
-            return f"⚠️ GIT_ERROR (commit): {_sanitize_git_error(str(e))}"
-
+            err_msg = f"⚠️ GIT_ERROR (commit): {_sanitize_git_error(str(e))}"
+            _record_commit_attempt(ctx, commit_message, "failed",
+                                   block_reason="infra_failure", block_details=err_msg,
+                                   duration_sec=time.time() - _commit_start)
+            return err_msg
+        _record_commit_attempt(ctx, commit_message, "succeeded",
+                               duration_sec=time.time() - _commit_start)
         _post_commit_result(ctx, commit_message, skip_tests, test_warning_ref)
-        tag_info = _auto_tag_on_version_bump(ctx.repo_dir, commit_message) if not test_warning_ref[0] else ""
+        tag_info = _auto_tag_on_version_bump(ctx.repo_dir, commit_message)
     finally:
         _release_git_lock(lock)
     push_status = _auto_push(ctx.repo_dir)

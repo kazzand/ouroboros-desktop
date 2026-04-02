@@ -356,7 +356,7 @@ def _process_bridge_updates(bridge, offset: int, ctx: Any) -> int:
             if not ok:
                 ctx.send_with_budget(chat_id, f"⚠️ Restart cancelled: {restart_msg}")
                 continue
-            ctx.kill_workers()
+            ctx.kill_workers(force=True)
             _request_restart_exit()
         elif lowered.startswith("/review"):
             ctx.queue_review_task(reason="owner:/review", force=True)
@@ -619,7 +619,7 @@ def _handle_restart_in_supervisor(evt: Dict[str, Any], ctx: Any) -> None:
         if st.get("owner_chat_id"):
             ctx.send_with_budget(int(st["owner_chat_id"]), f"⚠️ Restart skipped: {msg}")
         return
-    ctx.kill_workers()
+    ctx.kill_workers(force=True)
     st2 = ctx.load_state()
     st2["session_id"] = uuid.uuid4().hex
     ctx.save_state(st2)
@@ -1087,6 +1087,29 @@ async def lifespan(app):
 app = NetworkAuthGate(Starlette(routes=routes, lifespan=lifespan))
 
 
+def _emergency_process_cleanup() -> None:
+    """Kill all child processes, workers, and port holders. Called before any os._exit()."""
+    try:
+        from ouroboros.tools.shell import kill_all_tracked_subprocesses
+        kill_all_tracked_subprocesses()
+    except Exception:
+        pass
+    try:
+        from supervisor.workers import kill_workers
+        kill_workers(force=True)
+    except Exception:
+        pass
+    import multiprocessing
+    from ouroboros.compat import force_kill_pid, kill_process_on_port
+    for child in multiprocessing.active_children():
+        try:
+            force_kill_pid(child.pid)
+        except (ProcessLookupError, PermissionError):
+            pass
+    kill_process_on_port(DEFAULT_PORT)
+    kill_process_on_port(8766)
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -1147,10 +1170,11 @@ def main() -> int:
         if _uvicorn_exited.wait(timeout=force_exit_timeout_sec):
             return
         log.warning(
-            "Uvicorn did not exit within %ss — forcing os._exit(%d)",
+            "Uvicorn did not exit within %ss — running emergency cleanup before os._exit(%d)",
             force_exit_timeout_sec,
             RESTART_EXIT_CODE,
         )
+        _emergency_process_cleanup()
         os._exit(RESTART_EXIT_CODE)
 
     threading.Thread(target=_check_restart, daemon=True).start()
@@ -1162,28 +1186,12 @@ def main() -> int:
 
     if _restart_requested.is_set():
         log.info("Exiting with code %d (restart signal).", RESTART_EXIT_CODE)
-        try:
-            from ouroboros.tools.shell import kill_all_tracked_subprocesses
-            kill_all_tracked_subprocesses()
-        except Exception:
-            pass
-        try:
-            from supervisor.workers import kill_workers
-            kill_workers(force=True)
-        except Exception:
-            pass
-        import multiprocessing
-        from ouroboros.compat import force_kill_pid
-        for child in multiprocessing.active_children():
-            try:
-                force_kill_pid(child.pid)
-            except (ProcessLookupError, PermissionError):
-                pass
+        _emergency_process_cleanup()
         if not _LAUNCHER_MANAGED:
             _restart_current_process(args.host, actual_port)
-        # Hard exit — sys.exit() can hang if threads/children are stuck
         os._exit(RESTART_EXIT_CODE)
 
+    _emergency_process_cleanup()
     return 0
 
 

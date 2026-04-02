@@ -114,3 +114,15 @@ TOOL_RESULT_LIMITS: dict[str, int] = {
 }
 
 DEFAULT_TOOL_RESULT_LIMIT: int = 15_000
+
+# ---------------------------------------------------------------------------
+# Reviewed mutative tools — special timeout handling
+# ---------------------------------------------------------------------------
+
+# Tools that perform reviewed mutative operations (commits, etc.)
+# These tools MUST NOT end with an ambiguous timeout — the executor
+# waits synchronously for the final result even if the soft timeout fires.
+REVIEWED_MUTATIVE_TOOLS: frozenset[str] = frozenset({
+    "repo_commit",
+    "repo_write_commit",
+})

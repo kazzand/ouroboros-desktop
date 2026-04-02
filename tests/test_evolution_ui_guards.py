@@ -27,7 +27,7 @@ def test_evolution_page_supports_refresh_and_runtime_state():
 def test_server_and_navigation_expose_runtime_refresh_hooks():
     server_source = _read("server.py")
     app_source = _read("web/app.js")
-    dash_source = _read("web/modules/dashboard.js")
+    evo_source = _read("web/modules/evolution.js")
     chat_source = _read("web/modules/chat.js")
 
     assert "def _describe_bg_consciousness_state(requested_enabled: bool) -> dict:" in server_source
@@ -35,7 +35,6 @@ def test_server_and_navigation_expose_runtime_refresh_hooks():
     assert '"bg_consciousness_state": bg_state,' in server_source
     assert 'request.query_params.get("force")' in server_source
     assert "window.dispatchEvent(new CustomEvent('ouro:page-shown', { detail: { page: name } }));" in app_source
-    assert "dash-evolution-detail" in dash_source
-    assert "dash-bg-detail" in dash_source
+    assert "evo-runtime-detail" in evo_source
     assert "data?.evolution_state?.detail" in chat_source
     assert "data?.bg_consciousness_state?.detail" in chat_source

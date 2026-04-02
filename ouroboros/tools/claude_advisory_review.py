@@ -202,21 +202,43 @@ def _run_claude_advisory(
     scope: str = "",
     paths: Optional[List[str]] = None,
 ) -> tuple[list, str]:
-    """Run the advisory review via Claude Code CLI.
+    """Run the advisory review via Claude Agent SDK (read-only) or CLI fallback.
 
     Returns (items: list, raw_result: str).
     items is a list of review finding dicts (may be empty on error).
-    raw_result is the raw CLI output string.
+    raw_result is the raw output string.
     """
-    claude_bin = _find_claude_bin()
-    if not claude_bin:
-        return [], "⚠️ ADVISORY_ERROR: claude binary not found. Run ensure_claude_cli first."
-
     api_key = os.environ.get("ANTHROPIC_API_KEY", "")
     if not api_key:
         return [], "⚠️ ADVISORY_ERROR: ANTHROPIC_API_KEY not set."
 
     prompt = _build_advisory_prompt(repo_dir, commit_message, goal=goal, scope=scope, paths=paths)
+
+    # --- Primary path: Claude Agent SDK (read-only) ---
+    try:
+        from ouroboros.gateways.claude_code import run_readonly
+
+        result = run_readonly(
+            prompt=prompt,
+            cwd=str(repo_dir),
+            model="opus",
+            max_turns=8,
+        )
+
+        if not result.success:
+            return [], f"⚠️ ADVISORY_ERROR: {result.error}"
+
+        raw_text = result.result_text
+        items = _parse_advisory_output(raw_text)
+        return items, raw_text
+
+    except ImportError:
+        log.info("claude-agent-sdk not available for advisory review, falling back to CLI")
+
+    # --- Fallback: legacy CLI subprocess ---
+    claude_bin = _find_claude_bin()
+    if not claude_bin:
+        return [], "⚠️ ADVISORY_ERROR: claude binary not found. Run ensure_claude_cli first."
 
     cmd = [
         claude_bin,
@@ -497,18 +519,9 @@ def _handle_advisory_pre_review(
 
 
 def _handle_review_status(ctx: ToolContext) -> str:
-    """Show recent advisory pre-review run history (read-only diagnostic)."""
+    """Show recent advisory pre-review run history AND last commit attempt state."""
     drive_root = pathlib.Path(ctx.drive_root)
     state = load_state(drive_root)
-
-    if not state.runs:
-        return json.dumps({
-            "status": "no_runs",
-            "message": (
-                "No advisory pre-review runs recorded. "
-                "Run advisory_pre_review(commit_message='...') before repo_commit."
-            ),
-        }, ensure_ascii=False, indent=2)
 
     runs_data = []
     for run in reversed(state.runs[-5:]):
@@ -527,14 +540,52 @@ def _handle_review_status(ctx: ToolContext) -> str:
         })
 
     latest = state.latest()
-    return json.dumps({
-        "latest_status": latest.status if latest else "none",
-        "latest_hash": latest.snapshot_hash[:12] if latest else None,
-        "runs": runs_data,
-        "message": (
+
+    # Build commit attempt section
+    commit_attempt_data = None
+    if state.last_commit_attempt:
+        ca = state.last_commit_attempt
+        commit_attempt_data = {
+            "status": ca.status,
+            "commit_message": ca.commit_message[:80],
+            "ts": ca.ts[:16],
+            "duration_sec": round(ca.duration_sec, 1),
+            "block_reason": ca.block_reason or None,
+            "block_details_preview": ca.block_details[:300] if ca.block_details else None,
+        }
+
+    # Build actionable message
+    if not state.runs and not state.last_commit_attempt:
+        msg = (
+            "No advisory runs or commit attempts recorded. "
+            "Run advisory_pre_review(commit_message='...') before repo_commit."
+        )
+    elif state.last_commit_attempt and state.last_commit_attempt.status in ("blocked", "failed"):
+        ca = state.last_commit_attempt
+        reason_map = {
+            "no_advisory": "No fresh advisory pre-review found. Run advisory_pre_review first.",
+            "critical_findings": "Reviewers found critical issues. Fix the issues listed in block_details.",
+            "review_quorum": "Not enough review models responded. Retry — usually transient.",
+            "parse_failure": "Review models could not produce parseable output. Retry the commit.",
+            "infra_failure": "Infrastructure failure (git lock, git command, or review API). Check block_details and retry.",
+            "scope_blocked": "Scope reviewer blocked the commit. Address scope review findings.",
+            "preflight": "Preflight check failed (missing VERSION/README). Stage all related files.",
+        }
+        action = reason_map.get(ca.block_reason, f"{ca.status}: {ca.block_reason or 'unknown'}. Check block_details.")
+        label = "BLOCKED" if ca.status == "blocked" else "FAILED"
+        msg = f"Last commit {label} ({ca.block_reason or 'unclassified'}): {action}"
+    else:
+        msg = (
             f"Latest advisory run: {latest.status if latest else 'none'}. "
             "Use advisory_pre_review(commit_message='...') to run a fresh review."
-        ),
+        )
+
+    return json.dumps({
+        "latest_advisory_status": latest.status if latest else "none",
+        "latest_advisory_hash": latest.snapshot_hash[:12] if latest else None,
+        "advisory_runs": runs_data,
+        "last_commit_attempt": commit_attempt_data,
+        "message": msg,
     }, ensure_ascii=False, indent=2)
 
 
@@ -597,8 +648,9 @@ def get_tools() -> list:
                 "name": "review_status",
                 "description": (
                     "Show recent advisory pre-review run history. "
-                    "Read-only diagnostic — use to check if a fresh advisory run exists "
-                    "before calling repo_commit."
+                    "Read-only diagnostic \u2014 use to check if a fresh advisory run exists "
+                    "before calling repo_commit. Also shows last commit attempt state "
+                    "(reviewing/blocked/succeeded/failed) with block reason and actionable guidance."
                 ),
                 "parameters": {
                     "type": "object",

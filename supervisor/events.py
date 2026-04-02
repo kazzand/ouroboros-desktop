@@ -199,6 +199,24 @@ def _handle_task_done(evt: Dict[str, Any], ctx: Any) -> None:
     task_type = str(evt.get("task_type") or "")
     wid = evt.get("worker_id")
 
+    # Persist task_done to events.jsonl (audit trail).
+    # Previously this was written agent-side in emit_task_results() which
+    # caused it to arrive at the UI *before* send_message (ordering bug).
+    from ouroboros.utils import utc_now_iso, append_jsonl
+    try:
+        append_jsonl(ctx.DRIVE_ROOT / "logs" / "events.jsonl", {
+            "ts": evt.get("ts", utc_now_iso()),
+            "type": "task_done",
+            "task_id": task_id,
+            "task_type": task_type,
+            "cost_usd": float(evt.get("cost_usd") or 0),
+            "total_rounds": int(evt.get("total_rounds") or 0),
+            "prompt_tokens": int(evt.get("prompt_tokens") or 0),
+            "completion_tokens": int(evt.get("completion_tokens") or 0),
+        })
+    except Exception:
+        log.warning("Failed to log task_done to events.jsonl", exc_info=True)
+
     # Track evolution task success/failure for circuit breaker
     if task_type == "evolution":
         st = ctx.load_state()

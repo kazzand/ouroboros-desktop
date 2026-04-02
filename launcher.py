@@ -460,6 +460,7 @@ def start_agent(port: int = AGENT_SERVER_PORT) -> subprocess.Popen:
     env["OUROBOROS_DATA_DIR"] = str(DATA_DIR)
     env["OUROBOROS_REPO_DIR"] = str(REPO_DIR)
     env["OUROBOROS_APP_VERSION"] = str(APP_VERSION)
+    env["OUROBOROS_MANAGED_BY_LAUNCHER"] = "1"
 
     # Pass settings as env vars
     settings = _load_settings()

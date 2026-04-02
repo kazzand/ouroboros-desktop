@@ -72,7 +72,9 @@ def _web_search(
     try:
         from openai import OpenAI
         client = OpenAI(api_key=api_key, base_url=base_url)
-        resp = client.responses.create(
+
+        # --- Streaming path: emit progress while the search runs ---
+        stream = client.responses.create(
             model=active_model,
             tools=[{
                 "type": "web_search",
@@ -81,17 +83,45 @@ def _web_search(
             reasoning={"effort": active_effort},
             tool_choice="auto",
             input=query,
+            stream=True,
         )
-        d = resp.model_dump()
-        text = ""
-        for item in d.get("output", []) or []:
-            if item.get("type") == "message":
-                for block in item.get("content", []) or []:
-                    if block.get("type") in ("output_text", "text"):
-                        text += block.get("text", "")
+
+        text_parts: list[str] = []
+        usage: dict = {}
+        progress_sent = False
+
+        for event in stream:
+            etype = getattr(event, "type", "")
+
+            # Web search lifecycle — emit progress so the user sees activity
+            if etype in (
+                "response.web_search_call.in_progress",
+                "response.web_search_call.searching",
+            ) and not progress_sent:
+                if hasattr(ctx, "emit_progress_fn") and ctx.emit_progress_fn:
+                    try:
+                        ctx.emit_progress_fn(f"🔍 Searching: {query[:100]}")
+                    except Exception:
+                        pass
+                progress_sent = True
+
+            # Accumulate text deltas
+            elif etype == "response.output_text.delta":
+                delta = getattr(event, "delta", "")
+                if delta:
+                    text_parts.append(delta)
+
+            # Final event — extract usage for cost tracking
+            elif etype == "response.completed":
+                resp_obj = getattr(event, "response", None)
+                if resp_obj:
+                    u = getattr(resp_obj, "usage", None)
+                    if u:
+                        usage = u.model_dump() if hasattr(u, "model_dump") else {}
+
+        text = "".join(text_parts)
 
         # Track web search cost (estimate from tokens — OpenAI usage has no total_cost)
-        usage = d.get("usage") or {}
         if usage and hasattr(ctx, "pending_events"):
             input_tokens = int(usage.get("input_tokens") or usage.get("prompt_tokens") or 0)
             output_tokens = int(usage.get("output_tokens") or usage.get("completion_tokens") or 0)

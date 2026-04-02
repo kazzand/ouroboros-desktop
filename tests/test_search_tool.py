@@ -6,23 +6,29 @@ import ouroboros.tools.search as search_module
 
 
 def _make_openai_module(calls: dict):
-    class _Response:
+    class _Usage:
         def model_dump(self):
-            return {
-                "output": [{
-                    "type": "message",
-                    "content": [{"type": "output_text", "text": "fresh answer"}],
-                }],
-                "usage": {
-                    "input_tokens": 11,
-                    "output_tokens": 7,
-                },
-            }
+            return {"input_tokens": 11, "output_tokens": 7}
+
+    class _CompletedResponse:
+        usage = _Usage()
+
+    class _FakeStream:
+        """Iterable that simulates streaming events."""
+        def __iter__(self):
+            yield types.SimpleNamespace(type="response.web_search_call.searching",
+                                        item_id="ws1", output_index=0, sequence_number=1)
+            yield types.SimpleNamespace(type="response.output_text.delta",
+                                        delta="fresh answer", content_index=0,
+                                        item_id="m1", output_index=1, sequence_number=2,
+                                        logprobs=[])
+            yield types.SimpleNamespace(type="response.completed",
+                                        response=_CompletedResponse(), sequence_number=3)
 
     class _Responses:
         def create(self, **kwargs):
             calls["kwargs"] = kwargs
-            return _Response()
+            return _FakeStream()
 
     class _Client:
         def __init__(self, api_key=None, base_url=None):
@@ -61,6 +67,7 @@ def test_web_search_uses_official_openai_responses(monkeypatch):
     assert calls["api_key"] == "openai-key"
     assert calls["base_url"] is None
     assert calls["kwargs"]["model"] == "gpt-5.2"
+    assert calls["kwargs"]["stream"] is True
     assert calls["kwargs"]["tools"][0]["type"] == "web_search"
     assert ctx.pending_events[0]["provider"] == "openai"
     assert ctx.pending_events[0]["model"] == "gpt-5.2"

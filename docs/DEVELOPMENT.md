@@ -56,13 +56,18 @@ Rules in this file must not contradict BIBLE.md.
 
 ### Gateway Rules (recommended pattern, not enforced)
 
-When adding a new external API integration, the recommended pattern is a **Gateway** class that isolates transport from business logic. Currently Ouroboros does not have a `gateways/` directory — most external calls live directly in tool modules (e.g. `llm.py`, `tools/search.py`). As the codebase grows, extract Gateways as needed.
+When adding a new external API integration, the recommended pattern is a **Gateway** class that isolates transport from business logic. The `ouroboros/gateways/` directory houses external API adapters. As the codebase grows, extract Gateways as needed.
 
 When a Gateway exists, it should follow these guidelines:
 - No business logic: no routing, no decisions. Just transport.
 - Input/output: takes Python primitives, returns Python primitives.
 - Error handling: translates platform-specific errors into consistent return values.
 - Stateless where possible.
+
+**Existing Gateways:**
+- `ouroboros/gateways/claude_code.py` — Claude Agent SDK gateway. Two paths: `run_edit`
+  (edit mode with PreToolUse safety hooks) and `run_readonly` (advisory review, no
+  mutating tools). Structured `ClaudeCodeResult` output.
 
 ### Relationship Between Entities
 

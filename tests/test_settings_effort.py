@@ -72,6 +72,7 @@ def test_get_review_models_default(monkeypatch):
     monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
     monkeypatch.delenv("OPENAI_COMPATIBLE_API_KEY", raising=False)
     monkeypatch.delenv("CLOUDRU_FOUNDATION_MODELS_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.delenv("OUROBOROS_MODEL", raising=False)
     models = get_review_models()
     assert isinstance(models, list)
@@ -87,6 +88,7 @@ def test_get_review_models_custom(monkeypatch):
     monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
     monkeypatch.delenv("OPENAI_COMPATIBLE_API_KEY", raising=False)
     monkeypatch.delenv("CLOUDRU_FOUNDATION_MODELS_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.delenv("OUROBOROS_MODEL", raising=False)
     models = get_review_models()
     assert models == ["a/b", "c/d"]
@@ -100,6 +102,7 @@ def test_get_review_models_empty_env_falls_back_to_default(monkeypatch):
     monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
     monkeypatch.delenv("OPENAI_COMPATIBLE_API_KEY", raising=False)
     monkeypatch.delenv("CLOUDRU_FOUNDATION_MODELS_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.delenv("OUROBOROS_MODEL", raising=False)
     models = get_review_models()
     # Must return the default, not an empty list

@@ -1,5 +1,7 @@
 import pathlib
 
+import pytest
+
 from ouroboros.onboarding_wizard import build_onboarding_html, prepare_onboarding_settings
 
 
@@ -143,6 +145,7 @@ def test_build_onboarding_html_includes_claude_cli_cta_and_host_transports():
     assert "/api/claude-code/install" in web_html
 
 
+@pytest.mark.skipif(not (REPO / "launcher.py").exists(), reason="launcher.py not present in repo (bundle-only)")
 def test_launcher_uses_shared_onboarding_and_claude_cli_bridge():
     source = (REPO / "launcher.py").read_text(encoding="utf-8")
 

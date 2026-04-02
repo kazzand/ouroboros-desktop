@@ -812,7 +812,7 @@ def build_llm_messages(
     try:
         from ouroboros.review_state import load_state, format_status_section
         advisory_state = load_state(pathlib.Path(env.drive_root))
-        if advisory_state.runs:
+        if advisory_state.runs or advisory_state.last_commit_attempt:
             advisory_section = format_status_section(advisory_state)
             if advisory_section:
                 dynamic_parts.append(advisory_section)

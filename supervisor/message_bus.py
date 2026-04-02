@@ -117,7 +117,6 @@ class LocalChatBridge:
         token = str(settings.get("TELEGRAM_BOT_TOKEN", "") or "").strip()
         chat_id = self._parse_single_chat_id(
             str(settings.get("TELEGRAM_CHAT_ID", "") or "").strip(),
-            str(settings.get("TELEGRAM_ALLOWED_CHAT_IDS", "") or "").strip(),
         )
         token_changed = token != self._telegram_bot_token
         chat_id_changed = chat_id != self._telegram_chat_id
@@ -135,16 +134,14 @@ class LocalChatBridge:
     def shutdown(self) -> None:
         self._stop_telegram_polling()
 
-    def _parse_single_chat_id(self, raw: str, legacy_raw: str = "") -> int:
-        for value in (raw, *(legacy_raw.split(",") if legacy_raw else [])):
-            text = str(value or "").strip()
-            if not text:
-                continue
-            try:
-                return int(text)
-            except ValueError:
-                continue
-        return 0
+    def _parse_single_chat_id(self, raw: str) -> int:
+        text = str(raw or "").strip()
+        if not text:
+            return 0
+        try:
+            return int(text)
+        except ValueError:
+            return 0
 
     def _restart_telegram_polling(self) -> None:
         self._stop_telegram_polling()

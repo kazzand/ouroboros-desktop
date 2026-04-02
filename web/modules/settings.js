@@ -154,7 +154,7 @@ export function initSettings({ state }) {
         applyInputValue('s-network-password', s.OUROBOROS_NETWORK_PASSWORD);
         applyInputValue('s-telegram-token', s.TELEGRAM_BOT_TOKEN);
         applyInputValue('s-telegram-chat-id', s.TELEGRAM_CHAT_ID);
-        applyInputValue('s-telegram-allowed-chat-ids', s.TELEGRAM_ALLOWED_CHAT_IDS);
+
         applyInputValue('s-model', s.OUROBOROS_MODEL);
         applyInputValue('s-model-code', s.OUROBOROS_MODEL_CODE);
         applyInputValue('s-model-light', s.OUROBOROS_MODEL_LIGHT);
@@ -243,7 +243,6 @@ export function initSettings({ state }) {
             OPENAI_COMPATIBLE_BASE_URL: byId('s-openai-compatible-base-url').value.trim(),
             CLOUDRU_FOUNDATION_MODELS_BASE_URL: byId('s-cloudru-base-url').value.trim(),
             TELEGRAM_CHAT_ID: byId('s-telegram-chat-id').value.trim(),
-            TELEGRAM_ALLOWED_CHAT_IDS: byId('s-telegram-allowed-chat-ids').value.trim(),
         };
 
         collectSecretValue('s-openrouter', body);

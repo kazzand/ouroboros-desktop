@@ -735,9 +735,88 @@ def _parse_claude_output(stdout: str, ctx: ToolContext) -> str:
         return stdout
 
 
+# ---------------------------------------------------------------------------
+# Orchestration helpers (live in tool layer, not in gateway)
+# ---------------------------------------------------------------------------
+
+def _load_project_context(repo_dir: pathlib.Path) -> str:
+    """Load project docs for Claude Code system_prompt injection."""
+    docs = [
+        ("BIBLE.md", "CONSTITUTION"),
+        ("docs/DEVELOPMENT.md", "DEVELOPMENT GUIDE"),
+        ("docs/CHECKLISTS.md", "REVIEW CHECKLISTS"),
+        ("docs/ARCHITECTURE.md", "ARCHITECTURE"),
+    ]
+    parts: list = []
+    for relpath, label in docs:
+        fpath = repo_dir / relpath
+        if fpath.is_file():
+            try:
+                content = fpath.read_text(encoding="utf-8")
+                if len(content) > 50_000:
+                    content = content[:50_000] + "\n\n[... truncated for context size ...]"
+                parts.append(f"## {label}\n\n{content}")
+            except Exception:
+                pass
+    return "\n\n---\n\n".join(parts)
+
+
+def _get_changed_files(repo_dir: pathlib.Path) -> list:
+    """Return list of changed files after an edit."""
+    try:
+        res = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=str(repo_dir), capture_output=True, text=True, timeout=5,
+        )
+        if res.returncode == 0 and res.stdout.strip():
+            return [line[3:].strip() for line in res.stdout.strip().splitlines() if len(line) > 3]
+    except Exception:
+        pass
+    return []
+
+
+def _get_diff_stat(repo_dir: pathlib.Path) -> str:
+    """Return git diff --stat output."""
+    try:
+        res = subprocess.run(
+            ["git", "diff", "--stat"],
+            cwd=str(repo_dir), capture_output=True, text=True, timeout=5,
+        )
+        if res.returncode == 0:
+            return res.stdout.strip()
+    except Exception:
+        pass
+    return ""
+
+
+def _run_validation(repo_dir: pathlib.Path) -> str:
+    """Run basic validation after edit (tests). Returns summary."""
+    try:
+        res = subprocess.run(
+            ["python", "-m", "pytest", "tests/", "--tb=line", "-q"],
+            cwd=str(repo_dir), capture_output=True, text=True, timeout=60,
+        )
+        if res.returncode == 0:
+            return "PASS: all tests passed"
+        output = (res.stdout or "")[-500:]
+        return f"FAIL: tests failed (exit {res.returncode})\n{output}"
+    except subprocess.TimeoutExpired:
+        return "TIMEOUT: validation exceeded 60s"
+    except Exception as e:
+        return f"ERROR: validation failed: {e}"
+
+
+# ---------------------------------------------------------------------------
+
+
 def _claude_code_edit(ctx: ToolContext, prompt: str, cwd: str = "",
-                      budget: float = 1.0) -> str:
-    """Delegate code edits to Claude Code CLI."""
+                      budget: float = 1.0, validate: bool = False) -> str:
+    """Delegate code edits via the Claude Agent SDK gateway.
+
+    Uses the claude-agent-sdk Python package with PreToolUse safety hooks
+    that block writes outside cwd and to safety-critical files. Falls back
+    to the legacy CLI subprocess path if the SDK is not available.
+    """
     from ouroboros.tools.git import _acquire_git_lock, _release_git_lock
 
     api_key = os.environ.get("ANTHROPIC_API_KEY", "")
@@ -750,12 +829,6 @@ def _claude_code_edit(ctx: ToolContext, prompt: str, cwd: str = "",
         if candidate.exists():
             work_dir = str(candidate)
 
-    install_err, freshly_installed = _ensure_claude_cli(ctx)
-    if install_err:
-        return install_err
-
-    ctx.emit_progress_fn("Delegating to Claude Code CLI...")
-
     model = os.environ.get("CLAUDE_CODE_MODEL", "opus").strip()
 
     lock = _acquire_git_lock(ctx)
@@ -764,6 +837,65 @@ def _claude_code_edit(ctx: ToolContext, prompt: str, cwd: str = "",
             run_cmd(["git", "checkout", ctx.branch_dev], cwd=ctx.repo_dir)
         except Exception as e:
             return f"⚠️ GIT_ERROR (checkout): {e}"
+
+        ctx.emit_progress_fn("Delegating to Claude Agent SDK...")
+
+        # --- Primary path: Claude Agent SDK ---
+        try:
+            from ouroboros.gateways.claude_code import run_edit
+
+            # Build system prompt with project context (orchestration lives here, not in gateway)
+            system_prompt = (
+                f"STRICT: Only modify files inside {work_dir}. "
+                f"Git branch: {ctx.branch_dev}. Do NOT commit or push.\n\n"
+                + _load_project_context(pathlib.Path(ctx.repo_dir))
+            )
+
+            result = run_edit(
+                prompt=prompt,
+                cwd=work_dir,
+                model=model,
+                max_turns=12,
+                budget=budget,
+                system_prompt=system_prompt,
+            )
+
+            # Collect git information (orchestration in tool layer)
+            result.changed_files = _get_changed_files(pathlib.Path(ctx.repo_dir))
+            result.diff_stat = _get_diff_stat(pathlib.Path(ctx.repo_dir))
+
+            # Optional validation
+            if validate and result.success:
+                result.validation_summary = _run_validation(pathlib.Path(ctx.repo_dir))
+
+            # Emit cost event
+            if result.cost_usd > 0:
+                ctx.pending_events.append({
+                    "type": "llm_usage",
+                    "provider": "claude_agent_sdk",
+                    "model": model,
+                    "api_key_type": "anthropic",
+                    "model_category": "claude_code",
+                    "usage": result.usage or {"cost": result.cost_usd},
+                    "cost": result.cost_usd,
+                    "source": "claude_code_edit",
+                    "ts": utc_now_iso(),
+                    "category": "task",
+                })
+
+            if not result.success:
+                return f"⚠️ CLAUDE_CODE_ERROR: {result.error}\n\n{result.result_text}"
+
+            return result.to_tool_output()
+
+        except ImportError:
+            log.info("claude-agent-sdk not installed, falling back to CLI subprocess")
+            ctx.emit_progress_fn("SDK not available, falling back to Claude Code CLI...")
+
+        # --- Fallback: legacy CLI subprocess ---
+        install_err, freshly_installed = _ensure_claude_cli(ctx)
+        if install_err:
+            return install_err
 
         full_prompt = (
             f"STRICT: Only modify files inside {work_dir}. "
@@ -802,6 +934,11 @@ def _claude_code_edit(ctx: ToolContext, prompt: str, cwd: str = "",
         if warning:
             stdout += warning
 
+        # Post-edit validation (also supported in CLI fallback)
+        if validate:
+            val_summary = _run_validation(pathlib.Path(ctx.repo_dir))
+            stdout += f"\n\n--- Validation ---\n{val_summary}"
+
     except subprocess.TimeoutExpired:
         timeout_sec = _resolve_effective_timeout(_CLAUDE_CODE_DEFAULT_TIMEOUT_SEC)
         return f"⚠️ CLAUDE_CODE_TIMEOUT: exceeded {timeout_sec}s."
@@ -830,12 +967,14 @@ def get_tools() -> List[ToolEntry]:
         }, _ensure_claude_cli_tool, timeout_sec=_CLAUDE_CODE_DEFAULT_TIMEOUT_SEC),
         ToolEntry("claude_code_edit", {
             "name": "claude_code_edit",
-            "description": "Delegate code edits to Claude Code CLI. Preferred for multi-file changes and refactors. Follow with repo_commit.",
+            "description": "Delegate code edits to Claude Code (via Agent SDK with safety guards). Preferred for multi-file changes and refactors. Follow with repo_commit.",
             "parameters": {"type": "object", "properties": {
                 "prompt": {"type": "string"},
                 "cwd": {"type": "string", "default": ""},
                 "budget": {"type": "number",
                            "description": "Max USD for this Claude Code call. Default: 1.0"},
+                "validate": {"type": "boolean", "default": False,
+                             "description": "Run post-edit validation (tests). Returns summary in result."},
             }, "required": ["prompt"]},
         }, _claude_code_edit, is_code_tool=True, timeout_sec=_CLAUDE_CODE_DEFAULT_TIMEOUT_SEC),
     ]

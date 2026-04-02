@@ -140,6 +140,52 @@ def force_kill_pid(pid: int) -> None:
             pass
 
 
+def kill_pid_tree(pid: int) -> None:
+    """Force-kill a process and ALL its descendants (recursive).
+
+    On Windows: taskkill /F /T handles the entire tree natively.
+    On Unix: walks the process tree via pgrep -P, then SIGKILL bottom-up.
+    """
+    if IS_WINDOWS:
+        try:
+            _hidden_run(
+                ["taskkill", "/F", "/T", "/PID", str(pid)],
+                capture_output=True, timeout=10,
+            )
+        except Exception:
+            pass
+        return
+
+    descendants: list[int] = []
+    _collect_descendants(pid, descendants)
+    for dpid in reversed(descendants):
+        try:
+            os.kill(dpid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError, OSError):
+        pass
+
+
+def _collect_descendants(pid: int, result: list[int]) -> None:
+    """Recursively collect all descendant PIDs via pgrep."""
+    try:
+        out = subprocess.run(
+            ["pgrep", "-P", str(pid)],
+            capture_output=True, text=True, timeout=3,
+        )
+        for line in out.stdout.strip().splitlines():
+            line = line.strip()
+            if line:
+                child_pid = int(line)
+                _collect_descendants(child_pid, result)
+                result.append(child_pid)
+    except Exception:
+        pass
+
+
 def kill_process_on_port(port: int) -> None:
     """Kill any process listening on the given TCP port."""
     try:

@@ -78,5 +78,19 @@ def execute_panic_stop(
     except Exception:
         pass
 
+    try:
+        import multiprocessing
+        from ouroboros.compat import force_kill_pid, kill_process_on_port
+
+        for child in multiprocessing.active_children():
+            try:
+                force_kill_pid(child.pid)
+            except (ProcessLookupError, PermissionError):
+                pass
+        kill_process_on_port(8765)
+        kill_process_on_port(8766)
+    except Exception:
+        pass
+
     log.critical("PANIC STOP complete — hard exit with code %d.", panic_exit_code)
     os._exit(panic_exit_code)

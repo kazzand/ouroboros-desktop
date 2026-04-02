@@ -293,7 +293,7 @@ Tool schemas are already in context. I think in categories, not catalog dumps.
 
 - **Read** — `repo_read` / `data_read` for files. `code_search` for finding patterns.
 - **Write** — modify repo/data/memory deliberately, after reading first.
-- **Code edit** — prefer surgical edits; use `claude_code_edit` for complex refactors, then `repo_commit`.
+- **Code edit** — prefer `str_replace_editor` for surgical edits; use `claude_code_edit` (Claude Agent SDK) for complex multi-file refactors, then `repo_commit`.
 - **Shell / Git** — runtime inspection, tests, recovery, version control.
 - **Knowledge / Memory** — `knowledge_read`, `knowledge_write`, `chat_history`, `update_scratchpad`, `update_identity`.
 - **Control / Decomposition** — `schedule_task`, `wait_for_task`, `get_task_result`, `switch_model`, `request_restart`, `send_user_message`.
@@ -320,16 +320,19 @@ For simple lookups, lower context/effort first. For deep research, justify the s
 
 ### Code Editing Strategy
 
-**Preferred workflow for existing files:**
-1. `str_replace_editor` for surgical edits (find unique string, replace it).
-2. `repo_commit` to stage, review, and commit.
+**1–3 surgical edits to existing files:**
+- `str_replace_editor` (find unique string, replace it) → `repo_commit`.
+- Best for: targeted fixes, config tweaks, single-function changes.
 
-**For new files or intentional full rewrites:**
-1. `repo_write` (creates file or replaces entire content; has shrink guard for tracked files).
-2. `repo_commit`.
+**New files or intentional full rewrites:**
+- `repo_write` (creates file or replaces entire content; has shrink guard) → `repo_commit`.
 
-**Complex multi-file refactors:**
-- `claude_code_edit` (Claude Code CLI, diff-aware) → `repo_commit`.
+**4+ files or cross-cutting refactors:**
+- `claude_code_edit` — delegates to the Claude Agent SDK with safety guards
+  (PreToolUse hooks block writes outside cwd and to safety-critical files,
+  Bash and MultiEdit are disabled). Returns structured result with changed_files
+  and diff_stat. Use `validate=True` for post-edit test run.
+- Follow with `repo_commit`.
 
 **Legacy path:** `repo_write_commit` (writes one file + commits in one call).
 

@@ -585,6 +585,7 @@ def _run_unified_review(ctx: ToolContext, commit_message: str,
     """
     target_repo = repo_dir or ctx.repo_dir
     ctx._review_iteration_count += 1
+    ctx._last_review_block_reason = ""  # reset per attempt
     review_enforcement = _cfg.get_review_enforcement()
     blocking_review = review_enforcement == "blocking"
 
@@ -603,6 +604,7 @@ def _run_unified_review(ctx: ToolContext, commit_message: str,
 
     preflight_err = _preflight_check(commit_message, changed, target_repo)
     if preflight_err:
+        ctx._last_review_block_reason = "preflight"
         result = _handle_review_block_or_warning(
             ctx, blocking_review, preflight_err,
             "Review enforcement=Advisory: preflight warning did not block commit. ",
@@ -616,6 +618,7 @@ def _run_unified_review(ctx: ToolContext, commit_message: str,
         checklist_section = _load_checklist_section()
     except (FileNotFoundError, ValueError) as e:
         log.error("Checklist loading failed (fail-closed): %s", e)
+        ctx._last_review_block_reason = "infra_failure"
         blocked_msg = (
             "⚠️ REVIEW_BLOCKED: Cannot load review checklist — commit cannot proceed.\n"
             f"Error: {e}\n"
@@ -673,6 +676,7 @@ def _run_unified_review(ctx: ToolContext, commit_message: str,
         result = json.loads(result_json)
     except Exception as e:
         log.error("Unified review infrastructure failure: %s", e)
+        ctx._last_review_block_reason = "infra_failure"
         blocked_msg = (
             "⚠️ REVIEW_BLOCKED: Review infrastructure failed — commit cannot proceed "
             "without a successful review.\n"
@@ -686,6 +690,7 @@ def _run_unified_review(ctx: ToolContext, commit_message: str,
 
     if "error" in result:
         log.error("Review returned error: %s", result["error"])
+        ctx._last_review_block_reason = "infra_failure"
         blocked_msg = (
             "⚠️ REVIEW_BLOCKED: Review service returned an error — commit cannot proceed "
             "without a successful review.\n"
@@ -699,6 +704,7 @@ def _run_unified_review(ctx: ToolContext, commit_message: str,
 
     model_results = result.get("results", [])
     if not model_results:
+        ctx._last_review_block_reason = "infra_failure"
         blocked_msg = (
             "⚠️ REVIEW_BLOCKED: Review returned no results from any model — "
             "commit cannot proceed without a successful review."
@@ -715,6 +721,7 @@ def _run_unified_review(ctx: ToolContext, commit_message: str,
     # Quorum: at least 2 of N reviewers must succeed
     successful_reviewers = models_total - len(errored_models)
     if successful_reviewers < 2:
+        ctx._last_review_block_reason = "review_quorum"
         blocked_msg = (
             f"⚠️ REVIEW_BLOCKED: Only {successful_reviewers} of {models_total} review "
             f"models responded successfully (minimum 2 required). "
@@ -735,6 +742,9 @@ def _run_unified_review(ctx: ToolContext, commit_message: str,
         )
 
     if critical_fails:
+        # Classify: if all critical failures are parse issues, mark as parse_failure
+        all_parse = all("Could not parse" in f for f in critical_fails)
+        ctx._last_review_block_reason = "parse_failure" if all_parse else "critical_findings"
         if blocking_review:
             return _build_critical_block_message(
                 ctx, commit_message, critical_fails, advisory_warns, errored_note,

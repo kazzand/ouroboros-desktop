@@ -1,4 +1,4 @@
-# Ouroboros v4.7.1 — Architecture & Reference
+# Ouroboros v4.10.2 — Architecture & Reference
 
 This document describes every component, page, button, API endpoint, and data flow.
 It is the single source of truth for how the system works. Keep it updated.
@@ -58,6 +58,8 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on localhost:8765
       ├── tool_policy.py       ← Tool access policy and gating (imports from tool_capabilities)
       ├── utils.py             ← Shared utilities
       ├── world_profiler.py    ← System profile generator (WORLD.md)
+      ├── gateways/            ← External API adapters (thin transport, no business logic)
+      │   └── claude_code.py   ← Claude Agent SDK gateway (edit + read-only paths)
       ├── tools/               ← Auto-discovered tool plugins
       │   ├── review_helpers.py  ← Shared review helpers (section loader, file packs, intent)
       │   └── scope_review.py   ← Blocking scope reviewer (opus, fail-closed)
@@ -92,7 +94,7 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on localhost:8765
 │   │   └── local_model_api.py  ← Local model API endpoints (extracted from server.py)
 │   ├── supervisor/     ← Supervisor package
 │   ├── web/            ← Web UI files
-│   │   └── modules/    ← ES module pages (chat, dashboard, logs, etc.)
+│   │   └── modules/    ← ES module pages (chat, logs, evolution, etc.)
 │   ├── docs/           ← Project documentation
 │   │   ├── ARCHITECTURE.md ← This document
 │   │   ├── DEVELOPMENT.md  ← Engineering handbook (naming, entity types, review protocol)
@@ -182,25 +184,24 @@ The web UI is a single-page app (`web/index.html` + `web/style.css` + ES modules
 `web/app.js` is the thin orchestrator (~90 lines) that imports from `web/modules/`:
 - `ws.js` — WebSocket connection manager
 - `utils.js` — shared utilities (markdown rendering, escapeHtml, matrix rain)
-- `chat.js` — chat page with message rendering, live task card, and compact runtime controls
-- `dashboard.js` — dashboard with controls and polling
+- `chat.js` — chat page with message rendering, live task card, compact runtime controls, and budget pill
 - `logs.js` — log viewer with category filters and grouped task cards
 - `log_events.js` — shared event summarization/grouping helpers used by Chat and Logs
 - `files.js` — file browser, preview, uploads, and editor
-- `evolution.js` — evolution chart (Chart.js)
+- `evolution.js` — evolution chart (Chart.js) + versions sub-tab (git commits, tags, rollback, promote)
 - `settings.js` — settings form with local model management
 - `settings_controls.js` — searchable model pickers + segmented effort controls
 - `costs.js` — cost breakdown tables
-- `versions.js` — version management and rollback
 - `about.js` — about page
 
-Navigation is a left sidebar with 9 pages.
+Navigation is a left sidebar with 7 pages (Chat, Files, Logs, Costs, Evolution, Settings, About).
 
 ### 3.1 Chat
 
 - **Status badge** (top-right): "Online" (green) / "Thinking..." / "Working..." (amber pulse) / "Reconnecting..." (red).
   Driven by WebSocket connection state, typing events, and live task state.
-- **Header controls**: compact buttons for `/evolve`, `/bg`, `/review`, `/restart`, `/panic`, duplicated from Dashboard for quick task-side access.
+- **Header controls**: compact buttons for `/evolve`, `/bg`, `/review`, `/restart`, `/panic` — the canonical location for runtime controls.
+- **Budget pill**: compact amber pill in the header showing `$spent / $limit` with a mini progress bar, updated from `/api/state` polling every 3 seconds.
 - **Message input**: textarea + send button. Shift+Enter for newline, Enter to send.
 - **Input recall**: ArrowUp / ArrowDown cycles through recent submitted messages without leaving the textarea.
 - **Messages**: user bubbles (right, blue-tinted), assistant bubbles (left, crimson), and system-summary bubbles (left, amber). Non-user bubbles render markdown.
@@ -235,16 +236,13 @@ Navigation is a left sidebar with 9 pages.
 - **Transfer semantics**: copy/move of symlink entries preserves the link object; writing through a symlink-backed file edits the target content.
 - **Bounds**: directory listings are capped, previews are bounded to a text/byte limit, and uploads reject oversized payloads.
 
-### 3.3 Dashboard
+### 3.3 Dashboard (removed in v4.10.0)
 
-- **Stat cards**: Uptime, Workers (alive/total + progress bar), Budget (spent/limit + bar), Branch@SHA.
-- **Toggles**: Evolution Mode (on/off), Background Consciousness (on/off).
-  Send `/evolve start|stop` and `/bg start|stop` via WebSocket command.
-- **Buttons**:
-  - **Force Review** → sends `/review` command. Queues a deep code review task.
-  - **Restart Agent** → sends `/restart` command. Graceful restart (save state, kill workers, exit 42).
-  - **Panic Stop** → sends `/panic` command (with confirm dialog). Kills all workers immediately.
-- Dashboard polls `/api/state` every 3 seconds.
+The Dashboard tab has been removed. Its functionality is now distributed:
+- **Budget**: shown as a compact pill in the Chat header (polls `/api/state` every 3s).
+- **Evolve/BG toggles**: Chat header buttons (glow when active).
+- **Review/Restart/Panic**: Chat header buttons.
+- **Runtime status (evolution/consciousness detail)**: Evolution page runtime card.
 
 ### 3.4 Settings
 
@@ -275,7 +273,7 @@ Navigation is a left sidebar with 9 pages.
   Backed by `OUROBOROS_REVIEW_ENFORCEMENT`. Review always runs in both modes.
 - **Advanced**: local model runtime, max workers, total budget, per-task soft threshold, tool timeout, soft/hard timeout, web search model, review enforcement, legacy compatibility, and reset controls.
 - **Local Model Runtime**: source, GGUF filename, port, GPU layers, context length, chat format, start/stop/test buttons, live local-model status.
-- **Telegram**: Bot Token, primary chat id, legacy allowed chat ids. If no primary chat id is pinned, the bridge binds to the first active Telegram chat and keeps replies attached there.
+- **Telegram**: Bot Token and primary chat id. If no primary chat id is pinned, the bridge binds to the first active Telegram chat and keeps replies attached there.
 - **GitHub**: Token + Repo (for remote sync).
 - **Save Settings** button → POST `/api/settings`. Applies to env immediately.
   Budget and tool-timeout changes take effect immediately; provider/runtime changes may still require restart.
@@ -298,16 +296,10 @@ Navigation is a left sidebar with 9 pages.
 - Repeated startup/system events such as verification bursts are compacted in the UI.
 - Max 500 entries in view (oldest removed).
 
-### 3.6 Versions
+### 3.6 Versions (merged into Evolution in v4.10.0)
 
-- **Current branch + SHA** displayed at top.
-- **Recent Commits** list with SHA, date, message, and "Restore" button.
-- **Tags** list with tag name, date, message, and "Restore" button.
-- **Restore** button → POST `/api/git/rollback` with target SHA/tag.
-  Creates rescue snapshot, resets to target, restarts server.
-- **Promote to Stable** button → POST `/api/git/promote`.
-  Updates `ouroboros-stable` branch to match `ouroboros`.
-- **Refresh** button → reloads commit/tag lists.
+The standalone Versions tab has been merged into the Evolution page as a sub-tab.
+See section 3.8 (Evolution) for the combined page.
 
 ### 3.7 Costs
 
@@ -319,12 +311,27 @@ Navigation is a left sidebar with 9 pages.
 
 ### 3.8 Evolution
 
+Two sub-tabs ("Chart" and "Versions"), switchable via pill buttons in the page header.
+
+**Chart sub-tab (default):**
+- **Runtime status card**: evolution mode / consciousness pills, cycle count, queue, budget remaining, last evolution timestamp, next wakeup.
 - **Chart**: interactive Chart.js line graph showing code LOC, prompt sizes (BIBLE, SYSTEM),
   identity, scratchpad, and total memory growth across all git tags.
 - **Dual Y-axes**: left axis for Lines of Code, right axis for Size (KB).
 - **Tags table**: detailed breakdown per tag with all metrics.
 - Data fetched from `/api/evolution-data` (cached 60s server-side).
 - Chart.js bundled locally (`web/chart.umd.min.js`) — no CDN dependency.
+
+**Versions sub-tab:**
+- **Current branch + SHA** displayed at top.
+- **Recent Commits** list with SHA, date, message, and "Restore" button.
+- **Tags** list with tag name, date, message, and "Restore" button.
+- **Restore** button → POST `/api/git/rollback` with target SHA/tag.
+  Creates rescue snapshot, resets to target, restarts server.
+- **Promote to Stable** button → POST `/api/git/promote`.
+  Updates `ouroboros-stable` branch to match `ouroboros`.
+- Data loaded on first visit to the Versions sub-tab.
+- **Refresh** button reloads data for the active sub-tab.
 
 ### 3.9 About
 
@@ -441,6 +448,8 @@ Single source of truth for all tool classification sets:
 - **`META_TOOL_NAMES`** — discovery tools (`list_available_tools`, `enable_tools`)
 - **`READ_ONLY_PARALLEL_TOOLS`** — safe for concurrent execution in ThreadPoolExecutor
 - **`STATEFUL_BROWSER_TOOLS`** — require thread-sticky executor (Playwright affinity)
+- **`REVIEWED_MUTATIVE_TOOLS`** — tools (`repo_commit`, `repo_write_commit`) that must NOT
+  end with ambiguous timeouts; executor waits synchronously for the final result
 - **`UNTRUNCATED_TOOL_RESULTS`** — tools whose output must never be truncated
 - **`UNTRUNCATED_REPO_READ_PATHS`** — repo files that must stay whole when read
 - **`TOOL_RESULT_LIMITS`** — per-tool output size caps (chars)
@@ -468,7 +477,37 @@ backward compatibility but is not the runtime authority.
 - `ensure_claude_cli`, `/api/claude-code/*`, and desktop onboarding all reuse the same Claude Code install/status helpers.
 - Claude Code install remains native-first (`install.sh` → Homebrew on macOS → npm fallback) and `claude_code_edit` still uses the installed CLI afterward.
 - **`seal_task_transcript`**: called after compaction and before each `call_llm_with_retry`. Marks one stable tool-result boundary with `cache_control: ephemeral` to improve Anthropic prompt cache hits. Reverts all previous seals first so compaction always sees plain strings. Provider handling: OpenRouter (Anthropic models) passes list content blocks through as-is; direct Anthropic path preserves list content for `tool_result` (Anthropic API supports content blocks there); `_strip_cache_control` in `llm.py` now flattens tool-role list content back to a plain string for OpenAI, OpenAI-compatible, Cloud.ru, and local providers.
+- **Reviewed mutative tool timeout handling** (v4.9.0): `repo_commit` and `repo_write_commit`
+  are classified as `REVIEWED_MUTATIVE_TOOLS`. When they exceed the configured tool timeout,
+  the executor emits a `tool_call_late` progress event but continues waiting synchronously
+  for the real result (hard ceiling: 1800s). This prevents ambiguous "tool timed out, maybe
+  still running" states for commit operations.
 - Context compaction kicks in after round 8 (summarizes old tool results)
+
+### Claude Agent SDK gateway (gateways/claude_code.py)
+
+- **Pure transport adapter** for delegated code editing and advisory review
+- Wraps the `claude-agent-sdk` Python package (`ClaudeSDKClient` with async message stream)
+- Raises `ImportError` at module level when SDK is absent — callers fall back to CLI
+- **Two execution modes:**
+  - **Edit mode** (`run_edit`): `allowed_tools=["Read","Edit","Grep","Glob"]`,
+    `disallowed_tools=["Bash","MultiEdit"]`, `permission_mode="acceptEdits"`,
+    PreToolUse hook blocks writes outside `cwd` and to safety-critical files
+  - **Read-only mode** (`run_readonly`): uses the simpler `query()` function with
+    `allowed_tools=["Read","Grep","Glob"]`,
+    `disallowed_tools=["Bash","Edit","Write","MultiEdit"]` (SDK enforces tool
+    restrictions at the CLI level; no hooks needed)
+- **Structured result**: `ClaudeCodeResult` dataclass with `success`, `result_text`,
+  `session_id`, `cost_usd`, `usage`, `error`. Callers populate `changed_files`,
+  `diff_stat`, and `validation_summary` (orchestration lives in tool layer)
+- **Orchestration in callers**: project context injection (BIBLE.md, DEVELOPMENT.md,
+  CHECKLISTS.md, ARCHITECTURE.md), git stat, and post-edit validation live in
+  `ouroboros/tools/shell.py` helpers — the gateway stays a pure transport boundary
+- **Fallback**: if `claude-agent-sdk` is not installed, `claude_code_edit` and
+  `advisory_pre_review` fall back to the legacy CLI subprocess path
+- **Defense-in-depth**: post-edit revert in `registry.py` remains as secondary safety layer
+- Safety-critical files mirror: `BIBLE.md`, `ouroboros/safety.py`,
+  `ouroboros/tools/registry.py`, `prompts/SAFETY.md`
 
 ### Git tools (tools/git.py + tools/review.py + supervisor/git_ops.py)
 
@@ -597,10 +636,15 @@ touched-file pack builder, broader repo pack builder, goal/scope resolution.
   Model pinned to `opus`. Prompt includes only the "Repo Commit Checklist" section from
   CHECKLISTS.md (precise section loader), plus BIBLE.md, DEVELOPMENT.md, touched-file pack,
   goal/scope sections, git status, and worktree diff.
-- **`review_status`** tool: read-only diagnostic showing the last 5 advisory runs.
+- **`review_status`** tool: read-only diagnostic showing the last 5 advisory runs AND the
+  last commit attempt state (status, block reason, actionable guidance).
 - **`review_state.py`**: durable state. State file: `data/state/advisory_review.json`.
-  Stores last 10 runs. Each run has: `snapshot_hash`, `commit_message`, `status`
+  Stores last 10 advisory runs plus the last `CommitAttemptRecord`.
+  Advisory runs have: `snapshot_hash`, `commit_message`, `status`
   (fresh/stale/bypassed), `items`, `raw_result` (full, no truncation), audit fields.
+  Commit attempts have: `status` (reviewing/blocked/succeeded/failed), `block_reason`
+  (no_advisory/critical_findings/review_quorum/parse_failure/infra_failure/scope_blocked/preflight),
+  `block_details`, `duration_sec`.
 - **Snapshot hash**: deterministic SHA-256 of changed file content digests only.
   Commit message is NOT part of the hash (decoupled for less brittle freshness).
   Path-aware: `paths` parameter scopes the hash to specific files.
@@ -674,7 +718,6 @@ Settings file: `~/Ouroboros/data/settings.json`. File-locked for concurrent acce
 | ANTHROPIC_API_KEY | "" | Optional. For Claude Code CLI |
 | TELEGRAM_BOT_TOKEN | "" | Optional. Enables Telegram bridge polling/sending |
 | TELEGRAM_CHAT_ID | "" | Optional. Pin replies to a specific Telegram chat |
-| TELEGRAM_ALLOWED_CHAT_IDS | "" | Optional legacy fallback list of Telegram chat ids |
 | OUROBOROS_NETWORK_PASSWORD | "" | Optional. Enables the non-loopback auth gate when set; empty still allows open bind, but startup logs a warning |
 | OUROBOROS_MODEL | anthropic/claude-opus-4.6 | Main reasoning model |
 | OUROBOROS_MODEL_CODE | anthropic/claude-opus-4.6 | Code editing model |

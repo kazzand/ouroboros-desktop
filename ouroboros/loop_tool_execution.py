@@ -22,6 +22,7 @@ import logging
 from ouroboros.config import load_settings
 from ouroboros.tool_capabilities import (
     READ_ONLY_PARALLEL_TOOLS,
+    REVIEWED_MUTATIVE_TOOLS,
     STATEFUL_BROWSER_TOOLS,
     TOOL_RESULT_LIMITS as _TOOL_RESULT_LIMITS,
     DEFAULT_TOOL_RESULT_LIMIT as _DEFAULT_TOOL_RESULT_LIMIT,
@@ -40,6 +41,11 @@ _FAILURE_PREFIXES = (
 )
 _EXIT_CODE_RE = re.compile(r"exit_code=(-?\d+)")
 _SIGNAL_RE = re.compile(r"signal=([A-Z0-9_]+)")
+
+# Hard ceiling for reviewed mutative tools (e.g. repo_commit) that must not
+# end with an ambiguous timeout.  The normal tool timeout fires first as a
+# soft warning; the executor then re-waits up to this ceiling.
+_REVIEWED_MUTATIVE_HARD_CEILING = 1800
 
 
 def _emit_live_log(tools: ToolRegistry, payload: Dict[str, Any]) -> None:
@@ -394,19 +400,95 @@ def _execute_with_timeout(
                 })
                 return result
             except (TimeoutError, concurrent.futures.TimeoutError):
-                timeout_result = _make_timeout_result(
-                    fn_name, tool_call_id, is_code_tool, tc, drive_logs,
-                    timeout_sec, task_id, reset_msg=""
-                )
-                _emit_live_log(tools, {
-                    "type": "tool_call_timeout",
-                    "task_id": task_id,
-                    "tool": fn_name,
-                    "args": args_for_log,
-                    "duration_sec": round(time.perf_counter() - started_at, 3),
-                    "timeout_sec": timeout_sec,
-                })
-                return timeout_result
+                is_reviewed_mutative = fn_name in REVIEWED_MUTATIVE_TOOLS
+
+                if is_reviewed_mutative:
+                    # Reviewed mutative tools must not end with an ambiguous
+                    # timeout — emit a progress event and keep waiting.
+                    _emit_live_log(tools, {
+                        "type": "tool_call_late",
+                        "task_id": task_id,
+                        "tool": fn_name,
+                        "args": args_for_log,
+                        "soft_timeout_sec": timeout_sec,
+                        "message": (
+                            f"Reviewed mutative tool '{fn_name}' exceeded "
+                            f"{timeout_sec}s — still waiting for result "
+                            f"(hard ceiling: {_REVIEWED_MUTATIVE_HARD_CEILING}s)"
+                        ),
+                    })
+                    try:
+                        ceiling = max(_REVIEWED_MUTATIVE_HARD_CEILING, timeout_sec + 60)
+                        remaining = max(1, ceiling - timeout_sec)
+                        result = future.result(timeout=remaining)
+                        result_meta = result.get("result_meta") or {}
+                        _emit_live_log(tools, {
+                            "type": "tool_call_finished",
+                            "task_id": task_id,
+                            "tool": fn_name,
+                            "args": result.get("args_for_log", args_for_log),
+                            "duration_sec": round(time.perf_counter() - started_at, 3),
+                            "is_error": bool(result.get("is_error")),
+                            "status": result_meta.get("status"),
+                            "late": True,
+                        })
+                        return result
+                    except (TimeoutError, concurrent.futures.TimeoutError):
+                        # True hard ceiling — genuine infrastructure failure.
+                        # Record terminal state so durable state never stays at 'reviewing'.
+                        # NOTE: Python threads cannot be cancelled, so the underlying
+                        # operation may still complete in the background. If it does, the
+                        # git.py _record_commit_attempt call will overwrite this state with
+                        # the actual outcome (succeeded/blocked/failed) — which is correct.
+                        try:
+                            from ouroboros.review_state import (
+                                CommitAttemptRecord, load_state, save_state, _utc_now,
+                            )
+                            st = load_state(drive_logs.parent)
+                            if st.last_commit_attempt and st.last_commit_attempt.status == "reviewing":
+                                st.last_commit_attempt.status = "failed"
+                                st.last_commit_attempt.block_reason = "infra_failure"
+                                st.last_commit_attempt.block_details = (
+                                    f"Hard ceiling timeout ({_REVIEWED_MUTATIVE_HARD_CEILING}s). "
+                                    "If the operation completes later, state will be updated.")
+                                st.last_commit_attempt.duration_sec = round(
+                                    time.perf_counter() - started_at, 1)
+                                save_state(drive_logs.parent, st)
+                        except Exception:
+                            pass
+                        timeout_result = _make_timeout_result(
+                            fn_name, tool_call_id, is_code_tool, tc, drive_logs,
+                            _REVIEWED_MUTATIVE_HARD_CEILING, task_id,
+                            reset_msg=(
+                                f"CRITICAL: Reviewed mutative tool hit hard ceiling "
+                                f"({_REVIEWED_MUTATIVE_HARD_CEILING}s). "
+                                "Check git state manually. "
+                            ),
+                        )
+                        _emit_live_log(tools, {
+                            "type": "tool_call_timeout",
+                            "task_id": task_id,
+                            "tool": fn_name,
+                            "args": args_for_log,
+                            "duration_sec": round(time.perf_counter() - started_at, 3),
+                            "timeout_sec": _REVIEWED_MUTATIVE_HARD_CEILING,
+                            "hard_ceiling": True,
+                        })
+                        return timeout_result
+                else:
+                    timeout_result = _make_timeout_result(
+                        fn_name, tool_call_id, is_code_tool, tc, drive_logs,
+                        timeout_sec, task_id, reset_msg=""
+                    )
+                    _emit_live_log(tools, {
+                        "type": "tool_call_timeout",
+                        "task_id": task_id,
+                        "tool": fn_name,
+                        "args": args_for_log,
+                        "duration_sec": round(time.perf_counter() - started_at, 3),
+                        "timeout_sec": timeout_sec,
+                    })
+                    return timeout_result
         finally:
             executor.shutdown(wait=False, cancel_futures=True)
 

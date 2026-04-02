@@ -125,6 +125,20 @@ def test_auto_tag_called_in_commit_functions():
         )
 
 
+def test_auto_tag_not_gated_by_test_warnings():
+    """Auto-tagging must run unconditionally — not skipped when tests fail."""
+    git_mod = _get_git_module()
+    for fn_name in ("_repo_write_commit", "_repo_commit_push"):
+        source = inspect.getsource(getattr(git_mod, fn_name))
+        # Find the line(s) that call _auto_tag_on_version_bump
+        for line in source.splitlines():
+            if "_auto_tag_on_version_bump" in line:
+                assert "if not test_warning" not in line, (
+                    f"{fn_name}: _auto_tag_on_version_bump must not be gated "
+                    f"by test_warning_ref — tags must always be created on VERSION bump"
+                )
+
+
 # --- Credential helper ---
 
 def test_credential_helper_exists():

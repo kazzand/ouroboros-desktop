@@ -241,13 +241,7 @@ export function renderSettingsPage() {
                                 <div class="settings-inline-note">Single model for the blocking scope reviewer. Runs after the triad diff review.</div>
                             </div>
                             <div class="form-field">
-                                <label>Scope Review Effort</label>
-                                <input type="hidden" id="s-effort-scope-review" value="high">
-                                <div class="segmented-control" data-effort-group data-effort-target="s-effort-scope-review">
-                                    <button type="button" class="segment-btn" data-effort-value="low">Low</button>
-                                    <button type="button" class="segment-btn" data-effort-value="medium">Med</button>
-                                    <button type="button" class="segment-btn active" data-effort-value="high">High</button>
-                                </div>
+                                ${effortField({ id: 's-effort-scope-review', label: 'Scope Review Effort', defaultValue: 'high' })}
                             </div>
                         </div>
                     </div>
@@ -262,14 +256,10 @@ export function renderSettingsPage() {
                             label: 'Bot Token',
                             placeholder: '123456:ABCDEF...',
                         })}</div>
-                        <div class="form-grid two">
+                        <div class="form-row">
                             <div class="form-field">
                                 <label>Primary Chat ID (optional)</label>
                                 <input id="s-telegram-chat-id" placeholder="123456789">
-                            </div>
-                            <div class="form-field">
-                                <label>Allowed Chat IDs (legacy optional)</label>
-                                <input id="s-telegram-allowed-chat-ids" placeholder="123456789,987654321">
                             </div>
                         </div>
                         <div class="settings-inline-note">If no primary chat is pinned, the bridge binds to the first active Telegram chat and keeps replies attached there.</div>

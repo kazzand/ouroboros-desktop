@@ -102,14 +102,10 @@ def test_styles_cover_chat_header_controls_and_grouped_cards():
     assert re.search(r"\.chat-live-line-body\s*\{[^}]*font-size:\s*\d+px;", css, re.S)
 
 
-def test_dashboard_and_chat_only_poll_state_when_active():
+def test_chat_only_polls_state_when_active():
     chat_source = _read("web/modules/chat.js")
-    dash_source = _read("web/modules/dashboard.js")
 
     assert "state.activePage !== 'chat'" in chat_source
-    assert "state.activePage !== 'dashboard'" in dash_source
-    assert "cache: 'no-store'" in dash_source
-    assert "Dashboard unavailable:" in dash_source
 
 
 def test_live_card_has_inline_typing_dots_and_pulsing_phase_badge():
@@ -182,3 +178,27 @@ def test_chat_history_forces_live_card_for_historical_task_summaries():
     idx_force = source.index("taskState.forceCard = true;")
     idx_append = source.index("appendTaskSummaryToLiveCard(msg);")
     assert idx_force < idx_append, "forceCard must be set before appendTaskSummaryToLiveCard"
+
+
+def test_progress_messages_force_live_card_visible():
+    """Progress messages (e.g. '🔍 Searching...') must force the live card open.
+
+    Without forceCard, a single-tool-call task (like web_search) would buffer
+    progress into an invisible card (toolCalls <= 1) and the user sees nothing
+    until the final result arrives. forceCard must be set inside
+    updateLiveCardFromProgressMessage before queueTaskLiveUpdate is called.
+    """
+    source = _read("web/modules/chat.js")
+    # Find the updateLiveCardFromProgressMessage function
+    func_start = source.index("function updateLiveCardFromProgressMessage(")
+    # Find the next function definition to bound the search
+    func_body_end = source.index("\n    function ", func_start + 1)
+    func_body = source[func_start:func_body_end]
+    # forceCard must be set to true
+    assert "taskState.forceCard = true" in func_body, \
+        "updateLiveCardFromProgressMessage must set forceCard = true"
+    # forceCard must be set BEFORE queueTaskLiveUpdate
+    idx_force = func_body.index("forceCard = true")
+    idx_queue = func_body.index("queueTaskLiveUpdate(")
+    assert idx_force < idx_queue, \
+        "forceCard must be set before queueTaskLiveUpdate in updateLiveCardFromProgressMessage"
