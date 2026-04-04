@@ -16,6 +16,16 @@ from ouroboros.deep_self_review import (
 )
 
 
+def _make_dulwich_mock(file_list: list[str]):
+    """Return a mock for dulwich.repo.Repo that yields the given file list from open_index()."""
+    mock_index = mock.Mock()
+    mock_index.__iter__ = mock.Mock(return_value=iter(f.encode() for f in file_list))
+    mock_repo = mock.Mock()
+    mock_repo.open_index.return_value = mock_index
+    mock_repo_cls = mock.Mock(return_value=mock_repo)
+    return mock_repo_cls
+
+
 @pytest.fixture
 def tmp_repo(tmp_path):
     """Create a minimal git repo with tracked files."""
@@ -44,9 +54,7 @@ def tmp_drive(tmp_path):
 class TestBuildReviewPack:
     def test_reads_tracked_files(self, tmp_repo, tmp_drive):
         """git ls-files output determines which repo files are included."""
-        git_output = "main.py\nlib.py\n"
-        with mock.patch("ouroboros.deep_self_review.subprocess.run") as mock_run:
-            mock_run.return_value = mock.Mock(stdout=git_output, returncode=0)
+        with mock.patch("dulwich.repo.Repo", _make_dulwich_mock(["main.py", "lib.py"])):
             pack, stats = build_review_pack(tmp_repo, tmp_drive)
 
         assert "## FILE: main.py" in pack
@@ -56,8 +64,7 @@ class TestBuildReviewPack:
 
     def test_includes_memory_whitelist(self, tmp_repo, tmp_drive):
         """Memory whitelist files from drive_root are included."""
-        with mock.patch("ouroboros.deep_self_review.subprocess.run") as mock_run:
-            mock_run.return_value = mock.Mock(stdout="main.py\n", returncode=0)
+        with mock.patch("dulwich.repo.Repo", _make_dulwich_mock(["main.py"])):
             pack, stats = build_review_pack(tmp_repo, tmp_drive)
 
         assert "## FILE: drive/memory/identity.md" in pack
@@ -67,8 +74,7 @@ class TestBuildReviewPack:
 
     def test_skips_missing_memory(self, tmp_repo, tmp_drive):
         """Missing memory files are silently skipped."""
-        with mock.patch("ouroboros.deep_self_review.subprocess.run") as mock_run:
-            mock_run.return_value = mock.Mock(stdout="main.py\n", returncode=0)
+        with mock.patch("dulwich.repo.Repo", _make_dulwich_mock(["main.py"])):
             pack, stats = build_review_pack(tmp_repo, tmp_drive)
 
         # registry.md, WORLD.md, index-full.md don't exist — should not appear
@@ -143,9 +149,7 @@ class TestVendoredFilesExcluded:
     def test_minified_js_skipped(self, tmp_repo, tmp_drive):
         """Files with .min.js suffix are excluded from the review pack."""
         (tmp_repo / "lib.min.js").write_text("!function(){var a=1;}()\n")
-        git_output = "main.py\nlib.min.js\n"
-        with mock.patch("ouroboros.deep_self_review.subprocess.run") as mock_run:
-            mock_run.return_value = mock.Mock(stdout=git_output, returncode=0)
+        with mock.patch("dulwich.repo.Repo", _make_dulwich_mock(["main.py", "lib.min.js"])):
             pack, stats = build_review_pack(tmp_repo, tmp_drive)
 
         assert "lib.min.js" not in pack or "vendored/minified" in str(stats["skipped"])
@@ -154,9 +158,7 @@ class TestVendoredFilesExcluded:
     def test_chart_umd_skipped(self, tmp_repo, tmp_drive):
         """chart.umd.min.js (vendored Chart.js) is excluded by name and appears in OMITTED section."""
         (tmp_repo / "chart.umd.min.js").write_text("!function(t,e){/* chart.js minified */}()\n")
-        git_output = "main.py\nchart.umd.min.js\n"
-        with mock.patch("ouroboros.deep_self_review.subprocess.run") as mock_run:
-            mock_run.return_value = mock.Mock(stdout=git_output, returncode=0)
+        with mock.patch("dulwich.repo.Repo", _make_dulwich_mock(["main.py", "chart.umd.min.js"])):
             pack, stats = build_review_pack(tmp_repo, tmp_drive)
 
         assert "## FILE: chart.umd.min.js" not in pack
@@ -168,9 +170,7 @@ class TestVendoredFilesExcluded:
     def test_min_css_skipped(self, tmp_repo, tmp_drive):
         """Files with .min.css suffix are excluded."""
         (tmp_repo / "style.min.css").write_text("body{margin:0}a{color:red}\n")
-        git_output = "main.py\nstyle.min.css\n"
-        with mock.patch("ouroboros.deep_self_review.subprocess.run") as mock_run:
-            mock_run.return_value = mock.Mock(stdout=git_output, returncode=0)
+        with mock.patch("dulwich.repo.Repo", _make_dulwich_mock(["main.py", "style.min.css"])):
             pack, stats = build_review_pack(tmp_repo, tmp_drive)
 
         assert "## FILE: style.min.css" not in pack
@@ -179,9 +179,7 @@ class TestVendoredFilesExcluded:
     def test_regular_js_included(self, tmp_repo, tmp_drive):
         """Regular (non-minified) JS files are NOT excluded."""
         (tmp_repo / "app.js").write_text("console.log('hello');\n")
-        git_output = "main.py\napp.js\n"
-        with mock.patch("ouroboros.deep_self_review.subprocess.run") as mock_run:
-            mock_run.return_value = mock.Mock(stdout=git_output, returncode=0)
+        with mock.patch("dulwich.repo.Repo", _make_dulwich_mock(["main.py", "app.js"])):
             pack, stats = build_review_pack(tmp_repo, tmp_drive)
 
         assert "## FILE: app.js" in pack
@@ -194,7 +192,6 @@ class TestVendoredFilesExcluded:
         identity.md raises PermissionError, ensuring it lands in skipped and the OMITTED section.
         """
         (tmp_repo / "lib.min.js").write_text("minified\n")
-        git_output = "main.py\nlib.min.js\n"
         (tmp_drive / "memory" / "identity.md").write_text("I am Ouroboros.\n")
         target_path = str(tmp_drive / "memory" / "identity.md")
 
@@ -205,8 +202,7 @@ class TestVendoredFilesExcluded:
                 raise PermissionError("mocked read error")
             return original_read_text(self, encoding=encoding, errors=errors)
 
-        with mock.patch("ouroboros.deep_self_review.subprocess.run") as mock_run:
-            mock_run.return_value = mock.Mock(stdout=git_output, returncode=0)
+        with mock.patch("dulwich.repo.Repo", _make_dulwich_mock(["main.py", "lib.min.js"])):
             with mock.patch("pathlib.Path.read_text", patched_read_text):
                 pack, stats = build_review_pack(tmp_repo, tmp_drive)
 
@@ -274,9 +270,7 @@ class TestIsProbablyBinary:
     def test_unlisted_extension_binary_excluded_from_pack(self, tmp_repo, tmp_drive):
         """Binary file with unlisted extension (.bin) is excluded via content sniffer."""
         (tmp_repo / "model.bin").write_bytes(b"GGUF\x00" + b"\x00\xff" * 100)
-        git_output = "main.py\nmodel.bin\n"
-        with mock.patch("ouroboros.deep_self_review.subprocess.run") as mock_run:
-            mock_run.return_value = mock.Mock(stdout=git_output, returncode=0)
+        with mock.patch("dulwich.repo.Repo", _make_dulwich_mock(["main.py", "model.bin"])):
             pack, stats = build_review_pack(tmp_repo, tmp_drive)
 
         assert "## FILE: model.bin" not in pack
@@ -287,9 +281,7 @@ class TestBinaryFilesExcluded:
     def test_png_skipped(self, tmp_repo, tmp_drive):
         """PNG images are excluded — reading them produces garbage replacement chars."""
         (tmp_repo / "screenshot.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 100)
-        git_output = "main.py\nscreenshot.png\n"
-        with mock.patch("ouroboros.deep_self_review.subprocess.run") as mock_run:
-            mock_run.return_value = mock.Mock(stdout=git_output, returncode=0)
+        with mock.patch("dulwich.repo.Repo", _make_dulwich_mock(["main.py", "screenshot.png"])):
             pack, stats = build_review_pack(tmp_repo, tmp_drive)
 
         assert "## FILE: screenshot.png" not in pack
@@ -298,9 +290,7 @@ class TestBinaryFilesExcluded:
     def test_jpg_skipped(self, tmp_repo, tmp_drive):
         """JPEG images are excluded."""
         (tmp_repo / "logo.jpg").write_bytes(b"\xff\xd8\xff" + b"\x00" * 50)
-        git_output = "main.py\nlogo.jpg\n"
-        with mock.patch("ouroboros.deep_self_review.subprocess.run") as mock_run:
-            mock_run.return_value = mock.Mock(stdout=git_output, returncode=0)
+        with mock.patch("dulwich.repo.Repo", _make_dulwich_mock(["main.py", "logo.jpg"])):
             pack, stats = build_review_pack(tmp_repo, tmp_drive)
 
         assert "## FILE: logo.jpg" not in pack
@@ -309,9 +299,7 @@ class TestBinaryFilesExcluded:
     def test_svg_skipped(self, tmp_repo, tmp_drive):
         """SVG files are excluded (provider icons can be large XML)."""
         (tmp_repo / "icon.svg").write_text("<svg><circle r='10'/></svg>\n")
-        git_output = "main.py\nicon.svg\n"
-        with mock.patch("ouroboros.deep_self_review.subprocess.run") as mock_run:
-            mock_run.return_value = mock.Mock(stdout=git_output, returncode=0)
+        with mock.patch("dulwich.repo.Repo", _make_dulwich_mock(["main.py", "icon.svg"])):
             pack, stats = build_review_pack(tmp_repo, tmp_drive)
 
         assert "## FILE: icon.svg" not in pack
@@ -320,9 +308,7 @@ class TestBinaryFilesExcluded:
     def test_ico_skipped(self, tmp_repo, tmp_drive):
         """ICO files are excluded."""
         (tmp_repo / "favicon.ico").write_bytes(b"\x00\x00\x01\x00" + b"\x00" * 50)
-        git_output = "main.py\nfavicon.ico\n"
-        with mock.patch("ouroboros.deep_self_review.subprocess.run") as mock_run:
-            mock_run.return_value = mock.Mock(stdout=git_output, returncode=0)
+        with mock.patch("dulwich.repo.Repo", _make_dulwich_mock(["main.py", "favicon.ico"])):
             pack, stats = build_review_pack(tmp_repo, tmp_drive)
 
         assert "## FILE: favicon.ico" not in pack
@@ -330,9 +316,7 @@ class TestBinaryFilesExcluded:
 
     def test_python_source_not_skipped(self, tmp_repo, tmp_drive):
         """Python source files (.py) are NOT excluded by the binary filter."""
-        git_output = "main.py\n"
-        with mock.patch("ouroboros.deep_self_review.subprocess.run") as mock_run:
-            mock_run.return_value = mock.Mock(stdout=git_output, returncode=0)
+        with mock.patch("dulwich.repo.Repo", _make_dulwich_mock(["main.py"])):
             pack, stats = build_review_pack(tmp_repo, tmp_drive)
 
         assert "## FILE: main.py" in pack
@@ -345,9 +329,7 @@ class TestSkipDirPrefixes:
         assets.mkdir()
         (assets / "chat.png").write_bytes(b"\x89PNG\r\n" + b"\x00" * 100)
         (assets / "logo.jpg").write_bytes(b"\xff\xd8\xff" + b"\x00" * 50)
-        git_output = "main.py\nassets/chat.png\nassets/logo.jpg\n"
-        with mock.patch("ouroboros.deep_self_review.subprocess.run") as mock_run:
-            mock_run.return_value = mock.Mock(stdout=git_output, returncode=0)
+        with mock.patch("dulwich.repo.Repo", _make_dulwich_mock(["main.py", "assets/chat.png", "assets/logo.jpg"])):
             pack, stats = build_review_pack(tmp_repo, tmp_drive)
 
         assert "## FILE: assets/chat.png" not in pack
@@ -361,9 +343,7 @@ class TestSkipDirPrefixes:
         wv = tmp_repo / "webview" / "js"
         wv.mkdir(parents=True)
         (wv / "polyfill.js").write_text("/* polyfill */\n")
-        git_output = "main.py\nwebview/js/polyfill.js\n"
-        with mock.patch("ouroboros.deep_self_review.subprocess.run") as mock_run:
-            mock_run.return_value = mock.Mock(stdout=git_output, returncode=0)
+        with mock.patch("dulwich.repo.Repo", _make_dulwich_mock(["main.py", "webview/js/polyfill.js"])):
             pack, stats = build_review_pack(tmp_repo, tmp_drive)
 
         assert "## FILE: webview/js/polyfill.js" not in pack
@@ -375,9 +355,7 @@ class TestSkipDirPrefixes:
         web = tmp_repo / "web" / "modules"
         web.mkdir(parents=True)
         (web / "chat.js").write_text("// chat module\n")
-        git_output = "main.py\nweb/modules/chat.js\n"
-        with mock.patch("ouroboros.deep_self_review.subprocess.run") as mock_run:
-            mock_run.return_value = mock.Mock(stdout=git_output, returncode=0)
+        with mock.patch("dulwich.repo.Repo", _make_dulwich_mock(["main.py", "web/modules/chat.js"])):
             pack, stats = build_review_pack(tmp_repo, tmp_drive)
 
         assert "## FILE: web/modules/chat.js" in pack

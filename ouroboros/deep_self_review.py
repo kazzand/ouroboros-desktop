@@ -10,7 +10,6 @@ from __future__ import annotations
 import logging
 import os
 import pathlib
-import subprocess
 from typing import Any, Callable, Dict, Optional, Tuple
 
 log = logging.getLogger(__name__)
@@ -128,20 +127,18 @@ def build_review_pack(
     file_count = 0
     skipped: list[str] = []
 
-    # 1. Git-tracked files (fail closed — no silent degradation)
+    # 1. Git-tracked files — read directly from git index via dulwich (fork-safe, no subprocess).
+    # dulwich.repo.Repo opens the index in pure Python; safe to call inside forked workers on macOS.
     try:
-        result = subprocess.run(
-            ["git", "ls-files"],
-            cwd=str(repo_dir),
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        if result.returncode != 0:
-            raise RuntimeError(f"git ls-files exited with code {result.returncode}: {result.stderr.strip()}")
-        tracked = [f.strip() for f in result.stdout.splitlines() if f.strip()]
+        import dulwich.repo as _dulwich_repo  # local import — avoid top-level cost if unused
+        _repo = _dulwich_repo.Repo(str(repo_dir))
+        tracked = sorted(p.decode("utf-8", errors="replace") for p in _repo.open_index())
         if not tracked:
-            raise RuntimeError("git ls-files returned no files — cannot build review pack")
+            raise RuntimeError("dulwich index is empty — cannot build review pack")
+    except ImportError:
+        return "", {"file_count": 0, "total_chars": 0, "skipped": [
+            "FATAL: dulwich not installed. Run: pip install dulwich"
+        ]}
     except Exception as e:
         return "", {"file_count": 0, "total_chars": 0, "skipped": [f"FATAL: {e}"]}
 
