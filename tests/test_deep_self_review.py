@@ -9,6 +9,7 @@ from unittest import mock
 import pytest
 
 from ouroboros.deep_self_review import (
+    _is_probably_binary,
     build_review_pack,
     is_review_available,
     run_deep_self_review,
@@ -218,6 +219,169 @@ class TestVendoredFilesExcluded:
         assert memory_errors, "identity.md read error should appear in skipped"
         # And it appears in the OMITTED section too
         assert "identity.md" in pack[omitted_section_pos:]
+
+
+class TestIsProbablyBinary:
+    def test_nul_byte_is_binary(self, tmp_path):
+        """File containing a NUL byte is detected as binary."""
+        f = tmp_path / "blob.bin"
+        f.write_bytes(b"some text\x00more text")
+        assert _is_probably_binary(f) is True
+
+    def test_plain_text_is_not_binary(self, tmp_path):
+        """Plain text file is not detected as binary."""
+        f = tmp_path / "script.py"
+        f.write_text("def hello():\n    return 'world'\n")
+        assert _is_probably_binary(f) is False
+
+    def test_high_non_printable_ratio_is_binary(self, tmp_path):
+        """File with >30% non-printable bytes (ASCII control range) is detected as binary."""
+        # 40% non-printable (bytes 1–8 range, ASCII control chars)
+        payload = bytes(range(1, 9)) * 10 + b"normal text" * 3
+        f = tmp_path / "data.unknown"
+        f.write_bytes(payload)
+        assert _is_probably_binary(f) is True
+
+    def test_high_byte_ratio_is_binary(self, tmp_path):
+        """File with >30% bytes >= 128 (non-UTF-8/mixed-encoding blobs) is detected as binary."""
+        # 50% bytes >= 128, typical of non-UTF-8 binary blobs
+        payload = bytes(range(128, 256)) * 5 + b"ascii text" * 5
+        f = tmp_path / "data.blob"
+        f.write_bytes(payload)
+        assert _is_probably_binary(f) is True
+
+    def test_only_first_sniff_bytes_read(self, tmp_path):
+        """_is_probably_binary only reads _BINARY_SNIFF_BYTES bytes, not the whole file."""
+        from ouroboros.deep_self_review import _BINARY_SNIFF_BYTES
+        # File is mostly text but has NUL in the first 8KB window
+        payload = b"text data\x00more" + b"a" * (_BINARY_SNIFF_BYTES * 2)
+        f = tmp_path / "big.bin"
+        f.write_bytes(payload)
+        # Should detect NUL in the first chunk and return True
+        assert _is_probably_binary(f) is True
+
+    def test_empty_file_is_not_binary(self, tmp_path):
+        """Empty file does not crash and returns False."""
+        f = tmp_path / "empty.bin"
+        f.write_bytes(b"")
+        assert _is_probably_binary(f) is False
+
+    def test_missing_file_returns_false(self, tmp_path):
+        """Missing file returns False (let caller handle read failure)."""
+        f = tmp_path / "does_not_exist.bin"
+        assert _is_probably_binary(f) is False
+
+    def test_unlisted_extension_binary_excluded_from_pack(self, tmp_repo, tmp_drive):
+        """Binary file with unlisted extension (.bin) is excluded via content sniffer."""
+        (tmp_repo / "model.bin").write_bytes(b"GGUF\x00" + b"\x00\xff" * 100)
+        git_output = "main.py\nmodel.bin\n"
+        with mock.patch("ouroboros.deep_self_review.subprocess.run") as mock_run:
+            mock_run.return_value = mock.Mock(stdout=git_output, returncode=0)
+            pack, stats = build_review_pack(tmp_repo, tmp_drive)
+
+        assert "## FILE: model.bin" not in pack
+        assert any("model.bin" in s for s in stats["skipped"])
+
+
+class TestBinaryFilesExcluded:
+    def test_png_skipped(self, tmp_repo, tmp_drive):
+        """PNG images are excluded — reading them produces garbage replacement chars."""
+        (tmp_repo / "screenshot.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 100)
+        git_output = "main.py\nscreenshot.png\n"
+        with mock.patch("ouroboros.deep_self_review.subprocess.run") as mock_run:
+            mock_run.return_value = mock.Mock(stdout=git_output, returncode=0)
+            pack, stats = build_review_pack(tmp_repo, tmp_drive)
+
+        assert "## FILE: screenshot.png" not in pack
+        assert any("screenshot.png" in s for s in stats["skipped"])
+
+    def test_jpg_skipped(self, tmp_repo, tmp_drive):
+        """JPEG images are excluded."""
+        (tmp_repo / "logo.jpg").write_bytes(b"\xff\xd8\xff" + b"\x00" * 50)
+        git_output = "main.py\nlogo.jpg\n"
+        with mock.patch("ouroboros.deep_self_review.subprocess.run") as mock_run:
+            mock_run.return_value = mock.Mock(stdout=git_output, returncode=0)
+            pack, stats = build_review_pack(tmp_repo, tmp_drive)
+
+        assert "## FILE: logo.jpg" not in pack
+        assert any("logo.jpg" in s for s in stats["skipped"])
+
+    def test_svg_skipped(self, tmp_repo, tmp_drive):
+        """SVG files are excluded (provider icons can be large XML)."""
+        (tmp_repo / "icon.svg").write_text("<svg><circle r='10'/></svg>\n")
+        git_output = "main.py\nicon.svg\n"
+        with mock.patch("ouroboros.deep_self_review.subprocess.run") as mock_run:
+            mock_run.return_value = mock.Mock(stdout=git_output, returncode=0)
+            pack, stats = build_review_pack(tmp_repo, tmp_drive)
+
+        assert "## FILE: icon.svg" not in pack
+        assert any("icon.svg" in s for s in stats["skipped"])
+
+    def test_ico_skipped(self, tmp_repo, tmp_drive):
+        """ICO files are excluded."""
+        (tmp_repo / "favicon.ico").write_bytes(b"\x00\x00\x01\x00" + b"\x00" * 50)
+        git_output = "main.py\nfavicon.ico\n"
+        with mock.patch("ouroboros.deep_self_review.subprocess.run") as mock_run:
+            mock_run.return_value = mock.Mock(stdout=git_output, returncode=0)
+            pack, stats = build_review_pack(tmp_repo, tmp_drive)
+
+        assert "## FILE: favicon.ico" not in pack
+        assert any("favicon.ico" in s for s in stats["skipped"])
+
+    def test_python_source_not_skipped(self, tmp_repo, tmp_drive):
+        """Python source files (.py) are NOT excluded by the binary filter."""
+        git_output = "main.py\n"
+        with mock.patch("ouroboros.deep_self_review.subprocess.run") as mock_run:
+            mock_run.return_value = mock.Mock(stdout=git_output, returncode=0)
+            pack, stats = build_review_pack(tmp_repo, tmp_drive)
+
+        assert "## FILE: main.py" in pack
+
+
+class TestSkipDirPrefixes:
+    def test_assets_dir_excluded(self, tmp_repo, tmp_drive):
+        """Files under assets/ are excluded (README screenshots, app icons)."""
+        assets = tmp_repo / "assets"
+        assets.mkdir()
+        (assets / "chat.png").write_bytes(b"\x89PNG\r\n" + b"\x00" * 100)
+        (assets / "logo.jpg").write_bytes(b"\xff\xd8\xff" + b"\x00" * 50)
+        git_output = "main.py\nassets/chat.png\nassets/logo.jpg\n"
+        with mock.patch("ouroboros.deep_self_review.subprocess.run") as mock_run:
+            mock_run.return_value = mock.Mock(stdout=git_output, returncode=0)
+            pack, stats = build_review_pack(tmp_repo, tmp_drive)
+
+        assert "## FILE: assets/chat.png" not in pack
+        assert "## FILE: assets/logo.jpg" not in pack
+        assert any("assets/chat.png" in s for s in stats["skipped"])
+        assert any("assets/logo.jpg" in s for s in stats["skipped"])
+        assert "## FILE: main.py" in pack  # non-assets file still present
+
+    def test_webview_dir_excluded(self, tmp_repo, tmp_drive):
+        """Files under webview/ are excluded (legacy PyWebView JS helpers)."""
+        wv = tmp_repo / "webview" / "js"
+        wv.mkdir(parents=True)
+        (wv / "polyfill.js").write_text("/* polyfill */\n")
+        git_output = "main.py\nwebview/js/polyfill.js\n"
+        with mock.patch("ouroboros.deep_self_review.subprocess.run") as mock_run:
+            mock_run.return_value = mock.Mock(stdout=git_output, returncode=0)
+            pack, stats = build_review_pack(tmp_repo, tmp_drive)
+
+        assert "## FILE: webview/js/polyfill.js" not in pack
+        assert any("webview/js/polyfill.js" in s for s in stats["skipped"])
+        assert "## FILE: main.py" in pack
+
+    def test_web_dir_not_excluded(self, tmp_repo, tmp_drive):
+        """Files under web/ (SPA modules) are NOT excluded."""
+        web = tmp_repo / "web" / "modules"
+        web.mkdir(parents=True)
+        (web / "chat.js").write_text("// chat module\n")
+        git_output = "main.py\nweb/modules/chat.js\n"
+        with mock.patch("ouroboros.deep_self_review.subprocess.run") as mock_run:
+            mock_run.return_value = mock.Mock(stdout=git_output, returncode=0)
+            pack, stats = build_review_pack(tmp_repo, tmp_drive)
+
+        assert "## FILE: web/modules/chat.js" in pack
+        assert not any("web/modules/chat.js" in s for s in stats["skipped"])
 
 
 class TestReviewPackOverflow:

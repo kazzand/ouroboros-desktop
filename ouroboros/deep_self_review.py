@@ -33,6 +33,61 @@ _VENDORED_NAMES = {
     "chart.umd.min.js",
 }
 
+# Binary / media file extensions: images, fonts, compiled blobs — not agent logic.
+# PNG/JPG/etc read as text via errors="replace" and produce hundreds of thousands of
+# garbage replacement characters, consuming most of the context budget uselessly.
+_BINARY_EXTENSIONS = {
+    ".png", ".jpg", ".jpeg", ".gif", ".ico", ".icns", ".webp", ".bmp", ".tiff",
+    ".svg",  # SVG can be large; reviewer gets no value from raw XML icon paths
+    ".woff", ".woff2", ".ttf", ".otf", ".eot",
+    ".pdf", ".zip", ".tar", ".gz", ".bz2",
+    ".pyc", ".pyo", ".so", ".dylib", ".dll", ".exe",
+    ".mp3", ".mp4", ".wav", ".ogg", ".flac",
+    ".db", ".sqlite", ".sqlite3",
+}
+
+# Directory prefixes to skip entirely (relative to repo_dir, using forward slashes).
+# - assets/  : README screenshots and app icons — no agent logic
+# - webview/ : legacy PyWebView JS helpers, not part of the web SPA or agent core
+_SKIP_DIR_PREFIXES = ("assets/", "webview/")
+
+# How many bytes to sample for the binary content heuristic.
+_BINARY_SNIFF_BYTES = 8192
+
+
+def _is_probably_binary(path: pathlib.Path) -> bool:
+    """Return True if the file looks like binary content.
+
+    Best-effort heuristic — reads at most _BINARY_SNIFF_BYTES bytes from the
+    *beginning* of the file using an open()+read() call so large files are never
+    fully buffered just for inspection.
+
+    Two checks (in order):
+    1. NUL byte presence — reliable indicator of non-text data.
+    2. High ratio of non-printable bytes — covers ASCII control chars, high-byte
+       sequences (bytes ≥ 128 from non-UTF-8 blobs), and DEL (127).
+       Threshold: >30% of the sample.
+
+    Returns False on any I/O error (let the caller handle read_text failure).
+    """
+    try:
+        with path.open("rb") as fh:
+            sample = fh.read(_BINARY_SNIFF_BYTES)
+    except Exception:
+        return False
+    if not sample:
+        return False
+    if b"\x00" in sample:
+        return True
+    # Count bytes that are not printable ASCII or common whitespace.
+    # This includes: ASCII control chars (< 9, 14-31), DEL (127),
+    # and high bytes (128-255, from non-UTF-8 or mixed-encoding blobs).
+    non_text = sum(
+        1 for b in sample
+        if b < 9 or (13 < b < 32) or b >= 127
+    )
+    return non_text / len(sample) > 0.30
+
 _MEMORY_WHITELIST = [
     "memory/identity.md",
     "memory/scratchpad.md",
@@ -96,20 +151,35 @@ def build_review_pack(
         try:
             if not full_path.is_file():
                 continue
-            # Security: skip sensitive files
+            # Skip excluded directory prefixes (assets, webview, etc.)
+            rel_norm = rel_path.replace("\\", "/")
+            if rel_norm.startswith(_SKIP_DIR_PREFIXES):
+                skipped.append(f"{rel_path} (excluded dir)")
+                continue
             fname = full_path.name.lower()
             fsuffix = full_path.suffix.lower()
+            # Security: skip sensitive files
             if fname in _SENSITIVE_NAMES or fsuffix in _SENSITIVE_EXTENSIONS:
                 skipped.append(f"{rel_path} (sensitive)")
+                continue
+            # Binary/media: skip images, fonts, compiled blobs (waste context with garbage)
+            if fsuffix in _BINARY_EXTENSIONS:
+                skipped.append(f"{rel_path} (binary/media)")
                 continue
             # Vendored/minified: skip third-party bundled assets (waste context window)
             if fname in _VENDORED_NAMES or any(fname.endswith(s) for s in _VENDORED_SUFFIXES):
                 skipped.append(f"{rel_path} (vendored/minified)")
                 continue
+            # Size guard BEFORE content sniffer so oversized files never trigger a read.
             size = full_path.stat().st_size
             if size > _MAX_FILE_BYTES:
                 skipped.append(f"{rel_path} (>{_MAX_FILE_BYTES // 1024}KB)")
                 parts.append(f"## FILE: {rel_path}\n[SKIPPED: file too large ({size} bytes)]\n")
+                continue
+            # Content-based binary guard: catches unlisted extensions (e.g. .wasm, .bin,
+            # extensionless blobs). Reads only the first _BINARY_SNIFF_BYTES bytes.
+            if _is_probably_binary(full_path):
+                skipped.append(f"{rel_path} (binary/media)")
                 continue
             content = full_path.read_text(encoding="utf-8", errors="replace")
             if not content.strip():
@@ -152,7 +222,9 @@ def build_review_pack(
         omission_lines = [
             "## OMITTED FILES (not included in review pack)",
             "These files were excluded. Reasons: sensitive=secrets/keys, "
-            "vendored/minified=third-party bundled asset, too_large=>1MB, read_error=unreadable.",
+            "vendored/minified=third-party bundled asset, binary/media=images/fonts/compiled blobs, "
+            "excluded_dir=non-agent-logic directory (assets/, webview/), "
+            "too_large=>1MB, read_error=unreadable.",
             "",
         ]
         for entry in skipped:
