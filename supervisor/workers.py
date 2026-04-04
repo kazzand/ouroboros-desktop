@@ -660,15 +660,52 @@ def ensure_workers_healthy() -> None:
                 meta = RUNNING.pop(w.busy_task_id) or {}
                 task = meta.get("task") if isinstance(meta, dict) else None
                 if isinstance(task, dict):
-                    try:
-                        from ouroboros.task_results import STATUS_INTERRUPTED, write_task_result
-                        write_task_result(
-                            DRIVE_ROOT, str(w.busy_task_id), STATUS_INTERRUPTED,
-                            result="Worker process died mid-task. Task will be retried.",
-                        )
-                    except Exception:
-                        log.debug("Failed to write interrupted status for %s", w.busy_task_id, exc_info=True)
-                    queue.enqueue_task(task, front=True)
+                    task_type = str(task.get("type") or "")
+                    # deep_self_review crashes deterministically on some platforms
+                    # (SIGSEGV / signal 11 due to macOS fork-safety + heavy subprocess I/O).
+                    # Do not retry — it would loop forever.  Emit a failure result instead.
+                    is_crash_signal = isinstance(exitcode, int) and exitcode < 0
+                    no_retry_types = {"deep_self_review"}
+                    if task_type in no_retry_types and is_crash_signal:
+                        try:
+                            from ouroboros.task_results import STATUS_FAILED, write_task_result
+                            write_task_result(
+                                DRIVE_ROOT, str(w.busy_task_id), STATUS_FAILED,
+                                result=(
+                                    f"❌ Deep self-review worker crashed (signal {-exitcode}). "
+                                    "This is likely a platform fork-safety issue on macOS. "
+                                    "The task will not be retried automatically. "
+                                    "Use /restart and then /review to try again after a clean restart."
+                                ),
+                            )
+                        except Exception:
+                            log.debug("Failed to write failed status for %s", w.busy_task_id, exc_info=True)
+                        # Notify via message bus so the failure appears in chat
+                        try:
+                            from supervisor.message_bus import get_bus
+                            bus = get_bus()
+                            if bus is not None:
+                                bus.send_message(
+                                    role="assistant",
+                                    content=(
+                                        "❌ Deep self-review failed: worker process crashed (SIGSEGV). "
+                                        "This is a known macOS fork-safety limitation. "
+                                        "Please use `/restart` and then `/review` to retry with a fresh process."
+                                    ),
+                                    chat_id=task.get("chat_id", 1),
+                                )
+                        except Exception:
+                            log.debug("Failed to send deep_self_review crash message", exc_info=True)
+                    else:
+                        try:
+                            from ouroboros.task_results import STATUS_INTERRUPTED, write_task_result
+                            write_task_result(
+                                DRIVE_ROOT, str(w.busy_task_id), STATUS_INTERRUPTED,
+                                result="Worker process died mid-task. Task will be retried.",
+                            )
+                        except Exception:
+                            log.debug("Failed to write interrupted status for %s", w.busy_task_id, exc_info=True)
+                        queue.enqueue_task(task, front=True)
             respawn_worker(wid)
             queue.persist_queue_snapshot(reason="worker_respawn_after_crash")
 
