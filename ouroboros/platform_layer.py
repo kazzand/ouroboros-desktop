@@ -90,6 +90,53 @@ def pid_lock_release(path: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# File locking (cross-platform)
+# ---------------------------------------------------------------------------
+
+def file_lock_exclusive(fd: int) -> None:
+    """Acquire an exclusive (write) lock on a file descriptor. Blocks."""
+    if IS_WINDOWS:
+        import msvcrt
+        msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
+    else:
+        import fcntl
+        fcntl.flock(fd, fcntl.LOCK_EX)
+
+
+def file_lock_shared(fd: int) -> None:
+    """Acquire a shared (read) lock on a file descriptor. Blocks."""
+    if IS_WINDOWS:
+        import msvcrt
+        msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
+    else:
+        import fcntl
+        fcntl.flock(fd, fcntl.LOCK_SH)
+
+
+def file_lock_exclusive_nb(fd: int) -> None:
+    """Try to acquire an exclusive lock, non-blocking. Raises OSError on failure."""
+    if IS_WINDOWS:
+        import msvcrt
+        msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+    else:
+        import fcntl
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def file_unlock(fd: int) -> None:
+    """Release a file lock."""
+    if IS_WINDOWS:
+        import msvcrt
+        try:
+            msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+        except OSError:
+            pass
+    else:
+        import fcntl
+        fcntl.flock(fd, fcntl.LOCK_UN)
+
+
+# ---------------------------------------------------------------------------
 # Process management
 # ---------------------------------------------------------------------------
 
