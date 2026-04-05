@@ -293,8 +293,8 @@ def auto_resume_after_restart() -> None:
 # ---------------------------------------------------------------------------
 
 def worker_main(wid: int, in_q: Any, out_q: Any, repo_dir: str, drive_root: str) -> None:
-    if sys.platform != "win32":
-        os.setsid()
+    from ouroboros.platform_layer import create_new_session
+    create_new_session()
     import sys as _sys
     import traceback as _tb
     import pathlib as _pathlib
