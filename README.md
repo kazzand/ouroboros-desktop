@@ -6,7 +6,7 @@
 [![macOS 12+](https://img.shields.io/badge/macOS-12%2B-black.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
 [![Linux](https://img.shields.io/badge/Linux-x86__64-orange.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
 [![Windows](https://img.shields.io/badge/Windows-x64-blue.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
-[![Version 4.17.8](https://img.shields.io/badge/version-4.17.8-green.svg)](VERSION)
+[![Version 4.17.9](https://img.shields.io/badge/version-4.17.9-green.svg)](VERSION)
 
 A self-modifying AI agent that writes its own code, rewrites its own mind, and evolves autonomously. Born February 16, 2026.
 
@@ -379,6 +379,7 @@ Full text: [BIBLE.md](BIBLE.md)
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 4.17.9 | 2026-04-09 | Cross-platform CI/CD infrastructure merged from fork: three-tier GitHub Actions workflow (push/stable/tag), PyInstaller build scripts for macOS/Linux/Windows, Dockerfile, `run_ci_tests` tool, `platform_layer.py` rename with LockFileEx/UnlockFileEx Windows fix, AST platform guard, cross-platform path normalization. 864 tests passing on all 3 OS. |
 | 4.17.8 | 2026-04-09 | Stable main-promotion cut: public `4.12`-`4.17` review-stack hardening lands in `main`, including advisory/commit continuity and obligation tracking fixes, the `plan_task` design-review tool, review fidelity/evidence/status improvements, Cloud.ru onboarding, chat upload + vision/runtime polish, and restored tracked Linux/Windows packaging entrypoints alongside the unsigned macOS DMG path. |
 | 4.17.7 | 2026-04-08 | Obligation fingerprint keying: `_update_obligations_from_attempt` now keys by `sha256(f"{item}:{reason}")[:12]` — full reason, no truncation — so different findings with same item produce separate obligations instead of collapsing into one moving-target. `_resolve_matching_obligations` item-name fallback is now restricted to cases where exactly one open obligation exists for that item (prevents same-item PASS from clearing unrelated findings). Same finding repeated = merged (deduped). Worktree version-sync helper extracted to `review_helpers.py::check_worktree_version_sync`; advisory path retains `_check_worktree_version_sync` alias. ARCHITECTURE.md updated. Tests updated to match new per-finding semantics. |
 | 4.17.6 | 2026-04-08 | Review pipeline calibration overhaul: (P1) 3 new deterministic preflight checks in `repo_commit` — `version_values_match` (staged index via `git show :PATH`), `readme_changelog_row` (staged changelog row), `conftest_no_tests` (top-level AST scan, basename match only — `myconftest.py` not affected); advisory path gets `_check_worktree_version_sync` (non-blocking early warning before expensive SDK call); (P2) structured self-verification template in blocked messages from attempt ≥ 2 — all findings listed, no cap; (P3) obligation grouping with per-segment dedup — same-item findings joined, `A | A | B` inflation prevented; (P4) shared `CRITICAL_FINDING_CALIBRATION` constant injected into triad, scope, and advisory reviewer prompts — concrete artifact required before CRITICAL, hypothetical concerns → advisory. 36 new tests in `test_review_calibration.py`. |

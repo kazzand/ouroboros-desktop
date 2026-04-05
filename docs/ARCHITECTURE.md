@@ -1,4 +1,4 @@
-# Ouroboros v4.17.8 — Architecture & Reference
+# Ouroboros v4.17.9 — Architecture & Reference
 
 This document describes every component, page, button, API endpoint, and data flow.
 It is the single source of truth for how the system works. Keep it updated.
@@ -80,6 +80,13 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on localhost:8765
       │   ├── review_helpers.py  ← Shared review helpers (section loader, file packs, intent)
       │   └── scope_review.py   ← Blocking scope reviewer (opus, fail-closed)
       └── platform_layer.py    ← Cross-platform process/path/locking helpers
+
+# Build & CI (not part of runtime)
+.github/workflows/ci.yml     ← Three-tier CI (quick/full/release)
+build.sh                      ← macOS build (PyInstaller → .dmg)
+build_linux.sh                ← Linux build (PyInstaller → .tar.gz)
+build_windows.ps1             ← Windows build (PyInstaller → .zip)
+Dockerfile                    ← Docker image (web UI runtime)
 ```
 
 ### Two-process model
@@ -994,6 +1001,41 @@ Settings file: `~/Ouroboros/data/settings.json`. File-locked for concurrent acce
 
 `safe_restart()` does `git checkout -f ouroboros` + `git reset --hard` on the repo.
 Uncommitted changes are rescued to `~/Ouroboros/data/archive/rescue/` before reset.
+
+---
+
+## 8.1 CI/CD Pipeline (`.github/workflows/ci.yml`)
+
+Three-tier GitHub Actions workflow:
+
+| Tier | Trigger | What runs | Time |
+|------|---------|-----------|------|
+| Quick | Push to `ouroboros` (code paths only) | Ubuntu-only: `pytest` | ~1 min |
+| Full | Push to `ouroboros-stable`, manual (`workflow_dispatch`), or tag `v*` | Matrix: Ubuntu + Windows + macOS: `pytest` | ~5 min |
+| Build | Tag `v*` (after full-test passes) | Matrix: PyInstaller build → `.dmg` / `.tar.gz` / `.zip` + GitHub Release | ~15 min |
+
+Path filters for Tier 1: `ouroboros/**`, `supervisor/**`, `server.py`, `tests/**`, `web/**`,
+`requirements.txt`, `pyproject.toml`, `.github/workflows/**`.
+
+### Build scripts
+
+| Script | Platform | Output |
+|--------|----------|--------|
+| `build.sh` | macOS | `dist/Ouroboros-{VERSION}-macos.dmg` (optional signing + notarization) |
+| `build_linux.sh` | Linux | `dist/Ouroboros-linux-x86_64.tar.gz` |
+| `build_windows.ps1` | Windows | `dist/Ouroboros-windows-x64.zip` |
+
+All three use PyInstaller with `server.py` as entry point. Hidden imports cover
+starlette, uvicorn, websockets, dulwich, huggingface_hub. Data bundles include
+`ouroboros/`, `supervisor/`, `web/`, `prompts/`, `docs/`, `assets/`, `BIBLE.md`,
+`README.md`, `VERSION`, `pyproject.toml`.
+
+### Docker (`Dockerfile`)
+
+```
+python:3.10-slim + git → pip install requirements → python server.py
+Binds 0.0.0.0:8765, sets OUROBOROS_FILE_BROWSER_DEFAULT=/app.
+```
 
 ---
 
