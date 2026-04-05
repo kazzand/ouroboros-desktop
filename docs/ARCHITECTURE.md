@@ -79,7 +79,7 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on localhost:8765
       │   ├── review.py          ← Triad diff review (3-model parallel review against CHECKLISTS.md)
       │   ├── review_helpers.py  ← Shared review helpers (section loader, file packs, intent)
       │   └── scope_review.py   ← Blocking scope reviewer (opus, fail-closed)
-      └── compat.py            ← Cross-platform process/path/locking helpers
+      └── platform_layer.py    ← Cross-platform process/path/locking helpers
 ```
 
 ### Two-process model

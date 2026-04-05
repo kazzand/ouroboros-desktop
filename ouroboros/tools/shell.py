@@ -15,7 +15,7 @@ import threading
 from subprocess import Popen, CompletedProcess
 from typing import Any, Dict, List
 
-from ouroboros.compat import IS_WINDOWS, kill_process_tree
+from ouroboros.platform_layer import IS_WINDOWS, kill_process_tree
 from ouroboros.config import load_settings
 from ouroboros.tools.commit_gate import _invalidate_advisory
 from ouroboros.tools.registry import ToolContext, ToolEntry

@@ -80,7 +80,7 @@ def execute_panic_stop(
 
     try:
         import multiprocessing
-        from ouroboros.compat import force_kill_pid, kill_process_on_port
+        from ouroboros.platform_layer import force_kill_pid, kill_process_on_port
 
         for child in multiprocessing.active_children():
             try:

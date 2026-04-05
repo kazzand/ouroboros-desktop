@@ -2,7 +2,7 @@
 Ouroboros — Shared configuration (single source of truth).
 
 Paths, settings defaults, load/save with file locking.
-Only imports ouroboros.compat (platform abstraction, no circular deps).
+Only imports ouroboros.platform_layer (platform abstraction, no circular deps).
 """
 
 from __future__ import annotations
@@ -14,8 +14,8 @@ import sys
 import time
 from typing import Optional
 
-from ouroboros.compat import pid_lock_acquire as _compat_pid_lock_acquire
-from ouroboros.compat import pid_lock_release as _compat_pid_lock_release
+from ouroboros.platform_layer import pid_lock_acquire as _compat_pid_lock_acquire
+from ouroboros.platform_layer import pid_lock_release as _compat_pid_lock_release
 from ouroboros.provider_models import migrate_model_value
 
 
@@ -330,7 +330,7 @@ def apply_settings_to_env(settings: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
-# PID lock (single instance) — crash-proof locking via ouroboros.compat.
+# PID lock (single instance) — crash-proof locking via ouroboros.platform_layer.
 # On Unix the OS releases flock automatically when the process dies
 # (even SIGKILL), so stale lock files can never block future launches.
 # On Windows msvcrt.locking provides equivalent semantics.

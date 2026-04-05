@@ -2,7 +2,7 @@ import os
 import platform
 import shutil
 
-from ouroboros.compat import get_system_memory, get_cpu_info
+from ouroboros.platform_layer import get_system_memory, get_cpu_info
 
 def generate_world_profile(output_path: str):
     """Generates a WORLD.md file containing the system profile and hardware details."""

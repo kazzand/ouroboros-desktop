@@ -539,7 +539,7 @@ def kill_workers(force: bool = True) -> None:
 
 def _kill_survivors() -> None:
     """Force-kill any workers and their entire descendant trees."""
-    from ouroboros.compat import kill_pid_tree
+    from ouroboros.platform_layer import kill_pid_tree
     for w in WORKERS.values():
         pid = w.proc.pid
         if pid is None:
