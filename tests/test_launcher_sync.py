@@ -62,7 +62,8 @@ def test_sync_bundle_managed_paths_overwrites_existing_managed_files(monkeypatch
     assert (repo_dir / "server.py").read_text(encoding="utf-8") == "new-server\n"
 
 
-def test_sync_existing_repo_runs_full_sync_only_for_clean_version_mismatch(monkeypatch, tmp_path):
+def test_sync_existing_repo_calls_core_then_commit(monkeypatch, tmp_path):
+    """sync_existing_repo_from_bundle calls sync_core_files then commit_synced_files."""
     bootstrap = _reload_bootstrap()
     bundle_dir = tmp_path / "bundle"
     repo_dir = tmp_path / "repo"
@@ -72,87 +73,8 @@ def test_sync_existing_repo_runs_full_sync_only_for_clean_version_mismatch(monke
     calls = []
     ctx = _make_context(bundle_dir, repo_dir)
     monkeypatch.setattr(bootstrap, "sync_core_files", lambda context: calls.append("core"))
-    monkeypatch.setattr(bootstrap, "sync_bundle_managed_paths", lambda context, overwrite_existing: calls.append(("managed", overwrite_existing)))
-    monkeypatch.setattr(
-        bootstrap,
-        "read_version_file",
-        lambda root: "4.7.0" if root == bundle_dir else ("4.5.0" if root == repo_dir else ""),
-    )
-    monkeypatch.setattr(bootstrap, "repo_has_pending_changes", lambda context: calls.append("dirty") or False)
-    monkeypatch.setattr(bootstrap, "create_bundle_backup_branch", lambda context, version: calls.append(("backup", version)) or "bundle-backup/test")
-    monkeypatch.setattr(bootstrap, "commit_bundle_sync", lambda context, old, new: calls.append(("commit", old, new)))
     monkeypatch.setattr(bootstrap, "commit_synced_files", lambda context: calls.append("commit-safety"))
 
     bootstrap.sync_existing_repo_from_bundle(ctx)
 
-    assert calls == [
-        "dirty",
-        ("backup", "4.5.0"),
-        "core",
-        ("managed", False),
-        ("managed", True),
-        ("commit", "4.5.0", "4.7.0"),
-    ]
-
-
-def test_sync_existing_repo_avoids_full_overwrite_when_repo_is_dirty(monkeypatch, tmp_path):
-    bootstrap = _reload_bootstrap()
-    bundle_dir = tmp_path / "bundle"
-    repo_dir = tmp_path / "repo"
-    bundle_dir.mkdir()
-    repo_dir.mkdir()
-
-    calls = []
-    ctx = _make_context(bundle_dir, repo_dir)
-    monkeypatch.setattr(bootstrap, "sync_core_files", lambda context: calls.append("core"))
-    monkeypatch.setattr(bootstrap, "sync_bundle_managed_paths", lambda context, overwrite_existing: calls.append(("managed", overwrite_existing)))
-    monkeypatch.setattr(
-        bootstrap,
-        "read_version_file",
-        lambda root: "4.7.0" if root == bundle_dir else ("4.5.0" if root == repo_dir else ""),
-    )
-    monkeypatch.setattr(bootstrap, "repo_has_pending_changes", lambda context: calls.append("dirty") or True)
-    monkeypatch.setattr(bootstrap, "create_bundle_backup_branch", lambda context, version: calls.append(("backup", version)))
-    monkeypatch.setattr(bootstrap, "commit_bundle_sync", lambda context, old, new: calls.append(("commit", old, new)))
-    monkeypatch.setattr(bootstrap, "commit_synced_files", lambda context: calls.append("commit-safety"))
-
-    bootstrap.sync_existing_repo_from_bundle(ctx)
-
-    assert calls == [
-        "dirty",
-        "core",
-        ("managed", False),
-        "commit-safety",
-    ]
-
-
-def test_sync_existing_repo_avoids_full_overwrite_when_backup_creation_fails(monkeypatch, tmp_path):
-    bootstrap = _reload_bootstrap()
-    bundle_dir = tmp_path / "bundle"
-    repo_dir = tmp_path / "repo"
-    bundle_dir.mkdir()
-    repo_dir.mkdir()
-
-    calls = []
-    ctx = _make_context(bundle_dir, repo_dir)
-    monkeypatch.setattr(bootstrap, "sync_core_files", lambda context: calls.append("core"))
-    monkeypatch.setattr(bootstrap, "sync_bundle_managed_paths", lambda context, overwrite_existing: calls.append(("managed", overwrite_existing)))
-    monkeypatch.setattr(
-        bootstrap,
-        "read_version_file",
-        lambda root: "4.7.0" if root == bundle_dir else ("4.5.0" if root == repo_dir else ""),
-    )
-    monkeypatch.setattr(bootstrap, "repo_has_pending_changes", lambda context: calls.append("dirty") or False)
-    monkeypatch.setattr(bootstrap, "create_bundle_backup_branch", lambda context, version: calls.append(("backup", version)) or "")
-    monkeypatch.setattr(bootstrap, "commit_bundle_sync", lambda context, old, new: calls.append(("commit", old, new)))
-    monkeypatch.setattr(bootstrap, "commit_synced_files", lambda context: calls.append("commit-safety"))
-
-    bootstrap.sync_existing_repo_from_bundle(ctx)
-
-    assert calls == [
-        "dirty",
-        ("backup", "4.5.0"),
-        "core",
-        ("managed", False),
-        "commit-safety",
-    ]
+    assert calls == ["core", "commit-safety"]
