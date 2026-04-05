@@ -52,6 +52,30 @@ def test_build_remote_kwargs_keeps_max_tokens_for_openai_gpt41(monkeypatch):
     assert "max_completion_tokens" not in kwargs
 
 
+def test_build_remote_kwargs_normalizes_tool_descriptions_for_openrouter():
+    client = LLMClient()
+    target = client._resolve_remote_target("anthropic/claude-sonnet-4.6")
+
+    kwargs = client._build_remote_kwargs(
+        target,
+        [{"role": "user", "content": "hi"}],
+        "high",
+        512,
+        "auto",
+        None,
+        [{
+            "type": "function",
+            "function": {
+                "name": "bad_tool",
+                "description": ("first half ", "second half"),
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }],
+    )
+
+    assert kwargs["tools"][0]["function"]["description"] == "first half second half"
+
+
 def test_resolve_anthropic_target_normalizes_direct_model(monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-key")
 

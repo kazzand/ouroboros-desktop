@@ -148,6 +148,7 @@ def test_tool_schemas_valid(registry):
         func = schema["function"]
         assert "name" in func
         assert "description" in func
+        assert isinstance(func["description"], str)
         assert "parameters" in func
         params = func["parameters"]
         assert params["type"] == "object"

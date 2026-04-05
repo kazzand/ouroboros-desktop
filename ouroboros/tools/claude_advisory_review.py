@@ -888,7 +888,7 @@ def get_tools() -> list:
                     "Correct workflow: finish edits -> advisory_pre_review(...) -> repo_commit(...) immediately. "
                     "WARNING: any edit (repo_write/str_replace_editor) after advisory_pre_review "
                     "automatically marks advisory as stale and requires re-running it. "
-                    "Use skip_advisory_pre_review=True to bypass (bypass is durably audited).",
+                    "Use skip_advisory_pre_review=True to bypass (bypass is durably audited)."
                 ),
                 "parameters": {
                     "type": "object",

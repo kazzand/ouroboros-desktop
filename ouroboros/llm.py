@@ -803,6 +803,18 @@ class LLMClient:
         return str(value)
 
     @staticmethod
+    def _stringify_tool_description(value: Any) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            return value
+        if isinstance(value, (list, tuple)):
+            return "".join(str(part) for part in value if part is not None)
+        if isinstance(value, dict):
+            return json.dumps(value, ensure_ascii=False)
+        return str(value)
+
+    @staticmethod
     def _coalesce_anthropic_message(
         messages: List[Dict[str, Any]],
         role: str,
@@ -958,10 +970,32 @@ class LLMClient:
                 continue
             anthropic_tools.append({
                 "name": name,
-                "description": str(function.get("description") or ""),
+                "description": LLMClient._stringify_tool_description(function.get("description")),
                 "input_schema": function.get("parameters") or {"type": "object", "properties": {}},
             })
         return anthropic_tools
+
+    @staticmethod
+    def _sanitize_chat_completion_tools(
+        tools: Optional[List[Dict[str, Any]]],
+    ) -> List[Dict[str, Any]]:
+        sanitized_tools: List[Dict[str, Any]] = []
+        for tool in tools or []:
+            if not isinstance(tool, dict):
+                continue
+            tool_copy = dict(tool)
+            function = tool_copy.get("function") or {}
+            if isinstance(function, dict):
+                function_copy = dict(function)
+                function_copy["name"] = str(function_copy.get("name") or "")
+                function_copy["description"] = LLMClient._stringify_tool_description(
+                    function_copy.get("description")
+                )
+                if not isinstance(function_copy.get("parameters"), dict):
+                    function_copy["parameters"] = {"type": "object", "properties": {}}
+                tool_copy["function"] = function_copy
+            sanitized_tools.append(tool_copy)
+        return sanitized_tools
 
     @staticmethod
     def _build_anthropic_tool_choice(tool_choice: Any) -> Optional[Dict[str, Any]]:
@@ -1109,7 +1143,7 @@ class LLMClient:
             if tools:
                 kwargs["tools"] = [
                     {k: v for k, v in t.items() if k != "cache_control"}
-                    for t in tools
+                    for t in self._sanitize_chat_completion_tools(tools)
                 ]
                 kwargs["tool_choice"] = tool_choice
             return kwargs
@@ -1134,7 +1168,7 @@ class LLMClient:
         if temperature is not None:
             kwargs["temperature"] = temperature
         if tools:
-            tools_with_cache = [t for t in tools]  # shallow copy
+            tools_with_cache = self._sanitize_chat_completion_tools(tools)
             if tools_with_cache:
                 last_tool = {**tools_with_cache[-1]}  # copy last tool
                 last_tool["cache_control"] = {"type": "ephemeral", "ttl": "1h"}
