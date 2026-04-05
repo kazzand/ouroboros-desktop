@@ -231,7 +231,7 @@ Ouroboros
 ├── web/                    — Web UI (HTML/JS/CSS)
 ├── ouroboros/              — Agent core:
 │   ├── config.py           — Shared configuration (SSOT)
-│   ├── compat.py           — Cross-platform abstraction layer
+│   ├── platform_layer.py   — Cross-platform abstraction layer
 │   ├── agent.py            — Task orchestrator
 │   ├── agent_startup_checks.py — Startup verification and health checks
 │   ├── agent_task_pipeline.py  — Task execution pipeline orchestration

@@ -64,7 +64,7 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on localhost:8765
       ├── tools/               ← Auto-discovered tool plugins
       │   ├── review_helpers.py  ← Shared review helpers (section loader, file packs, intent)
       │   └── scope_review.py   ← Blocking scope reviewer (opus, fail-closed)
-      └── compat.py            ← Cross-platform process/path/locking helpers
+      └── platform_layer.py    ← Cross-platform process/path/locking helpers
 ```
 
 ### Two-process model
