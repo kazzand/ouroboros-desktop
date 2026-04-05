@@ -1,11 +1,13 @@
 # Ouroboros CI — Three-tier cross-platform testing and release pipeline
 #
 # Tier 1: Every push to ouroboros (code paths) → Ubuntu-only tests (~1 min)
-# Tier 2: Push to ouroboros-stable / manual → Full 3-OS matrix (~5 min)
+# Tier 2: Push to ouroboros-stable / manual / tag → Full 3-OS matrix (~5 min)
 # Tier 3: Tag v* → Full matrix + build artifacts + GitHub Release (~15 min)
 
 name: CI
 
+# Two separate push triggers: branches have path filters, tags do not.
+# This ensures tag pushes always fire (even if only VERSION/README changed).
 on:
   push:
     branches: [ouroboros, ouroboros-stable]
@@ -18,9 +20,18 @@ on:
       - 'requirements.txt'
       - 'pyproject.toml'
       - '.github/workflows/**'
+      - 'build.sh'
+      - 'build_linux.sh'
+      - 'build_windows.ps1'
+      - 'Dockerfile'
+      - 'VERSION'
+      - 'README.md'
     tags:
       - 'v*'
   workflow_dispatch:
+
+# Note: GitHub Actions evaluates `branches` + `paths` together but `tags`
+# separately — a tag push matching `v*` will trigger regardless of paths.
 
 jobs:
   # ──────────────────────────────────────────────────────────────────
@@ -96,23 +107,23 @@ jobs:
           pip install -r requirements.txt
           pip install pyinstaller
 
-      # ── macOS build ──
+      # —— macOS build ——
       - name: Build macOS app
         if: matrix.os == 'macos-latest'
         run: bash build.sh
 
-      # ── Linux build ──
+      # —— Linux build ——
       - name: Build Linux binary
         if: matrix.os == 'ubuntu-latest'
         run: bash build_linux.sh
 
-      # ── Windows build ──
+      # —— Windows build ——
       - name: Build Windows executable
         if: matrix.os == 'windows-latest'
         shell: pwsh
         run: .\build_windows.ps1
 
-      # ── Upload artifacts ──
+      # —— Upload artifacts ——
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
