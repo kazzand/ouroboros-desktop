@@ -816,8 +816,10 @@ Three-tier GitHub Actions workflow:
 | Full | Push to `ouroboros-stable`, manual (`workflow_dispatch`), or tag `v*` | Matrix: Ubuntu + Windows + macOS: `pytest` | ~5 min |
 | Build | Tag `v*` (after full-test passes) | Matrix: PyInstaller build → `.dmg` / `.tar.gz` / `.zip` + GitHub Release | ~15 min |
 
-Path filters for Tier 1: `ouroboros/**`, `supervisor/**`, `server.py`, `tests/**`, `web/**`,
-`requirements.txt`, `pyproject.toml`, `.github/workflows/**`.
+Path filters for branch pushes: `ouroboros/**`, `supervisor/**`, `server.py`, `tests/**`,
+`web/**`, `requirements.txt`, `pyproject.toml`, `.github/workflows/**`, `build.sh`,
+`build_linux.sh`, `build_windows.ps1`, `Dockerfile`, `VERSION`, `README.md`.
+Tag pushes (`v*`) always fire regardless of paths.
 
 ### Build scripts
 
