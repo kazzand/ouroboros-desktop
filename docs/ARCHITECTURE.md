@@ -166,7 +166,7 @@ Shown when `settings.json` does not contain any supported remote provider key an
 - Existing OpenRouter, OpenAI, OpenAI-compatible, Cloud.ru, Anthropic, or local-model-source settings skip the wizard automatically.
 - The wizard is shared between desktop and web: one HTML/CSS/JS onboarding flow is rendered directly in pywebview for desktop and injected into a blocking web overlay for Docker/browser runs.
 - The wizard is multi-step and provider-aware: it starts with a single access step that accepts multiple remote keys plus optional local-model setup, then shows visible model defaults, a dedicated review-mode step, a dedicated budget step, and the final summary before save.
-- When an Anthropic key is present, onboarding shows an optional `Install Claude Agent SDK` CTA plus `Skip for now`.
+- When an Anthropic key is present, onboarding shows the Claude runtime status with `Repair Runtime` and `Skip for now` options.
 - Desktop first-run uses the same onboarding bundle and talks to Claude SDK install/status through `pywebview` bridge methods.
   Web onboarding uses `/api/claude-code/status` and `/api/claude-code/install`.
 - The wizard blocks progression if nothing runnable is configured.
@@ -259,8 +259,8 @@ The Dashboard tab has been removed. Its functionality is now distributed:
 - **Provider cards**: OpenRouter, OpenAI, OpenAI-compatible, Cloud.ru, Anthropic, plus optional Network Password. Cards are collapsible and use masked-secret inputs with show/hide toggles.
 - **API Keys**: OpenRouter, OpenAI, OpenAI-compatible, Cloud.ru, Anthropic, Telegram Bot Token, GitHub Token, and Network Password.
   Keys are displayed as masked values (e.g., `sk-or-v1...`), can be explicitly cleared, and are only overwritten on save if the user enters a new value (not containing `...`).
-- **Claude Agent SDK CTA**: when Anthropic is configured, the Anthropic card exposes `Install Claude Agent SDK` plus live install/status text.
-  This installs the `claude-agent-sdk` Python package used for delegated code editing and advisory review.
+- **Claude Runtime Status**: when Anthropic is configured, the Anthropic card shows app-managed Claude runtime status with `Repair Runtime` action.
+  The Claude runtime (SDK + bundled CLI) powers delegated code editing and advisory review and is managed automatically by the app.
 - **Models**: Main, Code, Light, Fallback.
 - **Model catalog**: optional `Refresh Model Catalog` action calls `/api/model-catalog`. Failures are non-fatal and surfaced as inline warnings.
 - **Model pickers**: searchable provider-aware pickers replace legacy raw dropdowns for remote models.
@@ -375,8 +375,8 @@ authentication. If the password is blank, non-loopback access stays open by desi
 | POST | `/api/files/upload` | Multipart upload into current Files directory |
 | GET | `/api/settings` | Current settings with masked API keys |
 | POST | `/api/settings` | Update settings (partial update, only provided keys) |
-| GET | `/api/claude-code/status` | Claude Agent SDK installed/version info |
-| POST | `/api/claude-code/install` | Install `claude-agent-sdk` into the current Python interpreter |
+| GET | `/api/claude-code/status` | App-managed Claude runtime status (SDK version, CLI path/version, legacy detection, API key readiness) |
+| POST | `/api/claude-code/install` | Repair/update the app-managed Claude runtime |
 | GET | `/api/model-catalog` | Optional provider model catalog (OpenRouter/OpenAI/compatible/Cloud.ru) |
 | POST | `/api/command` | Send a slash command `{cmd: "/status"}` |
 | POST | `/api/reset` | Delete all runtime data, restart for fresh onboarding |
@@ -484,8 +484,8 @@ backward compatibility but is not the runtime authority.
 - `run_shell` now treats non-zero exits as explicit failed tool outcomes and records exit/signal metadata in the tool trace.
 - `run_shell` recovers `cmd` passed as a string via a three-step cascade: `json.loads` (JSON array strings) → `ast.literal_eval` (Python literal lists) → `shlex.split` (plain shell strings). Only truly unrecoverable input returns `SHELL_ARG_ERROR`. The `cmd` parameter schema remains `type: array` (intended contract), but the runtime gracefully handles LLM misformatting.
 - `set_tool_timeout` persists `OUROBOROS_TOOL_TIMEOUT_SEC` to `settings.json` and hot-applies it without restart.
-- `/api/claude-code/status` returns SDK version info; `/api/claude-code/install` installs `claude-agent-sdk` via pip.
-- Desktop onboarding CTA installs the `claude-agent-sdk` Python package (not the `claude` CLI binary).
+- `/api/claude-code/status` returns app-managed Claude runtime status (SDK version, CLI path/version, app-managed flag, legacy detection, API key readiness, last stderr on failure); `/api/claude-code/install` repairs/updates the app-managed runtime.
+- Desktop onboarding shows Claude runtime status and repair action (the runtime is managed automatically by the app).
 - **`seal_task_transcript`**: called after compaction and before each `call_llm_with_retry`. Marks one stable tool-result boundary with `cache_control: ephemeral` to improve Anthropic prompt cache hits. Reverts all previous seals first so compaction always sees plain strings. Provider handling: OpenRouter (Anthropic models) passes list content blocks through as-is; direct Anthropic path preserves list content for `tool_result` (Anthropic API supports content blocks there); `_strip_cache_control` in `llm.py` now flattens tool-role list content back to a plain string for OpenAI, OpenAI-compatible, Cloud.ru, and local providers.
 - **Reviewed mutative tool timeout handling** (v4.9.0): `repo_commit` and `repo_write_commit`
   are classified as `REVIEWED_MUTATIVE_TOOLS`. When they exceed the configured tool timeout,
@@ -494,11 +494,21 @@ backward compatibility but is not the runtime authority.
   still running" states for commit operations.
 - Context compaction kicks in after round 8 (summarizes old tool results)
 
-### Claude Agent SDK gateway (gateways/claude_code.py)
+### Claude runtime (gateways/claude_code.py + compat.py)
 
-- **Pure transport adapter** for delegated code editing and advisory review
-- Wraps the `claude-agent-sdk` Python package (`ClaudeSDKClient` with async message stream)
-- Raises `ImportError` at module level when SDK is absent — callers return an install hint; there is no CLI subprocess fallback
+- **App-managed runtime**: the app bundle owns a pinned `claude-agent-sdk` + bundled
+  Claude CLI baseline. The SDK's own bundled-CLI-first resolution is preserved — the
+  gateway never overrides CLI path selection via PATH heuristics.
+- **Auth model**: `ANTHROPIC_API_KEY` only. No support for native Claude login.
+- **Full stderr capture**: both edit and readonly paths pass a `stderr` callback into
+  `ClaudeAgentOptions`. Raw CLI stderr is stored in a ring buffer and surfaced in
+  `ClaudeCodeResult.stderr_tail` on failure, eliminating the old "Check stderr output
+  for details" blind spot.
+- **Runtime resolver** (`ouroboros.compat.resolve_claude_runtime`): deterministic
+  snapshot of SDK version, CLI path/version, app-managed vs legacy status, API key
+  readiness. Used by the status API, install/repair endpoint, and gateway diagnostics.
+- **Legacy detection**: SDK installed outside `python-standalone` (e.g. user-site in
+  `~/.local/lib`) is classified as legacy and silently de-prioritized.
 - **Two execution modes:**
   - **Edit mode** (`run_edit`): `allowed_tools=["Read","Edit","Grep","Glob"]`,
     `disallowed_tools=["Bash","MultiEdit"]`, `permission_mode="acceptEdits"`,
@@ -508,14 +518,11 @@ backward compatibility but is not the runtime authority.
     `disallowed_tools=["Bash","Edit","Write","MultiEdit"]` (SDK enforces tool
     restrictions at the CLI level; no hooks needed)
 - **Structured result**: `ClaudeCodeResult` dataclass with `success`, `result_text`,
-  `session_id`, `cost_usd`, `usage`, `error`. Callers populate `changed_files`,
-  `diff_stat`, and `validation_summary` (orchestration lives in tool layer)
+  `session_id`, `cost_usd`, `usage`, `error`, `stderr_tail`. Callers populate
+  `changed_files`, `diff_stat`, and `validation_summary` (orchestration lives in tool layer)
 - **Orchestration in callers**: project context injection (BIBLE.md, DEVELOPMENT.md,
   CHECKLISTS.md, ARCHITECTURE.md), git stat, and post-edit validation live in
   `ouroboros/tools/shell.py` helpers — the gateway stays a pure transport boundary
-- **SDK-only**: `claude-agent-sdk` is the sole transport for `claude_code_edit` and
-  `advisory_pre_review`. There is no CLI subprocess fallback. If the SDK is absent,
-  both tools return a clear install hint: `pip install 'ouroboros[claude-sdk]'`
 - **Defense-in-depth**: post-edit revert in `registry.py` remains as secondary safety layer
 - Safety-critical files mirror: `BIBLE.md`, `ouroboros/safety.py`,
   `ouroboros/tools/registry.py`, `prompts/SAFETY.md`

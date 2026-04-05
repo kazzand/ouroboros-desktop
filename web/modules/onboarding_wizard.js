@@ -56,7 +56,7 @@
         claudeCliInstalled: false,
         claudeCliBusy: false,
         claudeCliStatus: '',
-        claudeCliStatusText: 'Claude Agent SDK is not installed.',
+        claudeCliStatusText: 'Checking Claude runtime...',
         claudeCliTone: 'muted',
         claudeCliError: '',
         claudeCliDismissed: false,
@@ -282,16 +282,17 @@
     }
 
     function applyClaudeCliStatus(payload = {}) {
+        const ready = Boolean(payload.ready);
         const installed = Boolean(payload.installed);
         const busy = Boolean(payload.busy);
         const errorText = trim(payload.error);
         const message = trim(payload.message)
-            || (installed ? 'Claude Agent SDK is installed.' : 'Claude Agent SDK is not installed.');
-        state.claudeCliInstalled = installed;
+            || (ready ? 'Claude runtime ready.' : (installed ? 'Claude runtime available but not ready.' : 'Claude runtime not available.'));
+        state.claudeCliInstalled = installed || ready;
         state.claudeCliBusy = busy;
-        state.claudeCliStatus = trim(payload.status) || (installed ? 'installed' : 'missing');
+        state.claudeCliStatus = trim(payload.status) || (ready ? 'ready' : (installed ? 'installed' : 'missing'));
         state.claudeCliError = errorText;
-        state.claudeCliTone = installed ? 'ok' : (errorText ? 'error' : 'muted');
+        state.claudeCliTone = ready ? 'ok' : (errorText ? 'error' : (installed ? 'muted' : 'error'));
         state.claudeCliStatusText = message;
         renderClaudeCliStatus();
     }
@@ -326,7 +327,7 @@
             state.claudeCliStatus = 'error';
             state.claudeCliError = String(error?.message || error || '');
             state.claudeCliTone = 'error';
-            state.claudeCliStatusText = `Claude Agent SDK status failed: ${state.claudeCliError}`;
+            state.claudeCliStatusText = `Claude runtime status failed: ${state.claudeCliError}`;
             renderClaudeCliStatus();
         }
     }
@@ -353,14 +354,14 @@
         const skipButton = document.getElementById('wizard-claude-skip');
         if (card) card.style.display = shouldShowClaudeCliCta() ? '' : 'none';
         if (statusEl) {
-            statusEl.textContent = state.claudeCliStatusText || 'Claude Agent SDK is not installed.';
+            statusEl.textContent = state.claudeCliStatusText || 'Checking Claude runtime...';
             statusEl.dataset.tone = state.claudeCliTone || 'muted';
         }
         if (installButton) {
-            installButton.disabled = state.claudeCliBusy || state.claudeCliInstalled;
+            installButton.disabled = state.claudeCliBusy;
             installButton.textContent = state.claudeCliBusy
-                ? 'Installing...'
-                : (state.claudeCliInstalled ? 'Installed' : 'Install Claude Agent SDK');
+                ? 'Repairing...'
+                : (state.claudeCliInstalled ? 'Runtime OK' : 'Repair Runtime');
         }
         if (skipButton) {
             skipButton.hidden = state.claudeCliBusy || state.claudeCliInstalled;
@@ -446,14 +447,14 @@
     function renderClaudeCliControls() {
         return `
             <div class="panel-card" id="wizard-claude-card" style="${shouldShowClaudeCliCta() ? '' : 'display:none;'}">
-                <h3>Claude Agent SDK</h3>
-                <p>Optional. Installs the <code>claude-agent-sdk</code> Python package for delegated code editing and advisory review.</p>
+                <h3>Claude Runtime</h3>
+                <p>Claude runtime powers delegated code editing and advisory review. It is managed automatically by the app.</p>
                 <div class="wizard-runtime-strip">
                     <button type="button" class="btn ghost" id="wizard-claude-install" ${state.claudeCliBusy || state.claudeCliInstalled ? 'disabled' : ''}>
-                        ${escapeHtml(state.claudeCliBusy ? 'Installing...' : (state.claudeCliInstalled ? 'Installed' : 'Install Claude Agent SDK'))}
+                        ${escapeHtml(state.claudeCliBusy ? 'Repairing...' : (state.claudeCliInstalled ? 'Runtime OK' : 'Repair Runtime'))}
                     </button>
                     <button type="button" class="btn secondary" id="wizard-claude-skip" ${state.claudeCliBusy || state.claudeCliInstalled ? 'hidden' : ''}>Skip for now</button>
-                    <span id="wizard-claude-status" class="wizard-runtime-status" data-tone="${escapeHtml(state.claudeCliTone || 'muted')}">${escapeHtml(state.claudeCliStatusText || 'Claude Agent SDK is not installed.')}</span>
+                    <span id="wizard-claude-status" class="wizard-runtime-status" data-tone="${escapeHtml(state.claudeCliTone || 'muted')}">${escapeHtml(state.claudeCliStatusText || 'Checking Claude runtime...')}</span>
                 </div>
             </div>
         `;
@@ -905,7 +906,7 @@
         document.getElementById('wizard-claude-install')?.addEventListener('click', async () => {
             state.claudeCliBusy = true;
             state.claudeCliTone = 'muted';
-            state.claudeCliStatusText = 'Starting Claude Agent SDK installation...';
+            state.claudeCliStatusText = 'Repairing Claude runtime...';
             renderClaudeCliStatus();
             try {
                 applyClaudeCliStatus(await claudeCliStartInstall());
@@ -915,7 +916,7 @@
                 state.claudeCliStatus = 'error';
                 state.claudeCliError = String(error?.message || error || '');
                 state.claudeCliTone = 'error';
-                state.claudeCliStatusText = `Claude Agent SDK install failed: ${state.claudeCliError}`;
+                state.claudeCliStatusText = `Claude runtime repair failed: ${state.claudeCliError}`;
                 renderClaudeCliStatus();
             }
         });

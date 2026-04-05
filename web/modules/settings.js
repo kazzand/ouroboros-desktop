@@ -86,29 +86,32 @@ export function initSettings({ state }) {
         if (panel) panel.hidden = !visible;
         if (note) note.hidden = !visible;
         if (!visible) return;
-        if (button && button.dataset.busy !== '1' && button.dataset.installed !== '1') {
+        if (button && button.dataset.busy !== '1' && button.dataset.ready !== '1') {
             button.disabled = false;
-            button.textContent = 'Install Claude Agent SDK';
+            button.textContent = 'Repair Runtime';
         }
     }
 
     function applyClaudeCodeStatus(payload = {}) {
         const button = byId('btn-claude-code-install');
         const status = byId('settings-claude-code-status');
+        const ready = Boolean(payload.ready);
         const installed = Boolean(payload.installed);
         const busy = Boolean(payload.busy);
         const error = String(payload.error || '').trim();
         const message = String(payload.message || '').trim()
-            || (installed ? 'Claude Agent SDK is installed.' : 'Claude Agent SDK is not installed.');
+            || (ready ? 'Claude runtime ready.' : (installed ? 'Claude runtime available but not ready.' : 'Claude runtime not available.'));
+        const tone = ready ? 'ok' : (error ? 'error' : (installed ? 'muted' : 'error'));
         if (status) {
             status.textContent = message;
-            status.dataset.tone = installed ? 'ok' : (error ? 'error' : 'muted');
+            status.dataset.tone = tone;
         }
         if (button) {
             button.dataset.busy = busy ? '1' : '0';
+            button.dataset.ready = ready ? '1' : '0';
             button.dataset.installed = installed ? '1' : '0';
-            button.disabled = busy || installed;
-            button.textContent = busy ? 'Installing...' : (installed ? 'Installed' : 'Install Claude Agent SDK');
+            button.disabled = busy;
+            button.textContent = busy ? 'Repairing...' : (ready ? 'Runtime OK' : 'Repair Runtime');
         }
         renderClaudeCodeUi();
     }
@@ -126,9 +129,10 @@ export function initSettings({ state }) {
         } catch (error) {
             applyClaudeCodeStatus({
                 installed: false,
+                ready: false,
                 busy: false,
                 error: String(error?.message || error || ''),
-                message: `Claude Agent SDK status failed: ${String(error?.message || error || '')}`,
+                message: `Claude runtime status check failed: ${String(error?.message || error || '')}`,
             });
         }
     }
@@ -281,8 +285,9 @@ export function initSettings({ state }) {
     byId('btn-claude-code-install')?.addEventListener('click', async () => {
         applyClaudeCodeStatus({
             installed: false,
+            ready: false,
             busy: true,
-            message: 'Installing Claude Agent SDK...',
+            message: 'Repairing Claude runtime...',
             error: '',
         });
         try {
@@ -290,16 +295,17 @@ export function initSettings({ state }) {
             const data = await resp.json().catch(() => ({}));
             if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
             applyClaudeCodeStatus(data);
-            setStatus(data.freshly_installed ? 'Claude Agent SDK installed.' : 'Claude Agent SDK already available.', 'ok');
+            setStatus(data.repaired ? 'Claude runtime repaired.' : 'Claude runtime up to date.', 'ok');
         } catch (error) {
             const message = String(error?.message || error || '');
             applyClaudeCodeStatus({
                 installed: false,
+                ready: false,
                 busy: false,
                 error: message,
-                message: `Claude Agent SDK install failed: ${message}`,
+                message: `Claude runtime repair failed: ${message}`,
             });
-            setStatus('Claude Agent SDK install failed.', 'warn');
+            setStatus('Claude runtime repair failed.', 'warn');
         }
     });
 
