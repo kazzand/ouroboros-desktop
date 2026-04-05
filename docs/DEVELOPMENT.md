@@ -152,6 +152,39 @@ Before every commit, verify the following:
 
 ---
 
+## Platform Abstraction Rule
+
+All platform-specific code **MUST** go through `ouroboros/platform_layer.py`.
+
+### What counts as platform-specific
+
+- Direct use of: `os.kill`, `os.setsid`, `os.killpg`, `os.getpgid`, `signal.SIGKILL`, `signal.SIGTERM`
+- Unix-only modules: `fcntl`, `resource`, `grp`, `pwd`
+- Windows-only modules: `msvcrt`, `winreg`, `ctypes.windll`
+- `subprocess` with platform-conditional flags: `start_new_session`, `creationflags`
+- Hardcoded path separators (`/` or `\\`) in filesystem logic (use `pathlib` instead)
+
+### Rules
+
+1. **All platform-specific calls live in `platform_layer.py`** — the rest of the codebase imports cross-platform wrappers from there.
+2. **Platform-specific modules are imported inside `platform_layer.py` only**, guarded by `IS_WINDOWS` / `IS_MACOS` / `IS_LINUX` checks.
+3. **No top-level imports of Unix-only or Windows-only modules** outside `platform_layer.py`. If you need `fcntl` — you're in the wrong file.
+4. **Use `pathlib.Path`** for filesystem paths. Never construct paths with string concatenation using `/` or `\\`.
+
+### Enforcement
+
+- **AST-based test**: `tests/test_platform_guard.py` scans all `.py` files outside `platform_layer.py` for forbidden platform-specific calls and imports. Runs on every `make test`.
+- **Pre-commit review**: checklist item `cross_platform` (#14) catches violations during code review.
+- **CI matrix** (when configured): tests run on Ubuntu, Windows, and macOS to catch runtime failures.
+
+### Adding new platform-specific code
+
+1. Add the cross-platform wrapper to `platform_layer.py`.
+2. Import and use the wrapper in callers.
+3. Add platform-conditional tests if behavior differs across OSes.
+
+---
+
 ## Design System
 
 Ouroboros uses **glassmorphism** as its visual language. All interactive surfaces follow this pattern:
