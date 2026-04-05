@@ -6,7 +6,7 @@
 [![macOS 12+](https://img.shields.io/badge/macOS-12%2B-black.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
 [![Linux](https://img.shields.io/badge/Linux-x86__64-orange.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
 [![Windows](https://img.shields.io/badge/Windows-x64-blue.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
-[![Version 4.11.12](https://img.shields.io/badge/version-4.11.12-green.svg)](VERSION)
+[![Version 4.11.13](https://img.shields.io/badge/version-4.11.13-green.svg)](VERSION)
 
 A self-modifying AI agent that writes its own code, rewrites its own mind, and evolves autonomously. Born February 16, 2026.
 
@@ -374,7 +374,8 @@ Full text: [BIBLE.md](BIBLE.md)
 
 | Version | Date | Description |
 |---------|------|-------------|
-| 4.11.12 | 2026-04-04 | deep_self_review: fix SIGSEGV crash in fork-worker on macOS. Root cause: `build_review_pack` called `subprocess.run(["git", "ls-files"])` which triggers macOS fork-safety bug — forked workers inherit multithreaded SSL/libdispatch state and crash on `exec`. Fix: replace subprocess with `dulwich.repo.Repo(path).open_index()` — pure Python git index reader, no subprocess, fork-safe. Tests updated: all 30 `test_deep_self_review.py` tests now mock dulwich instead of subprocess. |
+| 4.11.13 | 2026-04-05 | deep_self_review: fix SIGSEGV crash (macOS fork-safety, confirmed via crashlog). Root cause: first httpx HTTP request in a forked child process calls `SCDynamicStoreCopyProxiesWithOptions()` / `CFPreferences` which is not fork-safe — confirmed by `"crashed on child side of fork pre-exec"` in `asi` field of macOS crash report. Fix: `run_deep_self_review` passes `no_proxy=True` to `llm.chat()`; `LLMClient._chat_remote()` builds a one-shot `httpx.Client(trust_env=False, mounts={})` closed in `finally`; `_normalize_remote_response` called with `skip_cost_fetch=True` to also suppress the `requests.get()` generation-cost call (same proxy path). All proxy/OS-lookup code skipped; cost estimated from token counts. Localised to deep_self_review only; regular LLM calls unaffected. v4.11.12 dulwich fix remains. 6 new regression tests. |
+| 4.11.12 | 2026-04-04 | deep_self_review: replace `subprocess.run(["git", "ls-files"])` with `dulwich.repo.Repo(path).open_index()` — pure Python git index reader, no subprocess. Tests updated: all 30 `test_deep_self_review.py` tests now mock dulwich instead of subprocess. |
 | 4.11.11 | 2026-04-04 | deep_self_review: fix review pack too large (1.54M tokens → ~580K). Root cause: PNG/JPG/ICO/SVG and other binary files read via `errors=replace` produced hundreds of thousands of garbage chars. Fix: add `_BINARY_EXTENSIONS` suffix filter + `_is_probably_binary()` content sniffer (NUL-byte detection or >30% non-text bytes, where non-text = bytes ≥127 and ASCII control chars; reads only first 8KB via `open().read()` — no full-file buffer); size guard moved before sniffer; add `_SKIP_DIR_PREFIXES` (`assets/` — README screenshots; `webview/` — legacy PyWebView JS helpers). OMITTED FILES legend updated. 16 new tests. |
 | 4.11.10 | 2026-04-04 | Chat live task card: remove artificial 20-step cap on timeline items — all steps are now preserved and visible. Timeline becomes scrollable (CSS `max-height: 420px`, `overflow-y: auto`) when expanded so long tasks don't push content off-screen. `syncLiveCardLayout` capped at `TIMELINE_MAX_HEIGHT` to match. `bufferedLiveUpdates` cap also removed. |
 | 4.11.9 | 2026-04-04 | deep_self_review: exclude vendored/minified files from review pack (`_VENDORED_SUFFIXES` + `_VENDORED_NAMES` constants, suffix matching in build loop); update ARCHITECTURE.md — clarify review pack scope (no dialogue/logs, explicit exclusion rules); update README `/review` command description. |

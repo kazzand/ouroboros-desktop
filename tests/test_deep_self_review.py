@@ -362,6 +362,205 @@ class TestSkipDirPrefixes:
         assert not any("web/modules/chat.js" in s for s in stats["skipped"])
 
 
+class TestNoProxyLlmChat:
+    """LLMClient.chat(no_proxy=True) — proxy-free httpx transport for macOS fork-safety."""
+
+    def test_chat_no_proxy_uses_trust_env_false(self):
+        """chat(no_proxy=True) builds an httpx.Client with trust_env=False and mounts={}."""
+        import httpx
+        from ouroboros.llm import LLMClient
+
+        captured_clients = []
+
+        real_httpx_client = httpx.Client
+
+        def capturing_httpx_client(*args, **kwargs):
+            c = real_httpx_client(*args, **kwargs)
+            captured_clients.append(c)
+            return c
+
+        llm = LLMClient()
+        mock_resp = mock.Mock()
+        mock_resp.model_dump.return_value = {
+            "choices": [{"message": {"role": "assistant", "content": "ok"}}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+        }
+
+        with mock.patch("httpx.Client", side_effect=capturing_httpx_client):
+            with mock.patch("openai.OpenAI") as mock_openai_cls:
+                mock_oa = mock.Mock()
+                mock_oa.chat.completions.create.return_value = mock_resp
+                mock_openai_cls.return_value = mock_oa
+
+                with mock.patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-or-test"}, clear=False):
+                    llm.chat(
+                        messages=[{"role": "user", "content": "hi"}],
+                        model="openai/gpt-5.4-pro",
+                        no_proxy=True,
+                    )
+
+        # At least one httpx.Client was created
+        assert len(captured_clients) >= 1
+        created = captured_clients[0]
+        # trust_env=False and mounts={} are the key invariants
+        assert created._mounts == {} or not created._mounts
+
+    def test_chat_no_proxy_closes_http_client(self):
+        """chat(no_proxy=True) closes the one-shot httpx.Client after the call."""
+        import httpx
+        from ouroboros.llm import LLMClient
+
+        closed_clients = []
+        real_httpx_client = httpx.Client
+
+        class TrackingClient(real_httpx_client):
+            def close(self):
+                closed_clients.append(self)
+                super().close()
+
+        llm = LLMClient()
+        mock_resp = mock.Mock()
+        mock_resp.model_dump.return_value = {
+            "choices": [{"message": {"role": "assistant", "content": "ok"}}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+        }
+
+        with mock.patch("httpx.Client", TrackingClient):
+            with mock.patch("openai.OpenAI") as mock_openai_cls:
+                mock_oa = mock.Mock()
+                mock_oa.chat.completions.create.return_value = mock_resp
+                mock_openai_cls.return_value = mock_oa
+
+                with mock.patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-or-test"}, clear=False):
+                    llm.chat(
+                        messages=[{"role": "user", "content": "hi"}],
+                        model="openai/gpt-5.4-pro",
+                        no_proxy=True,
+                    )
+
+        assert len(closed_clients) >= 1, "httpx.Client must be closed after no_proxy call"
+
+    def test_chat_no_proxy_closes_on_exception(self):
+        """chat(no_proxy=True) closes the http client even when the API call raises."""
+        import httpx
+        from ouroboros.llm import LLMClient
+
+        closed_clients = []
+        real_httpx_client = httpx.Client
+
+        class TrackingClient(real_httpx_client):
+            def close(self):
+                closed_clients.append(self)
+                super().close()
+
+        llm = LLMClient()
+
+        with mock.patch("httpx.Client", TrackingClient):
+            with mock.patch("openai.OpenAI") as mock_openai_cls:
+                mock_oa = mock.Mock()
+                mock_oa.chat.completions.create.side_effect = RuntimeError("boom")
+                mock_openai_cls.return_value = mock_oa
+
+                with mock.patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-or-test"}, clear=False):
+                    with pytest.raises(RuntimeError, match="boom"):
+                        llm.chat(
+                            messages=[{"role": "user", "content": "hi"}],
+                            model="openai/gpt-5.4-pro",
+                            no_proxy=True,
+                        )
+
+        assert len(closed_clients) >= 1, "httpx.Client must be closed even after exception"
+
+    def test_chat_no_proxy_skips_generation_cost_fetch(self):
+        """chat(no_proxy=True) does not call _fetch_generation_cost (proxy/OS path)."""
+        from ouroboros.llm import LLMClient
+
+        llm = LLMClient()
+        mock_resp = mock.Mock()
+        mock_resp.model_dump.return_value = {
+            "id": "gen-abc123",  # has a generation id — would trigger cost fetch normally
+            "choices": [{"message": {"role": "assistant", "content": "ok"}}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+        }
+
+        with mock.patch("httpx.Client") as mock_httpx_cls:
+            mock_http = mock.Mock()
+            mock_httpx_cls.return_value = mock_http
+            with mock.patch("openai.OpenAI") as mock_openai_cls:
+                mock_oa = mock.Mock()
+                mock_oa.chat.completions.create.return_value = mock_resp
+                mock_openai_cls.return_value = mock_oa
+                with mock.patch.object(llm, "_fetch_generation_cost") as mock_cost:
+                    with mock.patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-or-test"}, clear=False):
+                        llm.chat(
+                            messages=[{"role": "user", "content": "hi"}],
+                            model="openai/gpt-5.4-pro",
+                            no_proxy=True,
+                        )
+                    mock_cost.assert_not_called()
+
+    def test_chat_no_proxy_false_uses_cached_client(self):
+        """chat(no_proxy=False, default) uses the shared cached client, not a new one."""
+        import httpx
+        from ouroboros.llm import LLMClient
+
+        new_clients = []
+        real_httpx_client = httpx.Client
+
+        def counting_httpx_client(*args, **kwargs):
+            c = real_httpx_client(*args, **kwargs)
+            new_clients.append(c)
+            return c
+
+        llm = LLMClient()
+        mock_resp = mock.Mock()
+        mock_resp.model_dump.return_value = {
+            "choices": [{"message": {"role": "assistant", "content": "ok"}}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+        }
+
+        with mock.patch("httpx.Client", side_effect=counting_httpx_client):
+            with mock.patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-or-test"}, clear=False):
+                with mock.patch.object(llm, "_get_remote_client") as mock_get:
+                    mock_oa = mock.Mock()
+                    mock_oa.chat.completions.create.return_value = mock_resp
+                    mock_get.return_value = mock_oa
+                    llm.chat(
+                        messages=[{"role": "user", "content": "hi"}],
+                        model="openai/gpt-5.4-pro",
+                        no_proxy=False,
+                    )
+                    mock_get.assert_called_once()
+
+        # no_proxy=False must not construct a new httpx.Client
+        assert len(new_clients) == 0
+
+    def test_run_deep_self_review_calls_llm_with_no_proxy(self, tmp_repo, tmp_drive):
+        """run_deep_self_review passes no_proxy=True to llm.chat."""
+        from ouroboros.deep_self_review import run_deep_self_review
+        small_pack = "x" * 100
+        mock_llm = mock.Mock()
+        mock_llm.chat.return_value = ({"content": "Review result."}, {"cost": 0.01})
+
+        with mock.patch(
+            "ouroboros.deep_self_review.build_review_pack",
+            return_value=(small_pack, {"file_count": 1, "total_chars": len(small_pack), "skipped": []}),
+        ):
+            result, usage = run_deep_self_review(
+                repo_dir=tmp_repo,
+                drive_root=tmp_drive,
+                llm=mock_llm,
+                emit_progress=lambda x: None,
+                event_queue=None,
+                model="openai/gpt-5.4-pro",
+            )
+
+        assert result == "Review result."
+        mock_llm.chat.assert_called_once()
+        _, kwargs = mock_llm.chat.call_args
+        assert kwargs.get("no_proxy") is True, "llm.chat must be called with no_proxy=True"
+
+
 class TestReviewPackOverflow:
     def test_explicit_error_on_overflow(self, tmp_repo, tmp_drive):
         """When pack exceeds ~900K tokens, run_deep_self_review returns an error."""

@@ -261,6 +261,23 @@ def run_deep_self_review(
 
     Returns (review_text, usage_dict). On any error, returns an error string
     with empty usage instead of raising.
+
+    macOS fork-safety note
+    ----------------------
+    When the Ouroboros app bundle uses fork() to spawn the inner server.py
+    subprocess, the child process inherits a multithreaded parent state.
+    The first httpx HTTP request triggers macOS proxy detection via
+    SCDynamicStoreCopyProxiesWithOptions() / CFPreferences, which is not
+    fork-safe and causes a SIGSEGV (exit code -11, confirmed in macOS
+    crash reports via the ``"crashed on child side of fork pre-exec"``
+    marker in the ``asi`` field).
+
+    We work around this by asking the shared LLMClient to send this one
+    call with ``trust_env=False`` so httpx never consults env-vars or the
+    OS proxy API.  The flag is passed through
+    ``llm.chat(..., no_proxy=True)`` and handled only in the
+    ``_chat_remote`` path of ``llm.py``.  Regular task LLM calls are
+    unaffected.
     """
     try:
         # 1. Build pack
@@ -293,12 +310,15 @@ def run_deep_self_review(
 
         emit_progress(f"Sending to {model} (~{estimated_tokens:,} tokens). This may take several minutes...")
 
-        # 4. Build messages and call LLM
+        # 4. Build messages
         messages = [
             {"role": "system", "content": _SYSTEM_PROMPT},
             {"role": "user", "content": pack_text},
         ]
 
+        # 5. Call LLM with no_proxy=True to prevent macOS fork-safety SIGSEGV.
+        #    The flag is forwarded to _chat_remote in llm.py which builds a
+        #    one-shot httpx.Client(trust_env=False, mounts={}).
         response, usage = llm.chat(
             messages=messages,
             model=model,
@@ -306,6 +326,7 @@ def run_deep_self_review(
             reasoning_effort="high",
             max_tokens=100_000,
             temperature=None,
+            no_proxy=True,
         )
 
         text = response.get("content") or ""

@@ -472,17 +472,27 @@ class LLMClient:
         tool_choice: str = "auto",
         use_local: bool = False,
         temperature: Optional[float] = None,
+        no_proxy: bool = False,
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         """Single LLM call. Returns: (response_message_dict, usage_dict with cost).
 
         When use_local=True, routes to the local llama-cpp-python server
         and strips OpenRouter-specific parameters (reasoning, provider, cache_control).
+
+        When no_proxy=True, the underlying httpx transport is built with
+        trust_env=False and an empty mounts map, bypassing OS-level and
+        env-var proxy detection.  Use this in contexts where the process
+        was forked from a multithreaded parent (e.g. macOS app-bundle
+        workers) to avoid a SIGSEGV in SCDynamicStoreCopyProxiesWithOptions.
         """
         if use_local:
             return self._chat_local(messages, tools, max_tokens, tool_choice)
 
         target = self._resolve_remote_target(model)
-        return self._chat_remote(target, messages, tools, reasoning_effort, max_tokens, tool_choice, temperature)
+        return self._chat_remote(
+            target, messages, tools, reasoning_effort, max_tokens, tool_choice, temperature,
+            no_proxy=no_proxy,
+        )
 
     async def chat_async(
         self,
@@ -1152,7 +1162,16 @@ class LLMClient:
         self,
         resp_dict: Dict[str, Any],
         target: Dict[str, Any],
+        skip_cost_fetch: bool = False,
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+        """Normalise a raw OpenAI-compatible response dict into (message, usage).
+
+        skip_cost_fetch=True suppresses the _fetch_generation_cost() call that
+        uses requests.get() with default proxy / OS lookup.  Set this whenever
+        the call was made inside a forked process (no_proxy=True path) to keep
+        the entire call chain free of SCDynamicStore / CFPreferences access.
+        Cost is still estimated from token counts via the local pricing table.
+        """
         usage = resp_dict.get("usage") or {}
         choices = resp_dict.get("choices") or [{}]
         msg = (choices[0] if choices else {}).get("message") or {}
@@ -1173,7 +1192,7 @@ class LLMClient:
                 if cache_write:
                     usage["cache_write_tokens"] = int(cache_write)
 
-        if target.get("supports_openrouter_extensions"):
+        if target.get("supports_openrouter_extensions") and not skip_cost_fetch:
             if not usage.get("cost"):
                 gen_id = resp_dict.get("id") or ""
                 if gen_id:
@@ -1207,12 +1226,60 @@ class LLMClient:
         max_tokens: int,
         tool_choice: str,
         temperature: Optional[float] = None,
+        no_proxy: bool = False,
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-        """Send a chat request to the resolved remote provider."""
+        """Send a chat request to the resolved remote provider.
+
+        When no_proxy=True a temporary one-shot httpx.Client is built with
+        ``trust_env=False`` and an empty mounts map to bypass macOS fork-safe
+        proxy detection (SCDynamicStoreCopyProxiesWithOptions).  The client is
+        closed in a finally block after the response is received to avoid
+        connection-pool leaks.  This flag does not affect other callers.
+        """
         if target.get("provider") == "anthropic":
             return self._chat_anthropic(
                 target, messages, tools, reasoning_effort, max_tokens, tool_choice, temperature
             )
+
+        if no_proxy:
+            import httpx
+            from openai import OpenAI
+
+            base_url = str(target.get("base_url") or "")
+            api_key = str(target.get("api_key") or "")
+            headers_dict = dict(target.get("default_headers") or {})
+            # Build a one-shot httpx.Client that skips all proxy detection:
+            # - trust_env=False: ignore HTTP_PROXY / HTTPS_PROXY env vars
+            # - mounts={}: empty mount map prevents OS-level SCDynamicStore lookup
+            # - timeout: generous for large review packs
+            _http_client = httpx.Client(
+                trust_env=False,
+                mounts={},
+                timeout=httpx.Timeout(connect=30.0, read=3600.0, write=3600.0, pool=30.0),
+            )
+            _oa_client = OpenAI(
+                api_key=api_key,
+                base_url=base_url,
+                default_headers=headers_dict,
+                http_client=_http_client,
+                max_retries=0,
+            )
+            try:
+                kwargs = self._build_remote_kwargs(
+                    target, messages, reasoning_effort, max_tokens, tool_choice, temperature, tools
+                )
+                resp = _oa_client.chat.completions.create(**kwargs)
+                # Pass no_proxy=True to _normalize_remote_response so the
+                # _fetch_generation_cost fallback (which uses requests.get with
+                # default proxy / OS lookup) is skipped — it would re-introduce
+                # the same SCDynamicStore code path that causes the SIGSEGV.
+                return self._normalize_remote_response(resp.model_dump(), target, skip_cost_fetch=True)
+            finally:
+                try:
+                    _http_client.close()
+                except Exception:
+                    pass
+
         client = self._get_remote_client(target)
         kwargs = self._build_remote_kwargs(
             target, messages, reasoning_effort, max_tokens, tool_choice, temperature, tools
