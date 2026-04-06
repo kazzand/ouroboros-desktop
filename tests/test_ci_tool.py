@@ -124,6 +124,23 @@ class TestRunCiTests:
                 result = _run_ci_tests(ctx)
                 assert "CI_UNAVAILABLE" in result
 
+    def test_detached_head_returns_invalid(self, ctx, _gh_settings):
+        from ouroboros.tools.ci import _run_ci_tests
+        with patch("ouroboros.tools.ci._get_current_branch", return_value="HEAD"), \
+             patch("ouroboros.tools.ci._get_current_sha", return_value="abc1234567890"):
+            result = _run_ci_tests(ctx)
+            assert "CI_BRANCH_INVALID" in result
+            assert "detached HEAD" in result
+
+    def test_remote_mismatch_returns_error(self, ctx, _gh_settings):
+        from ouroboros.tools.ci import _run_ci_tests
+        with patch("ouroboros.tools.ci._get_current_branch", return_value="ouroboros"), \
+             patch("ouroboros.tools.ci._get_current_sha", return_value="abc1234567890"), \
+             patch("ouroboros.tools.ci.run_cmd", side_effect=lambda cmd, **kw:
+                   "https://github.com/other-org/other-repo.git\n" if "get-url" in cmd else "ouroboros\n"):
+            result = _run_ci_tests(ctx)
+            assert "CI_REMOTE_MISMATCH" in result
+
     def test_push_failure(self, ctx, _gh_settings):
         from ouroboros.tools.ci import _run_ci_tests
         with patch("ouroboros.tools.ci._get_current_branch", return_value="ouroboros"), \
@@ -223,6 +240,24 @@ class TestRunCiTests:
              patch("ouroboros.tools.ci._poll_workflow_run", return_value=poll_result):
             result = _run_ci_tests(ctx, timeout_minutes=1)
             assert "CI_TIMEOUT" in result
+
+
+class TestNetworkErrorHandling:
+    def test_url_error_returns_zero(self):
+        from ouroboros.tools.ci import _gh_api
+        import urllib.error
+        err = urllib.error.URLError("DNS lookup failed")
+        with patch("urllib.request.urlopen", side_effect=err):
+            status, data = _gh_api("GET", "/repos/test/test", "token123")
+            assert status == 0
+            assert "Network error" in data["error"]
+
+    def test_timeout_error_returns_zero(self):
+        from ouroboros.tools.ci import _gh_api
+        with patch("urllib.request.urlopen", side_effect=TimeoutError("timed out")):
+            status, data = _gh_api("GET", "/repos/test/test", "token123")
+            assert status == 0
+            assert "Network error" in data["error"]
 
 
 class TestToolRegistration:

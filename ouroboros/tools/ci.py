@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import time
 import urllib.error
 import urllib.request
@@ -59,6 +60,8 @@ def _gh_api(method: str, path: str, token: str, body: Optional[dict] = None,
         except Exception:
             pass
         return e.code, {"error": body_text}
+    except (urllib.error.URLError, TimeoutError, OSError) as e:
+        return 0, {"error": f"Network error: {e}"}
 
 
 def _push_branch(repo_dir: str, branch: str) -> Tuple[bool, str]:
@@ -104,18 +107,22 @@ def _trigger_workflow(token: str, repo: str, workflow_id: int, branch: str) -> T
 
 def _poll_workflow_run(token: str, repo: str, branch: str, sha: str,
                        started_after: str, ctx: ToolContext,
-                       timeout_sec: int = _MAX_POLL_SEC) -> dict:
+                       timeout_sec: int = _MAX_POLL_SEC,
+                       workflow_id: Optional[int] = None) -> dict:
     """Poll for the workflow run result. Returns run info dict."""
     deadline = time.time() + timeout_sec
     run_id = None
 
+    # Use workflow-specific endpoint if available, otherwise fall back to repo-wide
+    runs_path = (
+        f"/repos/{repo}/actions/workflows/{workflow_id}/runs?branch={branch}&per_page=5&event=workflow_dispatch"
+        if workflow_id
+        else f"/repos/{repo}/actions/runs?branch={branch}&per_page=5&event=workflow_dispatch"
+    )
+
     while time.time() < deadline:
         # Find the matching run
-        status, data = _gh_api(
-            "GET",
-            f"/repos/{repo}/actions/runs?branch={branch}&per_page=5&event=workflow_dispatch",
-            token,
-        )
+        status, data = _gh_api("GET", runs_path, token)
         if status == 200:
             for run in data.get("workflow_runs", []):
                 created = run.get("created_at", "")
@@ -157,6 +164,7 @@ def _get_failed_jobs(token: str, repo: str, run_id: int) -> List[dict]:
                 if s.get("conclusion") == "failure"
             ]
             failed.append({
+                "id": job.get("id"),
                 "name": job.get("name", "?"),
                 "os": _extract_os(job.get("name", "")),
                 "url": job.get("html_url", ""),
@@ -214,6 +222,24 @@ def _run_ci_tests(ctx: ToolContext, wait: bool = True, timeout_minutes: int = 15
     branch = _get_current_branch(repo_dir)
     sha = _get_current_sha(repo_dir)
 
+    if branch == "HEAD":
+        return "⚠️ CI_BRANCH_INVALID: detached HEAD state. Check out a branch first (e.g. `git checkout ouroboros`)."
+
+    # Verify origin matches GITHUB_REPO to prevent pushing to unintended remote
+    try:
+        origin_url = run_cmd(["git", "remote", "get-url", "origin"], cwd=repo_dir).strip()
+        # Extract owner/repo from https://github.com/owner/repo.git or similar
+        m = re.search(r"github\.com[/:]([^/]+/[^/.]+)", origin_url)
+        if m:
+            origin_slug = m.group(1).rstrip("/")
+            if origin_slug.lower() != repo.lower():
+                return (
+                    f"⚠️ CI_REMOTE_MISMATCH: git origin points to '{origin_slug}' "
+                    f"but GITHUB_REPO is '{repo}'. Fix in Settings or update git remote."
+                )
+    except Exception:
+        pass  # No origin configured — push will fail naturally
+
     # Step 1: Push current branch
     _emit_progress(ctx, f"📤 Pushing {branch} to origin...")
     ok, push_msg = _push_branch(repo_dir, branch)
@@ -244,7 +270,8 @@ def _run_ci_tests(ctx: ToolContext, wait: bool = True, timeout_minutes: int = 15
     # Step 4: Poll for results
     _emit_progress(ctx, "⏳ Waiting for CI results (full 3-OS matrix)...")
     timeout_sec = min(max(timeout_minutes, 1), 30) * 60
-    result = _poll_workflow_run(token, repo, branch, sha, started_after, ctx, timeout_sec)
+    result = _poll_workflow_run(token, repo, branch, sha, started_after, ctx, timeout_sec,
+                                workflow_id=workflow_id)
 
     if result["status"] == "timeout":
         return (
@@ -281,18 +308,11 @@ def _run_ci_tests(ctx: ToolContext, wait: bool = True, timeout_minutes: int = 15
                     lines.append(f"Failed steps: {', '.join(job['failed_steps'])}")
                 lines.append(f"URL: {job['url']}")
 
-                # Try to get logs for the failed job
-                # We need job_id — re-fetch jobs to get it
-                status, jobs_data = _gh_api(
-                    "GET", f"/repos/{repo}/actions/runs/{run_id}/jobs", token
-                )
-                if status == 200:
-                    for j in jobs_data.get("jobs", []):
-                        if j.get("name") == job["name"] and j.get("conclusion") == "failure":
-                            log_text = _get_job_logs(token, repo, j["id"])
-                            if log_text:
-                                lines.append(f"\n**Logs (tail):**\n```\n{log_text}\n```")
-                            break
+                # Download logs using job ID from _get_failed_jobs
+                if job.get("id"):
+                    log_text = _get_job_logs(token, repo, job["id"])
+                    if log_text:
+                        lines.append(f"\n**Logs (tail):**\n```\n{log_text}\n```")
         else:
             lines.append("No failed job details available.")
 

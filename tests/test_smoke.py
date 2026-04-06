@@ -48,6 +48,7 @@ TOOL_MODULES = [
     "ouroboros.tools.scope_review",
     "ouroboros.tools.review_helpers",
     "ouroboros.tools.plan_review",
+    "ouroboros.tools.ci",
 ]
 
 SUPERVISOR_MODULES = [
