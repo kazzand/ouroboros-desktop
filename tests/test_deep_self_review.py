@@ -239,8 +239,13 @@ class TestIsProbablyBinary:
         assert _is_probably_binary(f) is True
 
     def test_high_byte_ratio_is_binary(self, tmp_path):
-        """File with >30% bytes >= 128 (non-UTF-8/mixed-encoding blobs) is detected as binary."""
-        # 50% bytes >= 128, typical of non-UTF-8 binary blobs
+        """File with invalid UTF-8 high bytes (no NUL) is detected as binary.
+
+        bytes >= 128 alone are safe for valid UTF-8 (Cyrillic, CJK), but
+        invalid UTF-8 sequences (e.g. raw Latin-1 bytes 0x80-0xFF) must still
+        be caught by the incremental UTF-8 decode check.
+        """
+        # Raw Latin-1 bytes 0x80-0xFF: invalid UTF-8, no NUL, few control chars
         payload = bytes(range(128, 256)) * 5 + b"ascii text" * 5
         f = tmp_path / "data.blob"
         f.write_bytes(payload)

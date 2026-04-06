@@ -20,7 +20,7 @@ from typing import List, Optional
 from ouroboros.llm import LLMClient
 from ouroboros.tools.registry import ToolContext
 from ouroboros.tools.review_helpers import (
-    build_broader_repo_pack,
+    build_full_repo_pack,
     build_goal_section,
     build_head_snapshot_section,
     build_scope_section,
@@ -228,14 +228,22 @@ def _build_scope_prompt(
     # Compute fail-closed omission signal (deletion-only diffs are valid, not empty)
     touched_omitted = _compute_omission_signal(current_files_section, deleted_paths, omitted, current_paths)
 
-    # Build broader repo pack (best-effort)
+    # Build full repo pack — fail-closed: if git ls-files fails, block scope review
+    # rather than proceeding with an incomplete (empty) repo context.
     exclude_set = set(all_touched_paths)
     try:
-        repo_pack_section = build_broader_repo_pack(repo_dir, exclude_set)
+        full_pack, _repo_omitted = build_full_repo_pack(repo_dir, exclude_paths=exclude_set)
+        repo_pack_section = full_pack
+        if _repo_omitted:
+            repo_pack_section += f"\n\n*(Omitted {len(_repo_omitted)} file(s): binary, vendored, sensitive, or >1MB)*\n"
         if not repo_pack_section.strip():
             repo_pack_section = "(no additional repo files)"
-    except Exception:
-        repo_pack_section = "(broader repo pack unavailable)"
+    except RuntimeError as exc:
+        # git ls-files hard failure — propagate so run_scope_review can block.
+        raise
+    except Exception as exc:
+        # Unexpected error — also propagate (fail-closed).
+        raise RuntimeError(f"build_full_repo_pack error: {exc}") from exc
 
     return f"""\
 {_SCOPE_PREAMBLE}
@@ -369,12 +377,22 @@ def run_scope_review(
     """
     repo_dir = pathlib.Path(ctx.repo_dir)
 
-    prompt, touched_omitted = _build_scope_prompt(
-        repo_dir, commit_message,
-        goal=goal, scope=scope,
-        review_rebuttal=review_rebuttal,
-        review_history=review_history,
-    )
+    try:
+        prompt, touched_omitted = _build_scope_prompt(
+            repo_dir, commit_message,
+            goal=goal, scope=scope,
+            review_rebuttal=review_rebuttal,
+            review_history=review_history,
+        )
+    except RuntimeError as exc:
+        return ScopeReviewResult(
+            blocked=True,
+            block_message=(
+                "⚠️ SCOPE_REVIEW_BLOCKED: Failed to build review context — commit blocked.\n"
+                f"Error: {exc}\n"
+                "Ensure git is available and the repository is in a valid state."
+            ),
+        )
 
     def _blocked(msg: str) -> ScopeReviewResult:
         return ScopeReviewResult(blocked=True, block_message=msg)

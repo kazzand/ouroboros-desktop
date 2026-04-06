@@ -29,7 +29,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 from ouroboros.loop_tool_execution import StatefulToolExecutor, _truncate_tool_result
 from ouroboros.utils import (
-    utc_now_iso, read_text, append_jsonl, clip_text,
+    utc_now_iso, read_text, append_jsonl,
     truncate_for_log, sanitize_tool_result_for_log, sanitize_tool_args_for_log,
 )
 from ouroboros.config import resolve_effort
@@ -204,9 +204,11 @@ class BackgroundConsciousness:
                 self._last_cycle_started_at = utc_now_iso()
                 self._last_idle_reason = "thinking"
                 self._last_error = ""
-                self._think()
+                cycle_completed = self._think()
                 self._last_cycle_finished_at = utc_now_iso()
-                if not self._stop_event.is_set() and not self._paused:
+                # Only set 'sleeping' for normal completions.
+                # Context overflow or LLM errors set their own distinct status inside _think().
+                if cycle_completed and not self._stop_event.is_set() and not self._paused:
                     self._last_idle_reason = "sleeping"
             except Exception as e:
                 self._last_cycle_finished_at = utc_now_iso()
@@ -239,9 +241,25 @@ class BackgroundConsciousness:
     # Think cycle
     # -------------------------------------------------------------------
 
-    def _think(self) -> None:
-        """One thinking cycle: build context, call LLM, execute tools iteratively."""
-        context = self._build_context()
+    def _think(self) -> bool:
+        """One thinking cycle: build context, call LLM, execute tools iteratively.
+
+        Returns True if the cycle completed normally, False if it was skipped
+        (e.g. context overflow).  _loop() uses this to set a distinct status
+        instead of overwriting last_idle_reason with 'sleeping'.
+        """
+        try:
+            context = self._build_context()
+        except OverflowError as exc:
+            # Context too large — skip this wakeup cycle entirely (P1: no silent truncation).
+            log.warning("consciousness: wakeup cycle skipped: %s", exc)
+            self._last_idle_reason = "context_overflow"
+            append_jsonl(self._drive_root / "logs" / "events.jsonl", {
+                "ts": utc_now_iso(),
+                "type": "consciousness_context_overflow",
+                "error": str(exc),
+            })
+            return False
         model = self._model
 
         tools = self._tool_schemas()
@@ -376,6 +394,13 @@ class BackgroundConsciousness:
                 "type": "consciousness_llm_error",
                 "error": repr(e),
             })
+            self._last_idle_reason = "llm_error"
+            # Apply exponential backoff so persistent provider/tool failures don't
+            # keep waking at the normal interval (mirrors _loop()'s error_backoff path).
+            self._next_wakeup_sec = min(self._next_wakeup_sec * 2, self._wakeup_max)
+            return False
+
+        return True
 
     def _emit_progress(self, content: str) -> None:
         if not content or not content.strip():
@@ -433,28 +458,48 @@ class BackgroundConsciousness:
         # Memory sections: scratchpad, identity, dialogue summary (full size)
         parts.extend(build_memory_sections(memory))
 
-        # Knowledge base index
+        # Knowledge base index — full content, no clip_text.
+        # If content grows very large, emit a warning rather than silently truncating.
+        _BG_SECTION_WARN_CHARS = 200_000  # warn if a single section exceeds ~50K tokens
         kb_index_path = env.drive_path("memory/knowledge/index-full.md")
         if kb_index_path.exists():
             kb_index = kb_index_path.read_text(encoding="utf-8")
             if kb_index.strip():
-                parts.append("## Knowledge base\n\n" + clip_text(kb_index, 50000))
+                if len(kb_index) > _BG_SECTION_WARN_CHARS:
+                    import logging as _logging
+                    _logging.getLogger(__name__).warning(
+                        "consciousness: knowledge index is large (%d chars) — "
+                        "consider grooming to keep consciousness context slim",
+                        len(kb_index),
+                    )
+                parts.append("## Knowledge base\n\n" + kb_index)
 
-        # Pattern register (P9 Spiral Growth)
+        # Pattern register (P2 Meta-Reflection Imperative) — full content, no clip_text.
         patterns_path = env.drive_path("memory/knowledge/patterns.md")
         if patterns_path.exists():
             patterns_text = patterns_path.read_text(encoding="utf-8")
             if patterns_text.strip():
-                parts.append("## Pattern Register\n\n" + clip_text(patterns_text, 30000))
+                if len(patterns_text) > _BG_SECTION_WARN_CHARS:
+                    import logging as _logging
+                    _logging.getLogger(__name__).warning(
+                        "consciousness: patterns register is large (%d chars)",
+                        len(patterns_text),
+                    )
+                parts.append("## Pattern Register\n\n" + patterns_text)
 
         # Health invariants
         health_section = build_health_invariants(env)
         if health_section:
             parts.append(health_section)
 
-        # Drive state
+        # Drive state — full content, no clip_text.
         state_json = safe_read(env.drive_path("state/state.json"), fallback="{}")
-        parts.append("## Drive state\n\n" + clip_text(state_json, 90000))
+        if len(state_json) > _BG_SECTION_WARN_CHARS:
+            import logging as _logging
+            _logging.getLogger(__name__).warning(
+                "consciousness: drive state JSON is large (%d chars)", len(state_json)
+            )
+        parts.append("## Drive state\n\n" + state_json)
 
         # Runtime section (same as main agent)
         parts.append(build_runtime_section(env, bg_task))
@@ -481,7 +526,34 @@ class BackgroundConsciousness:
         ]
         parts.append("## Background consciousness info\n\n" + "\n".join(bg_info_lines))
 
-        return "\n\n".join(parts)
+        # Overflow guard (P1: cognitive artifacts must not be silently dropped).
+        # BIBLE P1: compaction only through explicit summarization preserving substance.
+        # Hard limit: if context would exceed the safe budget, fail this wakeup cycle
+        # fast with a clear error rather than truncating or omitting cognitive content.
+        # Warn-only threshold allows detecting growth before it becomes a hard failure.
+        _BG_TOTAL_WARN_CHARS = 600_000   # ~150K tokens — warn but proceed
+        _BG_TOTAL_MAX_CHARS = 1_200_000  # ~300K tokens — fail fast (P1 compliance)
+        full_text = "\n\n".join(parts)
+        if len(full_text) > _BG_TOTAL_MAX_CHARS:
+            import logging as _logging
+            _logging.getLogger(__name__).warning(
+                "consciousness: context too large (%d chars > %d limit) — "
+                "skipping wakeup cycle; groom memory (knowledge, patterns, scratchpad) "
+                "to reduce size",
+                len(full_text), _BG_TOTAL_MAX_CHARS,
+            )
+            # Raise so _think() / _run() can catch and log without dropping artifacts.
+            raise OverflowError(
+                f"Background consciousness context too large ({len(full_text):,} chars). "
+                "Groom memory to continue."
+            )
+        if len(full_text) > _BG_TOTAL_WARN_CHARS:
+            import logging as _logging
+            _logging.getLogger(__name__).warning(
+                "consciousness: context is large (%d chars) — consider grooming memory",
+                len(full_text),
+            )
+        return full_text
 
     # -------------------------------------------------------------------
     # Tool registry (separate instance for consciousness, not shared with agent)

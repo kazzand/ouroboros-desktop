@@ -1,4 +1,4 @@
-# Ouroboros v4.12.0 — Architecture & Reference
+# Ouroboros v4.13.0 — Architecture & Reference
 
 This document describes every component, page, button, API endpoint, and data flow.
 It is the single source of truth for how the system works. Keep it updated.
@@ -649,7 +649,10 @@ The commit pipeline runs three review stages before creating a git commit:
 3. **Blocking scope review** (`tools/scope_review.py`)
 
 Shared helpers live in `tools/review_helpers.py`: checklist section loader,
-touched-file pack builder, HEAD snapshot section builder, broader repo pack builder, goal/scope resolution.
+touched-file pack builder (`build_touched_file_pack`, 1MB file limit; sensitive files omitted case-insensitively before any read), full repo pack builder
+(`build_full_repo_pack` — no char cap, binary/vendored/sensitive filtering, replaces deprecated
+`build_broader_repo_pack`), HEAD snapshot section builder, goal/scope resolution.
+`_FILE_SIZE_LIMIT` was raised from 100KB to 1MB in v4.13.0 to stop cutting off normal-sized files.
 
 All LLM calls in the review stack (triad `_query_model`, scope `run_scope_review`) route through
 the shared `LLMClient` from `ouroboros/llm.py` — the same layer used by the main agent. This ensures
@@ -711,14 +714,15 @@ errors surface via the same observability path.
 - **Bypass**: `skip_advisory_pre_review=True` — durably audited in `events.jsonl`.
 - **Auto-bypass on missing key**: records a `bypassed` run when `ANTHROPIC_API_KEY` absent.
 - **No-truncation for results**: advisory run results stored in full (no `[:4000]` clipping).
-  Diff is capped at 80K chars with explicit omission note (not silent).
+  Diff >500K chars hard-fails before SDK call (returns `status="error"` immediately); diffs under 500K are passed in full without truncation.
 
 #### Triad diff review (enriched)
 
 - Three models review the staged diff against "Repo Commit Checklist" from CHECKLISTS.md.
 - **Full touched-file context**: reviewers see the complete current content of all changed
-  files (via `build_touched_file_pack`), not just the patch hunks. Omission notes when
-  files are too large or unreadable.
+  files (via `build_touched_file_pack`), not just the patch hunks. Sensitive files (`.env`,
+  `.pem`, `.key`, credentials files — case-insensitive) are omitted before reading. Binary
+  and oversized (>1MB) files also produce explicit omission notes.
 - **Goal section**: `build_goal_section` provides intended transformation context with
   precedence: goal > scope > commit_message > fallback. No raw task/chat text.
 - Enforcement configurable: `blocking` or `advisory`.
@@ -730,16 +734,23 @@ errors surface via the same observability path.
 - **Role**: completeness, forgotten touchpoints, cross-surface consistency, incomplete
   migrations, intent mismatch. NOT a duplicate of line-by-line diff review.
 - **Prompt includes**: "Intent / Scope Review Checklist" from CHECKLISTS.md, touched-file
-  pack, broader repo pack (all tracked files minus touched), goal/scope sections,
-  DEVELOPMENT.md, staged diff, review history.
+  pack, full repo pack (all tracked files minus touched — no char cap, binary/vendored/sensitive
+  filtered via `build_full_repo_pack`), goal/scope sections, DEVELOPMENT.md, staged diff, review history.
 - **Pre-change (HEAD) snapshots** (best-effort): `build_head_snapshot_section` in `review_helpers.py`
-  fetches the HEAD version of each touched file via `git show HEAD:<path>`. New files get a "File is new"
-  note; deleted files and renamed files show the old content from the old path; modified files show
-  the before-state. When a snapshot cannot be fetched (file too large, git timeout, git error), an
-  explicit omission note is included in the prompt. This enriches scope reviewer context but is not
-  a hard gate — scope review proceeds even when individual snapshots are unavailable.
-- **Broader repo pack**: best-effort, up to 500K chars. Excludes touched files.
-- Runs AFTER triad review, BEFORE `git commit`.
+  fetches the HEAD version of each touched file via `git show HEAD:<path>`. Sensitive files (`.env`,
+  `.pem`, `.key`, `credentials.json`, etc. — case-insensitive) are suppressed before the subprocess
+  call; their content never reaches review prompts or external models. Binary files (extension check +
+  NUL/control-char/UTF-8-decode sniffer on raw bytes) and oversized files (>1MB raw bytes) are also
+  omitted with explicit notes. New files get a "File is new" note; deleted/renamed files show old
+  content. When a snapshot cannot be fetched (git timeout, git error), an explicit omission note is
+  included. This enriches scope reviewer context but is not a hard gate — scope review proceeds even
+  when individual snapshots are unavailable.
+- **Full repo pack** (v4.13.0): `build_full_repo_pack` replaces the deprecated `build_broader_repo_pack`.
+  No hardcoded char cap. Excludes: binary/media files (`_FULL_REPO_BINARY_EXTENSIONS`), vendored/minified
+  (`.min.js`, `.min.css`, named vendored assets), sensitive files (`.env`, `.pem`, `.key`, etc.),
+  oversized (>1MB), and directory prefixes `.cursor/`, `.github/`, `.vscode/`, `.idea/`, `assets/`,
+  `webview/`. Explicit omission count appended when files are skipped.
+- Runs AFTER triad review, BEFORE `git commit`. Also runs in `_repo_write_commit` (legacy path) as of v4.13.0.
 - Respects review enforcement setting (blocking/advisory).
 
 ### Deep self-review (deep_self_review.py)
@@ -749,7 +760,7 @@ errors surface via the same observability path.
 - **Model**: `openai/gpt-5.4-pro` via OpenRouter (primary), or `openai::gpt-5.4-pro` via direct OpenAI (fallback). If neither key is configured, the review tool returns an availability error.
 - **Review pack**: all git-tracked files (read from the git index via `dulwich` — pure Python, no subprocess) + a whitelist of core memory files (`identity.md`, `scratchpad.md`, `registry.md`, `WORLD.md`, `knowledge/index-full.md`, `knowledge/patterns.md`). Does NOT include dialogue history, task reflections, or other operational logs — these would consume too much context without adding architectural insight.
 - **macOS fork-safety**: when the Ouroboros app bundle uses `fork()` to spawn the inner `server.py` process, worker children inherit a multithreaded parent state. The first httpx HTTP request in a forked child triggers `SCDynamicStoreCopyProxiesWithOptions()` / `CFPreferences`, which is not fork-safe and causes a SIGSEGV (exit code -11, confirmed via `"crashed on child side of fork pre-exec"` in macOS crash reports). Fix: `run_deep_self_review` calls `llm.chat(..., no_proxy=True)`. In `LLMClient._chat_remote()` this builds a one-shot `httpx.Client(trust_env=False, mounts={})`, closed in a `finally` block, that bypasses all env-var and OS-level proxy lookup. `_normalize_remote_response` is called with `skip_cost_fetch=True` to also suppress the `_fetch_generation_cost()` `requests.get()` call (which would re-introduce `SCDynamicStore` access on the OpenRouter path). Cost is estimated from token counts instead. This fix is localised to deep self-review only; regular task LLM calls use the shared cached client as before.
-- **Excluded from pack**: sensitive files (`.env`, `.pem`, `.key`, etc.); vendored/minified third-party assets (`.min.js`, `.min.css`, bundled libraries such as `chart.umd.min.js`); binary and media files by extension (`_BINARY_EXTENSIONS`: `.png`, `.jpg`, `.ico`, `.svg`, `.gif`, `.webp`, fonts, compiled blobs) plus a content-based sniffer (`_is_probably_binary()`: NUL-byte presence or >30% non-printable bytes — catches unlisted extensions like `.wasm`, `.bin`, extensionless blobs); excluded directory prefixes (`_SKIP_DIR_PREFIXES`: `assets/` — README screenshots and app icons; `webview/` — legacy PyWebView JS helpers); and files > 1MB. All exclusions appear in the `## OMITTED FILES` section of the review pack. The rule: deep review is for agent logic and its own prompts/docs — not for libraries, images, or operational runtime logs.
+- **Excluded from pack**: sensitive files (`.env`, `.pem`, `.key`, etc.); vendored/minified third-party assets (`.min.js`, `.min.css`, bundled libraries such as `chart.umd.min.js`); binary and media files by extension (`_BINARY_EXTENSIONS`: `.png`, `.jpg`, `.ico`, `.svg`, `.gif`, `.webp`, fonts, compiled blobs) plus a content-based sniffer (`_is_probably_binary()`: NUL-byte presence OR >30% ASCII control-char ratio OR UTF-8 incremental decode failure — safe for Cyrillic/CJK, catches unlisted extensions like `.wasm`, `.bin`, extensionless blobs); excluded directory prefixes (`_SKIP_DIR_PREFIXES`: `assets/` — README screenshots and app icons; `webview/` — legacy PyWebView JS helpers); and files > 1MB. All exclusions appear in the `## OMITTED FILES` section of the review pack. The rule: deep review is for agent logic and its own prompts/docs — not for libraries, images, or operational runtime logs.
 - **No chunking, no silent truncation**. All excluded files are listed in an `## OMITTED FILES` section appended to the review pack — visible to the model and the operator. If the total pack exceeds ~900K tokens, an explicit error is returned.
 - **System prompt**: Constitution-first review mandate (BIBLE.md as absolute reference).
 - **Invariants**: reasoning effort `high`, max_tokens `100000`, no tools, 1 round, 60-minute hard timeout.

@@ -458,6 +458,36 @@ def _repo_write_commit(ctx: ToolContext, path: str, content: str,
                                    critical_findings=getattr(ctx, "_last_review_critical_findings", []))
             return review_err
 
+        # Scope review (blocking, fail-closed) — same as _repo_commit_push
+        try:
+            from ouroboros.tools.scope_review import run_scope_review
+            scope_result = run_scope_review(
+                ctx, commit_message, goal="", scope="",
+                review_rebuttal="",
+                review_history=getattr(ctx, '_review_history', []),
+            )
+            if scope_result.blocked:
+                run_cmd(["git", "reset", "HEAD"], cwd=ctx.repo_dir)
+                _record_commit_attempt(ctx, commit_message, "blocked",
+                                       block_reason="scope_blocked",
+                                       block_details=scope_result.block_message,
+                                       duration_sec=time.time() - _commit_start,
+                                       critical_findings=scope_result.critical_findings)
+                return scope_result.block_message
+        except ImportError:
+            log.debug("scope_review module not available — skipping scope gate")
+        except Exception as e:
+            run_cmd(["git", "reset", "HEAD"], cwd=ctx.repo_dir)
+            err_msg = (
+                f"⚠️ SCOPE_REVIEW_BLOCKED: Scope review failed with error — commit blocked.\n"
+                f"Error: {e}\n"
+                "Fix the issue and retry."
+            )
+            _record_commit_attempt(ctx, commit_message, "blocked",
+                                   block_reason="scope_blocked", block_details=err_msg,
+                                   duration_sec=time.time() - _commit_start)
+            return err_msg
+
         try:
             run_cmd(["git", "commit", "-m", commit_message], cwd=ctx.repo_dir)
         except Exception as e:

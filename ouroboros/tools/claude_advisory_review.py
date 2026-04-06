@@ -46,7 +46,7 @@ from ouroboros.utils import append_jsonl, utc_now_iso
 
 log = logging.getLogger(__name__)
 
-_MAX_DIFF_CHARS = 80_000        # Explicit omission note beyond this
+_MAX_DIFF_CHARS_ERROR = 500_000  # Fail loudly above this — split the commit
 
 # Shared review-artifact helpers (DEVELOPMENT.md item 2(f) compliance)
 from ouroboros.utils import (  # noqa: E402
@@ -65,45 +65,72 @@ def _load_doc(repo_dir: pathlib.Path, relpath: str, fallback: str = "") -> str:
     return fallback
 
 
-def _get_staged_diff(repo_dir: pathlib.Path) -> str:
-    """Return staged diff + unstaged diff of changed files.
+def _get_staged_diff(
+    repo_dir: pathlib.Path,
+    paths: list[str] | None = None,
+) -> str:
+    """Return staged diff + unstaged diff — full, no truncation.
 
-    If the combined diff exceeds _MAX_DIFF_CHARS, an explicit omission note
-    is appended (no silent truncation).
+    When ``paths`` is provided, only diffs for those specific paths are fetched,
+    so a large unrelated worktree change cannot trigger the 500K hard-fail or
+    bias the advisory review.
+
+    If the combined diff exceeds _MAX_DIFF_CHARS_ERROR (500K chars), returns an
+    explicit error message telling the agent to split the commit.
     """
     try:
-        staged = subprocess.run(
-            ["git", "diff", "--cached"],
-            cwd=str(repo_dir), capture_output=True, text=True, timeout=10,
-        ).stdout or ""
-        unstaged = subprocess.run(
-            ["git", "diff"],
-            cwd=str(repo_dir), capture_output=True, text=True, timeout=10,
-        ).stdout or ""
-        combined = (staged + unstaged).strip()
-        if len(combined) > _MAX_DIFF_CHARS:
-            total_len = len(combined)
-            combined = combined[:_MAX_DIFF_CHARS] + (
-                f"\n\n⚠️ OMISSION NOTE: diff truncated at {_MAX_DIFF_CHARS:,} of {total_len:,} chars. "
-                "Use Read/Grep tools to inspect the omitted portions if needed."
-            )
-        return combined or "(no unstaged/staged changes found)"
-    except Exception:
-        return "(failed to retrieve diff)"
-
-
-def _get_changed_file_list(repo_dir: pathlib.Path) -> str:
-    try:
-        result = subprocess.run(
-            ["git", "status", "--porcelain"],
+        path_args = (["--"] + list(paths)) if paths else []
+        staged_result = subprocess.run(
+            ["git", "diff", "--cached"] + path_args,
             cwd=str(repo_dir), capture_output=True, text=True, timeout=10,
         )
-        if result.returncode == 0:
-            lines = [l.strip() for l in result.stdout.splitlines() if l.strip()]
-            return "\n".join(lines) if lines else "(clean — no changed files)"
-        return "(git status failed)"
-    except Exception:
-        return "(git status error)"
+        if staged_result.returncode != 0:
+            err = (staged_result.stderr or "").strip()[:200]
+            return (
+                f"⚠️ ADVISORY_ERROR: git diff --cached exited {staged_result.returncode}: {err}"
+            )
+        unstaged_result = subprocess.run(
+            ["git", "diff"] + path_args,
+            cwd=str(repo_dir), capture_output=True, text=True, timeout=10,
+        )
+        if unstaged_result.returncode != 0:
+            err = (unstaged_result.stderr or "").strip()[:200]
+            return (
+                f"⚠️ ADVISORY_ERROR: git diff exited {unstaged_result.returncode}: {err}"
+            )
+        combined = ((staged_result.stdout or "") + (unstaged_result.stdout or "")).strip()
+        if len(combined) > _MAX_DIFF_CHARS_ERROR:
+            return (
+                f"⚠️ ADVISORY_ERROR: staged diff is too large ({len(combined):,} chars). "
+                "Split the commit into smaller pieces."
+            )
+        return combined or "(no unstaged/staged changes found)"
+    except Exception as exc:
+        return f"⚠️ ADVISORY_ERROR: failed to retrieve diff: {exc}"
+
+
+def _get_changed_file_list(
+    repo_dir: pathlib.Path,
+    paths: list[str] | None = None,
+) -> str:
+    """Return porcelain status, optionally scoped to ``paths``.
+
+    When ``paths`` is provided, only those paths are listed so the advisory
+    reviewer is not distracted by unrelated changed files.
+    """
+    try:
+        path_args = (["--"] + list(paths)) if paths else []
+        result = subprocess.run(
+            ["git", "status", "--porcelain"] + path_args,
+            cwd=str(repo_dir), capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode != 0:
+            err = (result.stderr or "").strip()[:200]
+            return f"⚠️ ADVISORY_ERROR: git status exited {result.returncode}: {err}"
+        lines = [l.strip() for l in result.stdout.splitlines() if l.strip()]
+        return "\n".join(lines) if lines else "(clean — no changed files)"
+    except Exception as exc:
+        return f"⚠️ ADVISORY_ERROR: git status error: {exc}"
 
 
 def _build_blocking_history_section(drive_root: pathlib.Path) -> str:
@@ -191,12 +218,19 @@ def _build_advisory_prompt(
     scope: str = "",
     paths: Optional[List[str]] = None,
     drive_root: Optional[pathlib.Path] = None,
+    diff: Optional[str] = None,
+    changed_files: Optional[str] = None,
 ) -> str:
     """Build the read-only advisory review prompt.
 
     Includes: BIBLE.md, CHECKLISTS.md, DEVELOPMENT.md, git status, staged diff,
     touched file pack, goal/scope sections, and blocking history.
     Does NOT include raw chat/task context.
+
+    ``diff`` and ``changed_files`` may be provided by the caller to avoid
+    double-fetching (and to ensure validation already ran before prompt build).
+    If absent, they are fetched lazily here — callers that pre-validate should
+    always pass them in.
     """
     bible = _load_doc(repo_dir, "BIBLE.md", "(BIBLE.md not found)")
     try:
@@ -204,8 +238,10 @@ def _build_advisory_prompt(
     except Exception:
         checklists = _load_doc(repo_dir, "docs/CHECKLISTS.md", "(CHECKLISTS.md not found)")
     dev_guide = _load_doc(repo_dir, "docs/DEVELOPMENT.md", "(DEVELOPMENT.md not found)")
-    diff = _get_staged_diff(repo_dir)
-    changed_files = _get_changed_file_list(repo_dir)
+    if diff is None:
+        diff = _get_staged_diff(repo_dir, paths=paths)
+    if changed_files is None:
+        changed_files = _get_changed_file_list(repo_dir, paths=paths)
 
     touched_pack, _omitted = build_touched_file_pack(repo_dir, paths)
     goal_section = build_goal_section(goal, scope, commit_message)
@@ -329,7 +365,42 @@ def _run_claude_advisory(
     if not api_key:
         return [], "⚠️ ADVISORY_ERROR: ANTHROPIC_API_KEY not set."
 
-    prompt = _build_advisory_prompt(repo_dir, commit_message, goal=goal, scope=scope, paths=paths, drive_root=drive_root)
+    # Fetch diff and changed-file list exactly once, validate, then pass into prompt builder.
+    # This prevents any second git call inside _build_advisory_prompt / build_touched_file_pack:
+    # we parse the file list from the already-validated changed_files_text and pass resolved
+    # paths= so build_touched_file_pack skips its own git-status call.
+    diff_text = _get_staged_diff(repo_dir, paths=paths)
+    if diff_text.startswith("⚠️ ADVISORY_ERROR:"):
+        return [], diff_text
+
+    changed_files_text = _get_changed_file_list(repo_dir, paths=paths)
+    if changed_files_text.startswith("⚠️ ADVISORY_ERROR:"):
+        return [], changed_files_text
+
+    # Parse touched paths from porcelain output to avoid a second git-status call inside
+    # build_touched_file_pack.  Lines are "XY filename" or "(clean — no changed files)".
+    # Use an explicit list (even empty) so build_touched_file_pack never re-runs git status.
+    resolved_paths: list[str] = list(paths) if paths is not None else []
+    if not paths and not changed_files_text.startswith("(clean"):
+        resolved_paths = []
+        for line in changed_files_text.splitlines():
+            if len(line) >= 4:
+                entry = line[3:]
+                if " -> " in entry:
+                    entry = entry.split(" -> ", 1)[1]
+                resolved_paths.append(entry.strip())
+
+    try:
+        prompt = _build_advisory_prompt(
+            repo_dir, commit_message, goal=goal, scope=scope, paths=resolved_paths,
+            drive_root=drive_root, diff=diff_text, changed_files=changed_files_text,
+        )
+    except RuntimeError as exc:
+        # build_advisory_prompt calls build_touched_file_pack which runs git status
+        # and can raise RuntimeError on failure. Convert to structured error sentinel.
+        return [], f"⚠️ ADVISORY_ERROR: failed to build advisory prompt: {exc}"
+    except Exception as exc:
+        return [], f"⚠️ ADVISORY_ERROR: unexpected error building prompt: {exc}"
 
     try:
         from ouroboros.gateways.claude_code import run_readonly
@@ -628,7 +699,21 @@ def _handle_advisory_pre_review(
 
     # Run the advisory review
     ctx.emit_progress_fn("Running advisory pre-review (Claude Code, read-only)...")
-    changed_files = _get_changed_file_list(repo_dir)
+    changed_files = _get_changed_file_list(repo_dir, paths=paths)
+
+    # Fail closed if git status itself is broken — proceeding with a broken file list
+    # would let advisory review proceed on incomplete context.
+    if changed_files.startswith("⚠️ ADVISORY_ERROR"):
+        return json.dumps({
+            "status": "error",
+            "snapshot_hash": snapshot_hash,
+            "error": changed_files,
+            "message": (
+                "Advisory review aborted: could not retrieve changed file list. "
+                "Fix the error and retry, or use skip_advisory_pre_review=True to bypass (will be audited)."
+            ),
+        }, ensure_ascii=False, indent=2)
+
     items, raw_result = _run_claude_advisory(repo_dir, commit_message, ctx, goal=goal, scope=scope, paths=paths, drive_root=drive_root)
 
     # Handle errors from the CLI

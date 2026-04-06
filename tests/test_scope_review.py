@@ -127,7 +127,8 @@ class TestTouchedFilePack:
         assert "```" not in pack or "image.png" not in pack.split("```")[1] if "```" in pack else True
 
     def test_omits_large_files(self, tmp_path):
-        (tmp_path / "huge.py").write_text("x" * 200_000, encoding="utf-8")
+        # _FILE_SIZE_LIMIT is now 1MB; write a file slightly above that threshold
+        (tmp_path / "huge.py").write_bytes(b"x" * (1_048_576 + 1))
         mod = _get_module("ouroboros.tools.review_helpers")
         pack, omitted = mod.build_touched_file_pack(tmp_path, ["huge.py"])
         assert "huge.py" in omitted
@@ -356,10 +357,11 @@ class TestScopeReviewModule:
         source = inspect.getsource(mod._build_scope_prompt)
         assert "Intent / Scope Review Checklist" in source
 
-    def test_scope_prompt_includes_broader_repo_pack(self):
+    def test_scope_prompt_includes_full_repo_pack(self):
+        # scope_review now uses build_full_repo_pack (DRY, no char cap)
         mod = _get_module("ouroboros.tools.scope_review")
         source = inspect.getsource(mod._build_scope_prompt)
-        assert "build_broader_repo_pack" in source
+        assert "build_full_repo_pack" in source
 
 
 # ---------------------------------------------------------------------------
@@ -753,3 +755,4 @@ class TestAdvisorySchemaEnriched:
         adv = _get_module("ouroboros.tools.claude_advisory_review")
         source = inspect.getsource(adv._handle_advisory_pre_review)
         assert "raw_result[:4000]" not in source
+
