@@ -125,6 +125,8 @@ EXPECTED_TOOLS = [
     "enable_tools",
     # Advisory pre-review gate
     "advisory_pre_review", "review_status",
+    # CI
+    "run_ci_tests",
 ]
 
 

@@ -1,4 +1,4 @@
-# Ouroboros v4.12.0 — Architecture & Reference
+# Ouroboros v4.13.0 — Architecture & Reference
 
 This document describes every component, page, button, API endpoint, and data flow.
 It is the single source of truth for how the system works. Keep it updated.
@@ -62,6 +62,7 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on localhost:8765
       ├── gateways/            ← External API adapters (thin transport, no business logic)
       │   └── claude_code.py   ← Claude Agent SDK gateway (edit + read-only paths)
       ├── tools/               ← Auto-discovered tool plugins
+      │   ├── ci.py              ← CI trigger and monitoring (GitHub Actions API)
       │   ├── review_helpers.py  ← Shared review helpers (section loader, file packs, intent)
       │   └── scope_review.py   ← Blocking scope reviewer (opus, fail-closed)
       └── platform_layer.py    ← Cross-platform process/path/locking helpers
@@ -726,6 +727,24 @@ errors surface via the same observability path.
 - **Output**: full report to chat + saved to `memory/deep_review.md`.
 - **Queue semantics**: `request_deep_self_review` tool → `deep_self_review_request` event → `queue_deep_self_review_task` → supervisor assigns to worker → `handle_task` branches on `task_type == "deep_self_review"`.
 - **Slash command**: `/review` triggers a deep self-review.
+
+### CI trigger tool (tools/ci.py)
+
+- **`run_ci_tests`**: push current branch to GitHub and trigger the full CI matrix
+  (Ubuntu + Windows + macOS) via `workflow_dispatch`.
+- Uses **GitHub REST API** directly (`urllib.request`) — no `gh` CLI dependency.
+- **Parameters**: `wait` (bool, default true — poll for results), `timeout_minutes` (1-30, default 15).
+- **Requires**: `GITHUB_TOKEN` + `GITHUB_REPO` configured in Settings → Integrations.
+- **Non-core tool**: available via `enable_tools("run_ci_tests")`, not loaded by default.
+- **Workflow**: push branch → find `ci.yml` workflow ID → trigger `workflow_dispatch` →
+  poll every 30s → return pass/fail with per-OS failure details and log tails.
+- **Failure reporting**: on CI failure, fetches failed job list, identifies which OS failed,
+  downloads job logs (last 5000 chars), and returns structured output.
+- **Progress emission**: emits progress events to UI during push, trigger, and polling phases.
+- **Use case**: agent triggers CI after platform-sensitive changes (process management,
+  file locking, subprocess flags, new tool with native dependencies) to verify cross-platform
+  compatibility before releasing. Not intended for every commit — agent decides when to run
+  based on change characteristics.
 
 ---
 
