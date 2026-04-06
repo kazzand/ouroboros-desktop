@@ -1,9 +1,9 @@
 """Git tools: repo_write, repo_write_commit, repo_commit, git_status, git_diff,
 pull_from_remote, restore_to_head, revert_commit.
 
-Includes unified pre-commit review per Bible P8: three models review the staged
-diff in parallel using a structured JSON checklist. Review always runs before
-commit; enforcement is configurable between blocking and advisory.
+Pre-commit review pipeline (Bible P8): advisory pre-review runs first, then
+triad diff review and scope review execute concurrently via parallel_review.py.
+All review stages run before commit; enforcement is configurable.
 """
 
 from __future__ import annotations
@@ -22,6 +22,7 @@ from ouroboros.tools.commit_gate import (
     _record_commit_attempt, _invalidate_advisory, _check_advisory_freshness,
 )
 from ouroboros.utils import utc_now_iso, write_text, safe_relpath, run_cmd
+from ouroboros.tools.parallel_review import run_parallel_review as _run_parallel_review, aggregate_review_verdict as _aggregate_review_verdict
 _CONTENT_OMITTED_PREFIX = "<<CONTENT_OMITTED"
 log = logging.getLogger(__name__)
 
@@ -185,7 +186,7 @@ def _git_commit_with_tests(ctx: ToolContext) -> Optional[str]:
     return None
 
 
-# Unified pre-commit review lives in review.py.
+# Triad review helpers (used by parallel_review.py and legacy paths).
 from ouroboros.tools.review import (  # noqa: F401
     _run_unified_review,
     _load_checklist_section,
@@ -448,45 +449,22 @@ def _repo_write_commit(ctx: ToolContext, path: str, content: str,
                 except Exception:
                     pass
 
-        review_err = _run_unified_review(ctx, commit_message)
-        if review_err:
-            run_cmd(["git", "reset", "HEAD"], cwd=ctx.repo_dir)
-            block_reason = getattr(ctx, "_last_review_block_reason", "critical_findings")
+        review_err, scope_result, triad_block_reason, triad_advisory = _run_parallel_review(ctx, commit_message)
+        blocked, combined_msg, block_reason, _combined_findings, _scope_advisory = _aggregate_review_verdict(
+            review_err, scope_result, triad_block_reason, triad_advisory, ctx, commit_message,
+            _commit_start, ctx.repo_dir,
+        )
+        # Surface scope advisory findings on both blocked and non-blocked paths (contract from parallel_review.py)
+        if _scope_advisory:
+            _adv_list = getattr(ctx, '_review_advisory', None)
+            if isinstance(_adv_list, list):
+                _adv_list.extend(_scope_advisory)
+        if blocked:
             _record_commit_attempt(ctx, commit_message, "blocked",
-                                   block_reason=block_reason, block_details=review_err,
+                                   block_reason=block_reason, block_details=combined_msg,
                                    duration_sec=time.time() - _commit_start,
-                                   critical_findings=getattr(ctx, "_last_review_critical_findings", []))
-            return review_err
-
-        # Scope review (blocking, fail-closed) — same as _repo_commit_push
-        try:
-            from ouroboros.tools.scope_review import run_scope_review
-            scope_result = run_scope_review(
-                ctx, commit_message, goal="", scope="",
-                review_rebuttal="",
-                review_history=getattr(ctx, '_review_history', []),
-            )
-            if scope_result.blocked:
-                run_cmd(["git", "reset", "HEAD"], cwd=ctx.repo_dir)
-                _record_commit_attempt(ctx, commit_message, "blocked",
-                                       block_reason="scope_blocked",
-                                       block_details=scope_result.block_message,
-                                       duration_sec=time.time() - _commit_start,
-                                       critical_findings=scope_result.critical_findings)
-                return scope_result.block_message
-        except ImportError:
-            log.debug("scope_review module not available — skipping scope gate")
-        except Exception as e:
-            run_cmd(["git", "reset", "HEAD"], cwd=ctx.repo_dir)
-            err_msg = (
-                f"⚠️ SCOPE_REVIEW_BLOCKED: Scope review failed with error — commit blocked.\n"
-                f"Error: {e}\n"
-                "Fix the issue and retry."
-            )
-            _record_commit_attempt(ctx, commit_message, "blocked",
-                                   block_reason="scope_blocked", block_details=err_msg,
-                                   duration_sec=time.time() - _commit_start)
-            return err_msg
+                                   critical_findings=_combined_findings)
+            return combined_msg
 
         try:
             run_cmd(["git", "commit", "-m", commit_message], cwd=ctx.repo_dir)
@@ -498,6 +476,7 @@ def _repo_write_commit(ctx: ToolContext, path: str, content: str,
             return err_msg
         _record_commit_attempt(ctx, commit_message, "succeeded",
                                duration_sec=time.time() - _commit_start)
+        ctx._scope_review_history = {}  # Clear on success — next commit starts fresh
         _post_commit_result(ctx, commit_message, skip_tests, test_warning_ref)
         tag_info = _auto_tag_on_version_bump(ctx.repo_dir, commit_message)
     finally:
@@ -572,48 +551,23 @@ def _repo_commit_push(ctx: ToolContext, commit_message: str,
                                    duration_sec=time.time() - _commit_start)
             return advisory_err
 
-        review_err = _run_unified_review(ctx, commit_message, review_rebuttal=review_rebuttal,
-                                          goal=goal, scope=scope)
-        if review_err:
-            run_cmd(["git", "reset", "HEAD"], cwd=ctx.repo_dir)
-            block_reason = getattr(ctx, "_last_review_block_reason", "critical_findings")
+        review_err, scope_result, triad_block_reason, triad_advisory = _run_parallel_review(
+            ctx, commit_message, goal=goal, scope=scope, review_rebuttal=review_rebuttal)
+        blocked, combined_msg, block_reason, _combined_findings, _scope_advisory = _aggregate_review_verdict(
+            review_err, scope_result, triad_block_reason, triad_advisory, ctx, commit_message,
+            _commit_start, ctx.repo_dir,
+        )
+        # Surface scope advisory findings on both blocked and non-blocked paths (contract from parallel_review.py)
+        if _scope_advisory:
+            _adv_list = getattr(ctx, '_review_advisory', None)
+            if isinstance(_adv_list, list):
+                _adv_list.extend(_scope_advisory)
+        if blocked:
             _record_commit_attempt(ctx, commit_message, "blocked",
-                                   block_reason=block_reason, block_details=review_err,
+                                   block_reason=block_reason, block_details=combined_msg,
                                    duration_sec=time.time() - _commit_start,
-                                   critical_findings=getattr(ctx, "_last_review_critical_findings", []))
-            return review_err
-
-        # Scope review (blocking, fail-closed) — runs AFTER triad review
-        try:
-            from ouroboros.tools.scope_review import run_scope_review
-            scope_result = run_scope_review(
-                ctx, commit_message, goal=goal, scope=scope,
-                review_rebuttal=review_rebuttal,
-                review_history=getattr(ctx, '_review_history', []),
-            )
-            if scope_result.blocked:
-                run_cmd(["git", "reset", "HEAD"], cwd=ctx.repo_dir)
-                # Use structured findings directly — no string parsing needed.
-                _record_commit_attempt(ctx, commit_message, "blocked",
-                                       block_reason="scope_blocked",
-                                       block_details=scope_result.block_message,
-                                       duration_sec=time.time() - _commit_start,
-                                       critical_findings=scope_result.critical_findings)
-                return scope_result.block_message
-        except ImportError:
-            log.debug("scope_review module not available — skipping scope gate")
-        except Exception as e:
-            # Scope review is fail-closed: any error blocks
-            run_cmd(["git", "reset", "HEAD"], cwd=ctx.repo_dir)
-            err_msg = (
-                f"⚠️ SCOPE_REVIEW_BLOCKED: Scope review failed with error — commit blocked.\n"
-                f"Error: {e}\n"
-                "Fix the issue and retry."
-            )
-            _record_commit_attempt(ctx, commit_message, "blocked",
-                                   block_reason="scope_blocked", block_details=err_msg,
-                                   duration_sec=time.time() - _commit_start)
-            return err_msg
+                                   critical_findings=_combined_findings)
+            return combined_msg
 
         try:
             run_cmd(["git", "commit", "-m", commit_message], cwd=ctx.repo_dir)
@@ -625,6 +579,7 @@ def _repo_commit_push(ctx: ToolContext, commit_message: str,
             return err_msg
         _record_commit_attempt(ctx, commit_message, "succeeded",
                                duration_sec=time.time() - _commit_start)
+        ctx._scope_review_history = {}  # Clear on success — next commit starts fresh
         _post_commit_result(ctx, commit_message, skip_tests, test_warning_ref)
         tag_info = _auto_tag_on_version_bump(ctx.repo_dir, commit_message)
     finally:

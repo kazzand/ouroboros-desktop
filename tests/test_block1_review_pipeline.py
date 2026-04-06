@@ -249,16 +249,20 @@ class TestRepoWriteCommitScopeReview:
     """_repo_write_commit must run scope review (same pipeline as _repo_commit_push)."""
 
     def test_repo_write_commit_calls_scope_review(self):
-        """Source inspection: _repo_write_commit must contain run_scope_review call."""
+        """Source inspection: _repo_write_commit must call _run_parallel_review which runs scope review."""
         mod = _get_module("ouroboros.tools.git")
         source = inspect.getsource(mod._repo_write_commit)
-        assert "run_scope_review" in source
+        assert "_run_parallel_review" in source
+        parallel_source = inspect.getsource(mod._run_parallel_review)
+        assert "run_scope_review" in parallel_source
 
     def test_scope_review_import_in_repo_write_commit(self):
-        """The scope review import inside _repo_write_commit must reference scope_review module."""
+        """The scope review must be reachable from _repo_write_commit via _run_parallel_review."""
         mod = _get_module("ouroboros.tools.git")
         source = inspect.getsource(mod._repo_write_commit)
-        assert "scope_review" in source
+        assert "_run_parallel_review" in source
+        parallel_source = inspect.getsource(mod._run_parallel_review)
+        assert "scope_review" in parallel_source
 
 
 class TestHeadSnapshotBinaryGuard:

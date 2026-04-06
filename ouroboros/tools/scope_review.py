@@ -1,6 +1,6 @@
 """Blocking scope reviewer for Ouroboros commit pipeline.
 
-Runs AFTER the triad diff review. Single-model (configurable via OUROBOROS_SCOPE_REVIEW_MODEL,
+Runs IN PARALLEL with the triad diff review. Single-model (configurable via OUROBOROS_SCOPE_REVIEW_MODEL,
 fail-closed: timeout, parse error, API failure, or incomplete context all block.
 
 Role: completeness, forgotten touchpoints, cross-surface consistency,
@@ -178,6 +178,7 @@ def _build_scope_prompt(
     scope: str = "",
     review_rebuttal: str = "",
     review_history: Optional[list] = None,
+    scope_review_history: Optional[list] = None,
 ) -> tuple:
     """Build the scope review prompt with full context packs.
 
@@ -204,6 +205,21 @@ def _build_scope_prompt(
         )
 
     history_section = _build_review_history_section(review_history or [])
+
+    # Prior scope review rounds for this commit (helps scope reviewer remember its own findings)
+    scope_history_section = ""
+    if scope_review_history:
+        rounds = []
+        for i, entry in enumerate(scope_review_history, 1):
+            blocked = "BLOCKED" if entry.get("blocked") else "PASSED"
+            summary = entry.get("summary") or "(no summary)"
+            rounds.append(f"Round {i}: {blocked}\n{summary}")
+        scope_history_section = (
+            "\n## Prior scope review rounds (your previous findings for this commit)\n\n"
+            + "\n\n---\n".join(rounds)
+            + "\n\nAddress any previously raised issues. If the same issue persists, "
+            "mark it FAIL again with a reference to the prior round.\n"
+        )
 
     # Get diff and changed files
     try:
@@ -287,7 +303,7 @@ Severity rules:
 
 {dev_guide}
 
-{rebuttal_section}{history_section}
+{rebuttal_section}{history_section}{scope_history_section}
 
 ## Pre-change snapshots (HEAD versions — before this diff)
 
@@ -367,6 +383,7 @@ def run_scope_review(
     scope: str = "",
     review_rebuttal: str = "",
     review_history: Optional[list] = None,
+    scope_review_history: Optional[list] = None,  # prior scope rounds for this commit
 ) -> ScopeReviewResult:
     """Run the blocking scope review. Returns a ScopeReviewResult.
 
@@ -383,6 +400,7 @@ def run_scope_review(
             goal=goal, scope=scope,
             review_rebuttal=review_rebuttal,
             review_history=review_history,
+            scope_review_history=scope_review_history,
         )
     except RuntimeError as exc:
         return ScopeReviewResult(
@@ -532,15 +550,11 @@ def run_scope_review(
                 critical_findings=critical_findings,
                 advisory_findings=advisory_findings,
             )
-        # Advisory mode: surface but don't block
-        for f in critical_findings:
-            ctx._review_advisory.append(f"SCOPE CRITICAL (advisory mode): [scope:{f['item']}] {f['reason']}")
-        for f in advisory_findings:
-            ctx._review_advisory.append(f"SCOPE WARN: [scope:{f['item']}] {f['reason']}")
-    else:
-        for f in advisory_findings:
-            ctx._review_advisory.append(f"SCOPE WARN: [scope:{f['item']}] {f['reason']}")
+        # Advisory mode: don't block — findings returned in ScopeReviewResult only
+        # (do NOT mutate ctx._review_advisory here; parallel_review.py aggregates
+        #  scope findings on the main thread after both futures complete to avoid races)
 
+    # Advisory findings returned in ScopeReviewResult; no ctx mutation from this thread
     return ScopeReviewResult(
         blocked=False,
         critical_findings=critical_findings,

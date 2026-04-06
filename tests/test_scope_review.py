@@ -463,20 +463,184 @@ class TestGitWiring:
         assert "scope" in sig.parameters
 
     def test_scope_review_wired_in_commit(self):
-        """_repo_commit_push must call scope review after triad review."""
+        """_repo_commit_push must call _run_parallel_review which runs scope review."""
         git = _get_module("ouroboros.tools.git")
         source = inspect.getsource(git._repo_commit_push)
-        assert "run_scope_review" in source
-        # Scope review must come after triad review
-        triad_pos = source.find("_run_unified_review")
-        scope_pos = source.find("run_scope_review")
-        assert triad_pos < scope_pos
+        assert "_run_parallel_review" in source
+        # The parallel helper must contain both triad and scope review
+        parallel_source = inspect.getsource(git._run_parallel_review)
+        assert "run_scope_review" in parallel_source
+        assert "_run_unified_review" in parallel_source
+        # ThreadPoolExecutor must be used for parallel execution
+        assert "ThreadPoolExecutor" in parallel_source
 
     def test_repo_write_commit_not_bypass_scope(self):
-        """Legacy _repo_write_commit uses advisory gate; scope review is in the unified path."""
+        """Legacy _repo_write_commit also calls _run_parallel_review (parallel)."""
         git = _get_module("ouroboros.tools.git")
         source = inspect.getsource(git._repo_write_commit)
         assert "_check_advisory_freshness" in source
+        # Scope review must be wired in legacy path too via _run_parallel_review
+        assert "_run_parallel_review" in source
+        parallel_source = inspect.getsource(git._run_parallel_review)
+        assert "run_scope_review" in parallel_source
+        assert "ThreadPoolExecutor" in parallel_source
+
+    def test_parallel_execution_both_always_run(self):
+        """Both triad and scope futures are always submitted regardless of each other's result."""
+        git = _get_module("ouroboros.tools.git")
+        source = inspect.getsource(git._run_parallel_review)
+        # Both submissions must be present before any result() call
+        submit_triad = source.find("_run_triad")
+        submit_scope = source.find("_run_scope")
+        result_triad = source.find("triad_fut.result()")
+        result_scope = source.find("scope_fut.result()")
+        # Both must be submitted, and submissions must precede result() calls
+        assert submit_triad > 0
+        assert submit_scope > 0
+        assert result_triad > 0
+        assert result_scope > 0
+        # Both submitted before any result() is collected
+        assert submit_triad < result_triad
+        assert submit_scope < result_scope
+
+    def test_aggregated_verdict_both_blockers_shown(self):
+        """When both triad and scope block, both messages must appear in combined output."""
+        import types
+        import unittest.mock as mock
+        scope_mod = _get_module("ouroboros.tools.scope_review")
+        pr_mod = _get_module("ouroboros.tools.parallel_review")
+
+        triad_error = "⚠️ REVIEW_BLOCKED: triad finding"
+        scope_blocked = scope_mod.ScopeReviewResult(
+            blocked=True,
+            block_message="⚠️ SCOPE_REVIEW_BLOCKED: scope finding",
+            critical_findings=[{"verdict": "FAIL", "item": "intent_alignment",
+                                "severity": "critical", "reason": "scope blocked", "model": "test"}],
+        )
+        ctx = types.SimpleNamespace(
+            repo_dir=None, _last_review_critical_findings=[], _review_advisory=[])
+        with mock.patch.object(pr_mod, "run_cmd", return_value=""):
+            blocked, combined_msg, block_reason, findings, scope_adv = pr_mod.aggregate_review_verdict(
+                triad_error, scope_blocked, "critical_findings", [], ctx,
+                "test commit", 0.0, ctx.repo_dir)
+        assert blocked
+        assert "triad finding" in combined_msg
+        assert "scope finding" in combined_msg
+        assert "Both triad review AND scope review" in combined_msg
+        assert len(findings) == 1
+
+    def test_triad_advisory_included_when_scope_blocks(self):
+        """When triad passes but has advisory findings and scope blocks, all findings appear."""
+        import types
+        import unittest.mock as mock
+        scope_mod = _get_module("ouroboros.tools.scope_review")
+        pr_mod = _get_module("ouroboros.tools.parallel_review")
+
+        scope_blocked = scope_mod.ScopeReviewResult(
+            blocked=True,
+            block_message="⚠️ SCOPE_REVIEW_BLOCKED: scope critical finding",
+            critical_findings=[{"verdict": "FAIL", "item": "intent_alignment",
+                                "severity": "critical", "reason": "scope blocked", "model": "test"}],
+        )
+        triad_advisory = [{"item": "context_building", "reason": "advisory note"}]
+        ctx = types.SimpleNamespace(
+            repo_dir=None, _last_review_critical_findings=[], _review_advisory=[])
+        with mock.patch.object(pr_mod, "run_cmd", return_value=""):
+            blocked, combined_msg, block_reason, findings, scope_adv = pr_mod.aggregate_review_verdict(
+                None, scope_blocked, "scope_blocked", triad_advisory, ctx,
+                "test commit", 0.0, ctx.repo_dir)
+        assert blocked
+        assert "scope critical finding" in combined_msg
+        assert "advisory note" in combined_msg
+        assert len(findings) == 1
+
+    def test_advisory_mode_scope_criticals_not_in_blocking_findings(self):
+        """Advisory-mode scope critical findings must NOT be added to _combined_findings."""
+        import types
+        import unittest.mock as mock
+        scope_mod = _get_module("ouroboros.tools.scope_review")
+        pr_mod = _get_module("ouroboros.tools.parallel_review")
+
+        # Triad blocks; scope does NOT block but has critical findings (advisory enforcement)
+        triad_error = "⚠️ REVIEW_BLOCKED: triad issue"
+        scope_advisory_crit = scope_mod.ScopeReviewResult(
+            blocked=False,  # advisory mode — not blocked
+            block_message="",
+            critical_findings=[{"verdict": "FAIL", "item": "intent_alignment",
+                                "severity": "critical", "reason": "advisory-only scope note", "model": "test"}],
+            advisory_findings=[],
+        )
+        ctx = types.SimpleNamespace(
+            repo_dir=None, _last_review_critical_findings=[], _review_advisory=[])
+        with mock.patch.object(pr_mod, "run_cmd", return_value=""):
+            blocked, combined_msg, block_reason, findings, scope_adv = pr_mod.aggregate_review_verdict(
+                triad_error, scope_advisory_crit, "critical_findings", [], ctx,
+                "test commit", 0.0, ctx.repo_dir)
+        assert blocked
+        # Advisory-mode scope criticals must NOT appear in durable blocking findings
+        assert all(f.get("item") != "intent_alignment" for f in findings), \
+            "Advisory-mode scope criticals must not be recorded as blocking findings"
+        # But should appear in scope_advisory_items for visibility
+        assert any("intent_alignment" in item for item in scope_adv)
+
+    def test_scope_advisory_visible_on_successful_commit(self):
+        """Non-blocking scope advisory findings must be returned even when commit is not blocked."""
+        import types
+        import unittest.mock as mock
+        scope_mod = _get_module("ouroboros.tools.scope_review")
+        pr_mod = _get_module("ouroboros.tools.parallel_review")
+
+        # Scope passes (not blocked) but has advisory findings
+        scope_advisory = scope_mod.ScopeReviewResult(
+            blocked=False,
+            block_message="",
+            critical_findings=[],
+            advisory_findings=[{"verdict": "PASS", "item": "architecture_fit",
+                                "severity": "advisory", "reason": "minor concern", "model": "test"}],
+        )
+        ctx = types.SimpleNamespace(
+            repo_dir=None, _last_review_critical_findings=[], _review_advisory=[])
+        with mock.patch.object(pr_mod, "run_cmd", return_value=""):
+            blocked, combined_msg, block_reason, findings, scope_adv = pr_mod.aggregate_review_verdict(
+                None, scope_advisory, "", [], ctx, "test commit", 0.0, ctx.repo_dir)
+        # Should NOT block
+        assert not blocked
+        assert combined_msg is None
+        # But scope advisory items must be returned for caller to surface
+        assert len(scope_adv) > 0
+        assert any("architecture_fit" in item for item in scope_adv)
+
+    def test_triad_crash_resets_stale_findings(self):
+        """If triad crashes, stale ctx findings from prior attempt must not bleed into current run."""
+        import types
+        import unittest.mock as mock
+        pr_mod = _get_module("ouroboros.tools.parallel_review")
+
+        # Seed stale fields from a previous attempt
+        ctx = types.SimpleNamespace(
+            repo_dir=None,
+            _last_review_block_reason="critical_findings",
+            _last_review_critical_findings=[
+                {"verdict": "FAIL", "item": "secrets_check", "severity": "critical",
+                 "reason": "stale from prior run", "model": "old-model"}
+            ],
+            _review_advisory=[],
+            _review_history=[],
+            _scope_review_history={},
+        )
+        with mock.patch.object(pr_mod, "run_cmd", return_value=""):
+            with mock.patch("ouroboros.tools.review._run_unified_review",
+                            side_effect=RuntimeError("triad crashed")):
+                with mock.patch("ouroboros.tools.scope_review.run_scope_review") as mock_scope:
+                    from ouroboros.tools.scope_review import ScopeReviewResult
+                    mock_scope.return_value = ScopeReviewResult(blocked=False)
+                    review_err, scope_result, triad_block_reason, _ = pr_mod.run_parallel_review(
+                        ctx, "test commit")
+        # Triad crash must yield infra_failure reason, not the stale critical_findings
+        assert triad_block_reason == "infra_failure"
+        # Stale findings must be cleared — no bleed-through to aggregate
+        assert ctx._last_review_critical_findings == []
+        assert "crashed" in review_err
 
     def test_advisory_freshness_path_aware(self):
         """_check_advisory_freshness must accept paths parameter."""

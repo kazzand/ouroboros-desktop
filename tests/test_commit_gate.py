@@ -335,16 +335,19 @@ def test_advisory_freshness_check_exists_in_git():
 
 
 def test_advisory_gate_in_repo_commit_push():
-    """_repo_commit_push must call _check_advisory_freshness before unified review."""
+    """_repo_commit_push must call _check_advisory_freshness before _run_parallel_review."""
     git_mod = _get_git_module()
     source = inspect.getsource(git_mod._repo_commit_push)
     assert "_check_advisory_freshness" in source
-    # Advisory gate must come before unified review
+    # Advisory gate must come before parallel review (which contains unified review)
     advisory_pos = source.find("_check_advisory_freshness")
-    review_pos = source.find("_run_unified_review")
+    review_pos = source.find("_run_parallel_review")
     assert advisory_pos != -1, "_check_advisory_freshness not found in _repo_commit_push"
-    assert review_pos != -1, "_run_unified_review not found in _repo_commit_push"
-    assert advisory_pos < review_pos, "Advisory gate must precede unified review"
+    assert review_pos != -1, "_run_parallel_review not found in _repo_commit_push"
+    assert advisory_pos < review_pos, "Advisory gate must precede parallel review"
+    # Verify _run_parallel_review contains _run_unified_review
+    parallel_source = inspect.getsource(git_mod._run_parallel_review)
+    assert "_run_unified_review" in parallel_source
 
 
 def test_advisory_gate_in_repo_write_commit():

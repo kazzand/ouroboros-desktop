@@ -1,4 +1,4 @@
-# Ouroboros v4.13.0 — Architecture & Reference
+# Ouroboros v4.14.0 — Architecture & Reference
 
 This document describes every component, page, button, API endpoint, and data flow.
 It is the single source of truth for how the system works. Keep it updated.
@@ -70,6 +70,7 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on localhost:8765
       │   └── claude_code.py   ← Claude Agent SDK gateway (edit + read-only paths)
       ├── tools/               ← Auto-discovered tool plugins
       │   ├── commit_gate.py     ← Advisory freshness gate and commit-attempt recording (extracted from git.py)
+      │   ├── parallel_review.py ← Parallel triad+scope orchestration and verdict aggregation (extracted from git.py)
       │   ├── review_helpers.py  ← Shared review helpers (section loader, file packs, intent)
       │   └── scope_review.py   ← Blocking scope reviewer (opus, fail-closed)
       └── compat.py            ← Cross-platform process/path/locking helpers
@@ -640,13 +641,12 @@ the constitutional guard is that the file itself must remain non-deletable.
 - `build_health_invariants()` is split into focused helpers and now also surfaces recent provider/routing errors plus local context overflows.
 - Local-model path no longer silently slices the live system prompt. It compacts non-core sections explicitly and raises an overflow error if core context still cannot fit.
 
-### Review stack (advisory → triad → scope → commit)
+### Review stack (advisory → triad + scope in parallel → commit)
 
-The commit pipeline runs three review stages before creating a git commit:
+The commit pipeline runs review stages before creating a git commit:
 
-1. **Advisory pre-review** (`tools/claude_advisory_review.py` + `review_state.py`)
-2. **Triad diff review** (`tools/review.py`)
-3. **Blocking scope review** (`tools/scope_review.py`)
+1. **Advisory pre-review** (`tools/claude_advisory_review.py` + `review_state.py`) — runs first, sequentially.
+2. **Triad diff review** (`tools/review.py`) + **Blocking scope review** (`tools/scope_review.py`) — run **concurrently** via `ThreadPoolExecutor` (orchestrated in `tools/parallel_review.py`). Both execute on the same staged snapshot. The agent receives all findings (triad + scope) in a single blocking round.
 
 Shared helpers live in `tools/review_helpers.py`: checklist section loader,
 touched-file pack builder (`build_touched_file_pack`, 1MB file limit; sensitive files omitted case-insensitively before any read), full repo pack builder
@@ -716,6 +716,19 @@ errors surface via the same observability path.
 - **No-truncation for results**: advisory run results stored in full (no `[:4000]` clipping).
   Diff >500K chars hard-fails before SDK call (returns `status="error"` immediately); diffs under 500K are passed in full without truncation.
 
+#### Parallel triad + scope execution (v4.14.0)
+
+- Triad review and scope review now run **concurrently** inside a `ThreadPoolExecutor(max_workers=2)`.
+  Both launch on the same staged snapshot (git lock held). Wall-clock time is `max(triad_time, scope_time)`.
+- Scope review now always runs — even when triad finds critical issues. The agent receives ALL findings
+  (triad + scope) in a single blocking round instead of only seeing triad findings on first block.
+- Results are aggregated: if both block, the combined message shows all findings with a note that both
+  reviewers blocked. `block_reason` tracks the primary blocker (triad takes precedence if both block).
+- `_scope_review_history` carries scope findings across retry rounds. Stored as `{snapshot_key: [entries]}` where `snapshot_key` is a SHA-256 prefix of the staged diff — findings from a prior blocked attempt on a different diff are not shown to the reviewer. Cleared to `{}` on a successful commit. Not in safety-critical registry.py (accessed via `getattr`).
+- History snapshot taken before parallel launch so scope sees consistent state regardless of triad execution order.
+- Applies to both `_repo_commit_push` and `_repo_write_commit` (legacy path).
+- Orchestration logic extracted to `ouroboros/tools/parallel_review.py` (P5 Minimalism — keeps git.py under 1000 lines).
+
 #### Triad diff review (enriched)
 
 - Three models review the staged diff against "Repo Commit Checklist" from CHECKLISTS.md.
@@ -750,7 +763,7 @@ errors surface via the same observability path.
   (`.min.js`, `.min.css`, named vendored assets), sensitive files (`.env`, `.pem`, `.key`, etc.),
   oversized (>1MB), and directory prefixes `.cursor/`, `.github/`, `.vscode/`, `.idea/`, `assets/`,
   `webview/`. Explicit omission count appended when files are skipped.
-- Runs AFTER triad review, BEFORE `git commit`. Also runs in `_repo_write_commit` (legacy path) as of v4.13.0.
+- Runs **in parallel with** triad review (v4.14.0), BEFORE `git commit`. Also runs in `_repo_write_commit` (legacy path). Always runs — even when triad blocks.
 - Respects review enforcement setting (blocking/advisory).
 
 ### Deep self-review (deep_self_review.py)
