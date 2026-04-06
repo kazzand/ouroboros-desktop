@@ -11,13 +11,10 @@ Returns:
   (False, "⚠️ SAFETY_VIOLATION: ...") — DANGEROUS, blocked
 """
 
-import ast
-import json
 import logging
+import json
 import os
 import pathlib
-import re
-import shlex
 from typing import Tuple, Dict, Any, List, Optional
 
 from ouroboros.llm import LLMClient, DEFAULT_LIGHT_MODEL
@@ -36,67 +33,6 @@ SAFE_SHELL_COMMANDS = frozenset([
     "date", "which", "file", "stat", "diff", "tree",
 ])
 
-_SAFE_PYTHON_MODULE_ALIASES = {
-    "pytest": "pytest",
-    "py.test": "pytest",
-}
-
-
-def _split_shell_command(raw_cmd: Any) -> List[str]:
-    """Best-effort argv parser for safety whitelist classification."""
-    if isinstance(raw_cmd, list):
-        return [str(part) for part in raw_cmd if str(part).strip()]
-    text = str(raw_cmd or "").strip()
-    if not text:
-        return []
-    try:
-        parsed = json.loads(text)
-        if isinstance(parsed, list):
-            return [str(part) for part in parsed if str(part).strip()]
-    except (json.JSONDecodeError, TypeError, ValueError):
-        pass
-    try:
-        parsed = ast.literal_eval(text)
-        if isinstance(parsed, list):
-            return [str(part) for part in parsed if str(part).strip()]
-    except (SyntaxError, ValueError):
-        pass
-    try:
-        return [str(part) for part in shlex.split(text) if str(part).strip()]
-    except ValueError:
-        return text.split()
-
-
-def _is_explicit_python_interpreter(executable: str) -> bool:
-    """Allow only literal Python interpreter tokens, not arbitrary path/basename lookalikes."""
-    token = str(executable or "").strip().lower()
-    if not token:
-        return False
-    if token in {"python", "python3"}:
-        return True
-    return bool(re.fullmatch(r"python\d+(?:\.\d+)?", token))
-
-
-def _normalize_safe_shell_subject(raw_cmd: Any) -> str:
-    """Return the canonical safe subject for deterministic shell allowlisting."""
-    argv = _split_shell_command(raw_cmd)
-    if not argv:
-        return ""
-
-    executable = str(argv[0]).strip().lower()
-    if executable in SAFE_SHELL_COMMANDS:
-        return executable
-
-    if _is_explicit_python_interpreter(executable):
-        for idx, part in enumerate(argv[1:-1], start=1):
-            if part == "-m":
-                module = str(argv[idx + 1]).lower()
-                return _SAFE_PYTHON_MODULE_ALIASES.get(module, "")
-            if part == "-c":
-                break
-
-    return ""
-
 
 def _is_whitelisted(tool_name: str, arguments: Dict[str, Any]) -> bool:
     """Deterministic whitelist — skip LLM check for known-safe operations.
@@ -113,7 +49,12 @@ def _is_whitelisted(tool_name: str, arguments: Dict[str, Any]) -> bool:
 
     if tool_name == "run_shell":
         raw_cmd = arguments.get("cmd", arguments.get("command", ""))
-        return bool(_normalize_safe_shell_subject(raw_cmd))
+        if isinstance(raw_cmd, list):
+            cmd_str = " ".join(str(x) for x in raw_cmd)
+        else:
+            cmd_str = str(raw_cmd)
+        first_word = cmd_str.strip().split()[0] if cmd_str.strip() else ""
+        return first_word in SAFE_SHELL_COMMANDS
 
     return False
 
