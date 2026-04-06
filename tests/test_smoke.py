@@ -128,6 +128,8 @@ EXPECTED_TOOLS = [
     "advisory_pre_review", "review_status",
     # Pre-implementation design review
     "plan_task",
+    # CI
+    "run_ci_tests",
 ]
 
 
