@@ -1,4 +1,4 @@
-# Ouroboros v4.14.2 — Architecture & Reference
+# Ouroboros v4.15.0 — Architecture & Reference
 
 This document describes every component, page, button, API endpoint, and data flow.
 It is the single source of truth for how the system works. Keep it updated.
@@ -651,7 +651,9 @@ The commit pipeline runs review stages before creating a git commit:
 Shared helpers live in `tools/review_helpers.py`: checklist section loader,
 touched-file pack builder (`build_touched_file_pack`, 1MB file limit; sensitive files omitted case-insensitively before any read), full repo pack builder
 (`build_full_repo_pack` — no char cap, binary/vendored/sensitive filtering, replaces deprecated
-`build_broader_repo_pack`), HEAD snapshot section builder, goal/scope resolution.
+`build_broader_repo_pack`), HEAD snapshot section builder, goal/scope resolution,
+advisory SDK diagnostic helpers (`get_advisory_runtime_diagnostics`, `format_advisory_sdk_error`)
+shared with `claude_advisory_review.py` to keep that module within the ~1000-line context-window limit (P5).
 `_FILE_SIZE_LIMIT` was raised from 100KB to 1MB in v4.13.0 to stop cutting off normal-sized files.
 
 All LLM calls in the review stack (triad `_query_model`, scope `run_scope_review`) route through
@@ -663,9 +665,16 @@ errors surface via the same observability path.
 
 - **`advisory_pre_review`** tool: runs a read-only Claude Agent SDK review of the current
   worktree BEFORE `repo_commit`. Permitted tools: `Read`, `Grep`, `Glob` only (no Edit/Bash).
-  Model pinned to `opus`. Prompt includes only the "Repo Commit Checklist" section from
-  CHECKLISTS.md (precise section loader), plus BIBLE.md, DEVELOPMENT.md, ARCHITECTURE.md,
+  Model resolved via `resolve_claude_code_model()` — respects `CLAUDE_CODE_MODEL` setting,
+  defaults to `opus` (same helper used by `claude_code_edit`). Prompt includes only the "Repo Commit Checklist" section from
+  CHECKLISTS.md (precise section loader), plus BIBLE.md, DEVELOPMENT.md,
   touched-file pack, goal/scope sections, git status, and worktree diff.
+  `ARCHITECTURE.md` is NOT inlined (too large — ~60K chars caused silent CLI timeouts on wide
+  snapshots); instead the prompt references it as a Read-tool hint so the reviewer can fetch it
+  when needed for version-sync / self_consistency checks.
+- **Advisory budget gate** (v4.15.0): if the assembled advisory prompt exceeds
+  `_ADVISORY_PROMPT_MAX_CHARS` (~400K chars / ~100K tokens), advisory is skipped with a
+  non-blocking `⚠️ ADVISORY_SKIPPED:` warning instead of timing out silently.
 - **Obligation-based blocking history injection** (v4.12.0): when previous `repo_commit`
   calls were blocked, their `critical_findings` are accumulated as structured `ObligationItem`
   entries in durable state. When open obligations exist, the advisory prompt includes an
@@ -688,12 +697,14 @@ errors surface via the same observability path.
 - **`review_state.py`**: durable state. State file: `data/state/advisory_review.json`.
   Stores last 10 advisory runs plus bounded blocking-attempt history and open obligations.
   Advisory runs have: `snapshot_hash`, `commit_message`, `status`
-  (fresh/stale/bypassed/parse_failure), `items`, `raw_result` (full, no truncation), audit fields,
+  (fresh/stale/bypassed/skipped/parse_failure), `items`, `raw_result` (full, no truncation), audit fields,
   `snapshot_paths` (optional list of paths used to compute the scoped hash — `None` = whole repo).
   `parse_failure` means the SDK ran but returned unparseable output — repo_commit treats it as
   no fresh advisory (equivalent to stale) and requires a re-run or explicit bypass.
   `snapshot_paths` is persisted so `review_status` can recompute the live hash with the same
   path scope after a reload, preventing false staleness for path-scoped advisory runs.
+  `is_fresh()` considers `status in ("fresh", "bypassed", "skipped")` — budget-gate skips
+  are treated as valid coverage so the commit gate does not re-block after a non-blocking skip.
   Commit attempts have: `status` (reviewing/blocked/succeeded/failed), `block_reason`
   (no_advisory/critical_findings/review_quorum/parse_failure/infra_failure/scope_blocked/preflight),
   `block_details`, `duration_sec`, `critical_findings` (structured list of `{verdict, severity, item, reason, model}`).

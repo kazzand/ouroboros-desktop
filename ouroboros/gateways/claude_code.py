@@ -406,6 +406,20 @@ def run_edit(
     ))
 
 
+def resolve_claude_code_model(default: str = "opus") -> str:
+    """Return the configured Claude Code model from env/settings.
+
+    Single source of truth — used by both edit path and advisory path
+    to avoid model drift.  Value comes from ``CLAUDE_CODE_MODEL`` env var
+    (set by config.apply_settings_to_env).  Falls back to *default* which
+    is ``"opus"`` unless the caller overrides it.
+
+    Callers that need the raw string (e.g. to pass to the SDK) should use
+    this function rather than reading the env var directly.
+    """
+    return os.environ.get("CLAUDE_CODE_MODEL", default).strip() or default
+
+
 def run_readonly(
     prompt: str,
     cwd: str,

@@ -58,7 +58,7 @@ class AdvisoryRunRecord:
 
     snapshot_hash: str
     commit_message: str
-    status: str            # "fresh" | "stale" | "bypassed" | "parse_failure"
+    status: str            # "fresh" | "stale" | "bypassed" | "skipped" | "parse_failure"
     ts: str                # ISO timestamp
     items: List[Dict[str, Any]] = field(default_factory=list)
     snapshot_summary: str = ""
@@ -109,9 +109,9 @@ class AdvisoryReviewState:
         return None
 
     def is_fresh(self, snapshot_hash: str) -> bool:
-        """True iff there is a fresh (or bypassed) run matching snapshot_hash."""
+        """True iff there is a fresh (or bypassed or budget-skipped) run matching snapshot_hash."""
         run = self.find_by_hash(snapshot_hash)
-        return run is not None and run.status in ("fresh", "bypassed")
+        return run is not None and run.status in ("fresh", "bypassed", "skipped")
 
     def add_run(self, run: AdvisoryRunRecord) -> None:
         self.mark_all_stale_except(run.snapshot_hash)
@@ -123,7 +123,7 @@ class AdvisoryReviewState:
         # when the user already ran an advisory review (even parse_failure) since the last edit.
         # parse_failure runs are recorded for the current snapshot, so the stale-edit marker
         # is no longer accurate — the user must re-run advisory, not fix the edit.
-        if run.status in ("fresh", "bypassed", "parse_failure"):
+        if run.status in ("fresh", "bypassed", "skipped", "parse_failure"):
             self.last_stale_from_edit_ts = ""
 
     def mark_stale(self, snapshot_hash: str) -> None:
@@ -133,15 +133,15 @@ class AdvisoryReviewState:
                 run.status = "stale"
 
     def mark_all_stale_except(self, snapshot_hash: str) -> None:
-        """Mark all runs NOT matching snapshot_hash as stale (fresh and bypassed)."""
+        """Mark all runs NOT matching snapshot_hash as stale (fresh, bypassed, or skipped)."""
         for run in self.runs:
-            if run.snapshot_hash != snapshot_hash and run.status in ("fresh", "bypassed"):
+            if run.snapshot_hash != snapshot_hash and run.status in ("fresh", "bypassed", "skipped"):
                 run.status = "stale"
 
     def mark_all_stale(self, reason_ts: str = "") -> None:
-        """Mark ALL fresh and bypassed runs as stale (e.g. after a worktree write)."""
+        """Mark ALL fresh, bypassed, and skipped runs as stale (e.g. after a worktree write)."""
         for run in self.runs:
-            if run.status in ("fresh", "bypassed"):
+            if run.status in ("fresh", "bypassed", "skipped"):
                 run.status = "stale"
         if reason_ts:
             self.last_stale_from_edit_ts = reason_ts
@@ -442,7 +442,7 @@ def mark_advisory_stale_after_edit(drive_root: pathlib.Path) -> None:
     """
     try:
         state = load_state(drive_root)
-        has_invalidatable = any(r.status in ("fresh", "bypassed") for r in state.runs)
+        has_invalidatable = any(r.status in ("fresh", "bypassed", "skipped") for r in state.runs)
         if not has_invalidatable:
             return  # nothing to invalidate
         ts = _utc_now()
@@ -480,6 +480,7 @@ def format_status_section(state: AdvisoryReviewState,
             "fresh": "✅",
             "stale": "⚠️",
             "bypassed": "⏭️",
+            "skipped": "⏭️",
             "parse_failure": "🔴",
         }.get(run.status, "❓")
 
@@ -506,7 +507,7 @@ def format_status_section(state: AdvisoryReviewState,
                 lines.append(f"     [{sev}] {name}: {reason}")
             if len(findings) > 5:
                 lines.append(f"     ... and {len(findings) - 5} more")
-        elif run.status in ("fresh", "bypassed", "parse_failure"):
+        elif run.status in ("fresh", "bypassed", "skipped", "parse_failure"):
             lines.append("   No findings recorded.")
 
     # Show staleness note from worktree edit

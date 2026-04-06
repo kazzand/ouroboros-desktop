@@ -16,10 +16,40 @@ Verifies (Phase 5):
 """
 import importlib
 import inspect
+import json
 import os
 import sys
+import types
 
 import pytest
+
+
+def _ensure_sdk_mock():
+    """Install a lightweight mock of claude_agent_sdk only when the package is truly absent.
+
+    Uses importlib.util.find_spec to check real availability, not sys.modules presence,
+    so an installed but not-yet-imported SDK is never masked.
+    Required so gateway tests can run without the SDK installed.
+    """
+    import importlib.util as _ilu
+    try:
+        spec = _ilu.find_spec("claude_agent_sdk")
+        sdk_available = spec is not None
+    except (ValueError, ModuleNotFoundError):
+        # find_spec raises ValueError when an already-injected mock module has __spec__=None
+        sdk_available = "claude_agent_sdk" in sys.modules
+    if not sdk_available:
+        mock_sdk = types.ModuleType("claude_agent_sdk")
+        mock_sdk.ClaudeAgentOptions = type("ClaudeAgentOptions", (), {})
+        mock_sdk.ClaudeSDKClient = type("ClaudeSDKClient", (), {})
+        mock_sdk.HookMatcher = type("HookMatcher", (), {"__init__": lambda self, **kw: None})
+        mock_sdk.AssistantMessage = type("AssistantMessage", (), {})
+        mock_sdk.ResultMessage = type("ResultMessage", (), {})
+        mock_sdk.query = lambda **kw: None
+        sys.modules["claude_agent_sdk"] = mock_sdk
+
+
+_ensure_sdk_mock()
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -652,8 +682,13 @@ def test_advisory_prompt_strictness_formulations():
         assert "findings do not directly block" not in prompt.lower()
 
 
-def test_advisory_prompt_includes_architecture_doc():
-    """Advisory prompt must include ARCHITECTURE.md for self_consistency cross-checking."""
+def test_advisory_prompt_references_architecture_doc_via_read_tool():
+    """Advisory prompt must reference ARCHITECTURE.md so the reviewer can fetch it via Read tool.
+
+    ARCHITECTURE.md is excluded from the prompt body (to keep advisory context lean and
+    avoid prompt-bloat that caused CLI timeouts). Instead the prompt instructs the reviewer
+    to use the Read tool to access it when needed for version-sync / self_consistency checks.
+    """
     import subprocess
     adv_mod = _get_advisory_module()
 
@@ -670,9 +705,13 @@ def test_advisory_prompt_includes_architecture_doc():
 
         prompt = adv_mod._build_advisory_prompt(repo_dir, "test commit")
 
-        # ARCHITECTURE.md must be present
-        assert "ARCHITECTURE.md" in prompt
-        assert "Ouroboros v99.0.0" in prompt
+        # ARCHITECTURE.md must be referenced (via Read-tool hint) but NOT inlined into the prompt
+        # body — it is too large (~60K chars) and caused silent CLI timeouts on wider snapshots.
+        assert "ARCHITECTURE.md" in prompt, "Prompt must reference ARCHITECTURE.md"
+        # The reference is a Read-tool hint, not full content injection
+        assert "Ouroboros v99.0.0" not in prompt, (
+            "ARCHITECTURE.md content must NOT be inlined — only reference it via Read tool hint"
+        )
 
 
 def test_advisory_prompt_strictness_concrete_fix_requirement():
@@ -832,3 +871,4 @@ def test_triad_review_reasoning_effort_is_medium_not_low():
     assert 'reasoning_effort="medium"' in source or 'reasoning_effort="high"' in source, (
         "_query_model must use reasoning_effort='medium' or 'high'"
     )
+

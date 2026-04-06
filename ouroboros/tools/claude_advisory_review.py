@@ -41,18 +41,21 @@ from ouroboros.tools.review_helpers import (
     build_touched_file_pack,
     build_goal_section,
     build_scope_section,
+    get_advisory_runtime_diagnostics as _get_runtime_diagnostics,
+    format_advisory_sdk_error as _format_advisory_error,
 )
-from ouroboros.utils import append_jsonl, utc_now_iso
+from ouroboros.utils import (
+    append_jsonl,
+    utc_now_iso,
+    truncate_review_artifact as _truncate_review_artifact,
+    truncate_review_reason as _truncate_review_reason,
+)
 
 log = logging.getLogger(__name__)
 
 _MAX_DIFF_CHARS_ERROR = 500_000  # Fail loudly above this — split the commit
-
-# Shared review-artifact helpers (DEVELOPMENT.md item 2(f) compliance)
-from ouroboros.utils import (  # noqa: E402
-    truncate_review_artifact as _truncate_review_artifact,
-    truncate_review_reason as _truncate_review_reason,
-)
+# Advisory prompt budget gate — non-blocking skip when prompt too large (mirrors scope review)
+_ADVISORY_PROMPT_MAX_CHARS = 400_000  # ~100K tokens
 
 
 def _load_doc(repo_dir: pathlib.Path, relpath: str, fallback: str = "") -> str:
@@ -155,26 +158,20 @@ def _build_blocking_history_section(drive_root: pathlib.Path) -> str:
 
     lines = [
         "## Unresolved obligations from previous blocking rounds",
-        "",
         "Previous `repo_commit` calls were BLOCKED. The issues below are still unresolved.",
         "Your advisory review should explicitly address EACH obligation:",
         "  - If fixed: state WHAT in the current snapshot closes it.",
         "  - If not fixed: FAIL the corresponding checklist item.",
-        "A generic PASS without addressing these obligations is a weak signal — "
-        "addressing each one individually is expected but not enforced at the code level.",
+        "A generic PASS without addressing these obligations is a weak signal.",
         "",
+        f"### Open obligations ({len(open_obs)} unresolved):",
     ]
-
-    if open_obs:
-        lines.append(f"### Open obligations ({len(open_obs)} unresolved):")
+    for i, ob in enumerate(open_obs, 1):
+        lines.append(f"**Obligation {i}** [id={ob.obligation_id}]")
+        lines.append(f"  Checklist item: `{ob.item}` (severity: {ob.severity})")
+        lines.append(f"  Issue: {ob.reason}")
+        lines.append(f"  Source: {ob.source_attempt_ts[:16]} | commit: \"{ob.source_attempt_msg[:80]}\"")
         lines.append("")
-        for i, ob in enumerate(open_obs, 1):
-            lines.append(f"**Obligation {i}** [id={ob.obligation_id}]")
-            lines.append(f"  Checklist item: `{ob.item}` (severity: {ob.severity})")
-            lines.append(f"  Issue: {ob.reason}")
-            lines.append(f"  Source: blocking attempt at {ob.source_attempt_ts[:16]}")
-            lines.append(f"    commit: \"{ob.source_attempt_msg[:80]}\"")
-            lines.append("")
 
     # Also include a deduplicated summary of blocking_history for full context
     if blocking_history:
@@ -252,8 +249,6 @@ def _build_advisory_prompt(
     if drive_root:
         blocking_history = _build_blocking_history_section(drive_root)
 
-    arch_doc = _load_doc(repo_dir, "docs/ARCHITECTURE.md", "(ARCHITECTURE.md not found)")
-
     prompt = f"""\
 You are performing a pre-commit review of an Ouroboros self-modifying AI agent codebase.
 
@@ -304,9 +299,9 @@ Return ONLY a JSON array. Each element:
 
 {bible}
 
-## ARCHITECTURE.md (System structure reference)
-
-{arch_doc}
+Note: ARCHITECTURE.md is available in the repo at docs/ARCHITECTURE.md — use the Read tool
+to inspect it if you need to check version sync (item 7/8/9) or module structure (item 13).
+It is excluded from this prompt to keep the advisory context lean.
 
 {blocking_history}
 
@@ -357,18 +352,17 @@ def _run_claude_advisory(
 ) -> tuple[list, str]:
     """Run the advisory review via Claude Agent SDK (read-only).
 
-    Returns (items: list, raw_result: str).
-    items is a list of review finding dicts (may be empty on error).
-    raw_result is the raw output string.
+    Returns (items, raw_result). raw_result starts with ⚠️ ADVISORY_ERROR: on failure.
     """
     api_key = os.environ.get("ANTHROPIC_API_KEY", "")
     if not api_key:
         return [], "⚠️ ADVISORY_ERROR: ANTHROPIC_API_KEY not set."
 
+    # Resolve model — single source of truth, honours CLAUDE_CODE_MODEL setting
+    from ouroboros.gateways.claude_code import resolve_claude_code_model
+    model = resolve_claude_code_model()
+
     # Fetch diff and changed-file list exactly once, validate, then pass into prompt builder.
-    # This prevents any second git call inside _build_advisory_prompt / build_touched_file_pack:
-    # we parse the file list from the already-validated changed_files_text and pass resolved
-    # paths= so build_touched_file_pack skips its own git-status call.
     diff_text = _get_staged_diff(repo_dir, paths=paths)
     if diff_text.startswith("⚠️ ADVISORY_ERROR:"):
         return [], diff_text
@@ -379,7 +373,6 @@ def _run_claude_advisory(
 
     # Parse touched paths from porcelain output to avoid a second git-status call inside
     # build_touched_file_pack.  Lines are "XY filename" or "(clean — no changed files)".
-    # Use an explicit list (even empty) so build_touched_file_pack never re-runs git status.
     resolved_paths: list[str] = list(paths) if paths is not None else []
     if not paths and not changed_files_text.startswith("(clean"):
         resolved_paths = []
@@ -396,11 +389,30 @@ def _run_claude_advisory(
             drive_root=drive_root, diff=diff_text, changed_files=changed_files_text,
         )
     except RuntimeError as exc:
-        # build_advisory_prompt calls build_touched_file_pack which runs git status
-        # and can raise RuntimeError on failure. Convert to structured error sentinel.
         return [], f"⚠️ ADVISORY_ERROR: failed to build advisory prompt: {exc}"
     except Exception as exc:
         return [], f"⚠️ ADVISORY_ERROR: unexpected error building prompt: {exc}"
+
+    prompt_chars = len(prompt)
+    diag = _get_runtime_diagnostics(model, prompt_chars, resolved_paths)
+
+    # Budget gate: non-blocking skip when prompt too large (mirrors scope review)
+    if prompt_chars > _ADVISORY_PROMPT_MAX_CHARS:
+        tokens_approx = max(1, prompt_chars // 4)
+        warning = (
+            f"⚠️ ADVISORY_SKIPPED: advisory prompt too large "
+            f"({prompt_chars:,} chars, ~{tokens_approx:,} tokens > "
+            f"{_ADVISORY_PROMPT_MAX_CHARS:,} char limit). "
+            f"Advisory review skipped — non-blocking. Consider splitting the commit."
+        )
+        log.warning("Advisory skipped — prompt too large: %d chars", prompt_chars)
+        return [], warning
+
+    log.info(
+        "Advisory SDK call: model=%s prompt_chars=%d touched=%s sdk=%s cli=%s",
+        diag["model"], diag["prompt_chars"], diag["touched_paths"],
+        diag["sdk_version"], diag["cli_version"],
+    )
 
     try:
         from ouroboros.gateways.claude_code import run_readonly
@@ -408,22 +420,20 @@ def _run_claude_advisory(
         result = run_readonly(
             prompt=prompt,
             cwd=str(repo_dir),
-            model="opus",
+            model=model,
             max_turns=8,
         )
 
         if not result.success:
-            import sys
-            sdk_version = "(unknown)"
-            try:
-                import importlib.metadata
-                sdk_version = importlib.metadata.version("claude-agent-sdk")
-            except Exception:
-                pass
-            return [], (
-                f"⚠️ ADVISORY_ERROR: {result.error}\n"
-                f"Diagnostic: sdk_version={sdk_version}, python={sys.executable}"
+            err_msg = _format_advisory_error(
+                prefix="SDK/CLI returned failure",
+                result_error=result.error,
+                stderr_tail=result.stderr_tail,
+                session_id=result.session_id,
+                diag=diag,
             )
+            log.error("Advisory SDK failure:\n%s", err_msg)
+            return [], err_msg
 
         raw_text = result.result_text
         items = _parse_advisory_output(raw_text)
@@ -435,17 +445,15 @@ def _run_claude_advisory(
             "Install: pip install 'ouroboros[claude-sdk]'"
         )
     except Exception as e:
-        import sys
-        sdk_version = "(unknown)"
-        try:
-            import importlib.metadata
-            sdk_version = importlib.metadata.version("claude-agent-sdk")
-        except Exception:
-            pass
-        return [], (
-            f"⚠️ ADVISORY_ERROR: SDK call failed: {type(e).__name__}: {e}\n"
-            f"Diagnostic: sdk_version={sdk_version}, python={sys.executable}"
+        err_msg = _format_advisory_error(
+            prefix=f"SDK call raised {type(e).__name__}",
+            result_error=str(e),
+            stderr_tail="",
+            session_id="",
+            diag=diag,
         )
+        log.error("Advisory SDK exception:\n%s", err_msg)
+        return [], err_msg
 
 
 def _parse_advisory_output(stdout: str) -> list:
@@ -489,9 +497,7 @@ def _parse_advisory_output(stdout: str) -> list:
     return []
 
 
-# ---------------------------------------------------------------------------
-# Audit logging
-# ---------------------------------------------------------------------------
+# -- Audit logging --
 
 def _audit_bypass(ctx: ToolContext, snapshot_hash: str, commit_message: str,
                   bypass_reason: str, task_id: str) -> None:
@@ -576,33 +582,15 @@ def _resolve_matching_obligations(state: "AdvisoryReviewState", items: list,
 def _next_step_guidance(latest: Optional["AdvisoryRunRecord"], state: "AdvisoryReviewState",
                         stale_from_edit: bool, stale_from_edit_ts: Optional[str],
                         open_obs: list, effective_is_fresh: bool = False) -> str:
-    """Return a concrete next-step string based on current advisory state.
-
-    Uses effective_is_fresh (derived from live snapshot hash) rather than
-    stored run status to give gate-accurate guidance.
-
-    parse_failure guidance is only emitted when the current matching snapshot run
-    is a parse_failure (i.e. effective_is_fresh is not true but the hash matches).
-    If the worktree has changed since a parse_failure run, the stale path takes
-    precedence — the advisory needs to be re-run from scratch anyway.
-    """
-    # If not effectively fresh (stale stored status OR live hash mismatch), advisory must re-run.
-    # Check this BEFORE parse_failure so a stale worktree-change is reported correctly even
-    # if the most recent advisory run happened to be a parse_failure on an old snapshot.
+    """Return a concrete next-step string based on current advisory state."""
     if not effective_is_fresh:
-        # Special case: the matching run for the CURRENT snapshot is parse_failure.
-        # (effective_is_fresh is false because parse_failure is not counted as fresh,
-        #  but the advisory did run for this exact snapshot.)
+        # parse_failure for the exact current snapshot (advisory ran but output was unparseable)
         if latest and latest.status == "parse_failure" and not stale_from_edit:
             return (
-                "Last advisory run produced unparseable output (parse_failure) "
-                "for the current snapshot. "
+                "Last advisory run produced unparseable output (parse_failure). "
                 "Re-run: advisory_pre_review(commit_message='...'), "
                 "or bypass: repo_commit(skip_advisory_pre_review=True) (audited)."
             )
-
-    # If not effectively fresh (generic stale), advisory must re-run
-    if not effective_is_fresh:
         if stale_from_edit:
             return (
                 f"Advisory was invalidated by a worktree edit at {stale_from_edit_ts}. "
@@ -620,6 +608,13 @@ def _next_step_guidance(latest: Optional["AdvisoryRunRecord"], state: "AdvisoryR
             "previous blocking rounds. repo_commit will be blocked until obligations are "
             "cleared. Fix the issues, re-run advisory_pre_review so it marks them PASS, "
             "or bypass: repo_commit(skip_advisory_pre_review=True) (audited)."
+        )
+
+    if latest and latest.status == "skipped":
+        return (
+            "Advisory was skipped — prompt exceeded the budget gate (prompt too large for advisory). "
+            "repo_commit may proceed. Consider splitting the commit into smaller chunks "
+            "so advisory can run on the next change."
         )
 
     if latest and latest.status == "bypassed":
@@ -647,9 +642,7 @@ def _next_step_guidance(latest: Optional["AdvisoryRunRecord"], state: "AdvisoryR
     )
 
 
-# ---------------------------------------------------------------------------
-# Tool handlers
-# ---------------------------------------------------------------------------
+# -- Tool handlers --
 
 def _handle_advisory_pre_review(
     ctx: ToolContext,
@@ -726,6 +719,29 @@ def _handle_advisory_pre_review(
                 "Advisory review failed to run. Fix the error and retry, "
                 "or use skip_advisory_pre_review=True to bypass (will be audited)."
             ),
+        }, ensure_ascii=False, indent=2)
+
+    # Budget gate: prompt too large — non-blocking skip (mirrors scope review).
+    # Persist a durable "skipped" run so _check_advisory_freshness treats this
+    # snapshot as having been reviewed (is_fresh returns True for status="skipped").
+    if raw_result.startswith("⚠️ ADVISORY_SKIPPED:"):
+        snapshot_summary = f"{changed_files.count(chr(10)) + 1} file(s) changed"
+        skip_run = AdvisoryRunRecord(
+            snapshot_hash=snapshot_hash,
+            commit_message=commit_message,
+            status="skipped",
+            ts=_utc_now(),
+            items=[],
+            snapshot_summary=snapshot_summary,
+            raw_result=raw_result,
+            snapshot_paths=paths,
+        )
+        state.add_run(skip_run)
+        save_state(drive_root, state)
+        return json.dumps({
+            "status": "skipped",
+            "snapshot_hash": snapshot_hash,
+            "message": raw_result,
         }, ensure_ascii=False, indent=2)
 
     # Classify findings
@@ -839,7 +855,7 @@ def _handle_review_status(ctx: ToolContext) -> str:
         latest_paths = latest.snapshot_paths if latest else None
         current_hash = compute_snapshot_hash(repo_dir, "", paths=latest_paths)
         hash_mismatch = bool(
-            latest and latest.status in ("fresh", "bypassed", "parse_failure")
+            latest and latest.status in ("fresh", "bypassed", "skipped", "parse_failure")
             and latest.snapshot_hash != current_hash
         )
     except Exception:
@@ -955,9 +971,7 @@ def _handle_review_status(ctx: ToolContext) -> str:
     }, ensure_ascii=False, indent=2)
 
 
-# ---------------------------------------------------------------------------
-# Tool registration
-# ---------------------------------------------------------------------------
+# -- Tool registration --
 
 def get_tools() -> list:
     return [

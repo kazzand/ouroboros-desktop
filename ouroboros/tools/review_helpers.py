@@ -564,3 +564,73 @@ def build_scope_section(scope: str = "") -> str:
         f"Scope affects only pre-existing unchanged code outside the diff.\n"
         f"Issues in untouched legacy code outside the declared scope are advisory at most."
     )
+
+
+# ---------------------------------------------------------------------------
+# Advisory SDK diagnostic helpers (shared with claude_advisory_review.py)
+# ---------------------------------------------------------------------------
+
+def get_advisory_runtime_diagnostics(model: str, prompt_chars: int,
+                                     touched_paths: list) -> dict:
+    """Collect runtime diagnostic context for advisory failure messages.
+
+    Includes sdk_version, cli_version, cli_path, python, model, prompt size,
+    and the list of touched paths.  Never raises — returns partial data on error.
+    Called by _run_claude_advisory before and after SDK invocation.
+    """
+    import sys
+
+    diag: dict = {
+        "model": model,
+        "prompt_chars": prompt_chars,
+        "prompt_tokens_approx": max(1, prompt_chars // 4),
+        "touched_paths": touched_paths,
+        "python": sys.executable,
+    }
+    # SDK version
+    try:
+        import importlib.metadata
+        diag["sdk_version"] = importlib.metadata.version("claude-agent-sdk")
+    except Exception:
+        diag["sdk_version"] = "(unavailable)"
+
+    # CLI version and path via compat resolver
+    try:
+        from ouroboros.compat import resolve_claude_runtime
+        rt = resolve_claude_runtime()
+        diag["cli_version"] = rt.get("cli_version", "(unavailable)")
+        diag["cli_path"] = rt.get("cli_path", "(unavailable)")
+    except Exception:
+        diag["cli_version"] = "(unavailable)"
+        diag["cli_path"] = "(unavailable)"
+
+    return diag
+
+
+def format_advisory_sdk_error(prefix: str, result_error: str, stderr_tail: str,
+                               session_id: str, diag: dict) -> str:
+    """Format a rich, debuggable advisory error message.
+
+    All diagnostic fields are included so the next `exit 1` can be debugged
+    without guessing.  The format is human-readable and starts with the
+    ⚠️ ADVISORY_ERROR: sentinel so callers can detect it reliably.
+    """
+    lines = [
+        f"⚠️ ADVISORY_ERROR: {prefix}",
+        f"  error          : {result_error}",
+        f"  model          : {diag.get('model', '?')}",
+        f"  sdk_version    : {diag.get('sdk_version', '?')}",
+        f"  cli_version    : {diag.get('cli_version', '?')}",
+        f"  cli_path       : {diag.get('cli_path', '?')}",
+        f"  python         : {diag.get('python', '?')}",
+        f"  prompt_chars   : {diag.get('prompt_chars', '?')}",
+        f"  prompt_tokens  : ~{diag.get('prompt_tokens_approx', '?')}",
+        f"  touched_paths  : {diag.get('touched_paths', [])}",
+    ]
+    if session_id:
+        lines.append(f"  session_id     : {session_id}")
+    if stderr_tail:
+        lines.append("  stderr_tail    :")
+        for ln in stderr_tail.strip().splitlines()[-30:]:
+            lines.append(f"    {ln}")
+    return "\n".join(lines)

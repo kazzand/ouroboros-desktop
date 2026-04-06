@@ -354,7 +354,8 @@ def _claude_code_edit(ctx: ToolContext, prompt: str, cwd: str = "",
         if candidate.exists():
             work_dir = str(candidate)
 
-    model = os.environ.get("CLAUDE_CODE_MODEL", "opus").strip()
+    from ouroboros.gateways.claude_code import resolve_claude_code_model
+    model = resolve_claude_code_model()
 
     lock = _acquire_git_lock(ctx)
     try:
