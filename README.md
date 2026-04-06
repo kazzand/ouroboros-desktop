@@ -6,7 +6,7 @@
 [![macOS 12+](https://img.shields.io/badge/macOS-12%2B-black.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
 [![Linux](https://img.shields.io/badge/Linux-x86__64-orange.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
 [![Windows](https://img.shields.io/badge/Windows-x64-blue.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
-[![Version 4.13.0](https://img.shields.io/badge/version-4.13.0-green.svg)](VERSION)
+[![Version 4.13.1](https://img.shields.io/badge/version-4.13.1-green.svg)](VERSION)
 
 A self-modifying AI agent that writes its own code, rewrites its own mind, and evolves autonomously. Born February 16, 2026.
 
@@ -374,6 +374,7 @@ Full text: [BIBLE.md](BIBLE.md)
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 4.13.1 | 2026-04-06 | CI tool hardening: detached HEAD guard, remote-vs-GITHUB_REPO mismatch check (fail-closed for non-GitHub remotes), URLError/TimeoutError/OSError handling in HTTP layer, workflow-scoped polling, dotted repo name support, redundant API call elimination. 25 tests (6 new). |
 | 4.13.0 | 2026-04-06 | `run_ci_tests` tool: push to GitHub and trigger full CI matrix (Ubuntu + Windows + macOS) via GitHub Actions `workflow_dispatch`. Polls for results, downloads failure logs with per-OS breakdowns. Agent decides when to run based on change type (platform-sensitive vs docs-only). Requires `GITHUB_TOKEN` + `GITHUB_REPO` in Settings. Available as an extra tool via `enable_tools`. 19 new tests. |
 | 4.12.0 | 2026-04-05 | CI/CD and build infrastructure: three-tier GitHub Actions workflow (quick Ubuntu tests on every push, full 3-OS matrix on stable/manual, build+release on tags); PyInstaller-based build scripts for macOS (`build.sh` → `.dmg`), Linux (`build_linux.sh` → `.tar.gz`), and Windows (`build_windows.ps1` → `.zip`); Dockerfile for web UI runtime; `pyinstaller` added as optional `[build]` dependency. |
 | 4.11.9 | 2026-04-05 | Cross-platform hardening: rename `compat.py` → `platform_layer.py` (self-explanatory naming); add `cross_platform` review checklist item (#14); add Platform Abstraction Rule to DEVELOPMENT.md; add AST-based `test_platform_guard.py` that catches platform-specific API usage outside `platform_layer.py`; migrate file locking from `consolidator.py`/`memory.py` into `platform_layer.py`; fix `os.setsid` violation in `workers.py`. |

@@ -228,15 +228,23 @@ def _run_ci_tests(ctx: ToolContext, wait: bool = True, timeout_minutes: int = 15
     # Verify origin matches GITHUB_REPO to prevent pushing to unintended remote
     try:
         origin_url = run_cmd(["git", "remote", "get-url", "origin"], cwd=repo_dir).strip()
-        # Extract owner/repo from https://github.com/owner/repo.git or similar
-        m = re.search(r"github\.com[/:]([^/]+/[^/.]+)", origin_url)
+        # Extract owner/repo from https://github.com/owner/repo.git or git@github.com:owner/repo
+        m = re.search(r"github\.com[/:](.+)", origin_url)
         if m:
-            origin_slug = m.group(1).rstrip("/")
+            origin_slug = m.group(1).strip().rstrip("/")
+            if origin_slug.endswith(".git"):
+                origin_slug = origin_slug[:-4]
             if origin_slug.lower() != repo.lower():
                 return (
                     f"⚠️ CI_REMOTE_MISMATCH: git origin points to '{origin_slug}' "
                     f"but GITHUB_REPO is '{repo}'. Fix in Settings or update git remote."
                 )
+        elif "github.com" not in origin_url:
+            # Non-GitHub remote — fail closed, don't push to unknown host
+            return (
+                f"⚠️ CI_REMOTE_MISMATCH: git origin '{origin_url}' is not a GitHub remote. "
+                f"GITHUB_REPO is '{repo}'. CI dispatch requires GitHub."
+            )
     except Exception:
         pass  # No origin configured — push will fail naturally
 

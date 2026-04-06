@@ -141,6 +141,35 @@ class TestRunCiTests:
             result = _run_ci_tests(ctx)
             assert "CI_REMOTE_MISMATCH" in result
 
+    def test_non_github_remote_fails_closed(self, ctx, _gh_settings):
+        from ouroboros.tools.ci import _run_ci_tests
+        with patch("ouroboros.tools.ci._get_current_branch", return_value="ouroboros"), \
+             patch("ouroboros.tools.ci._get_current_sha", return_value="abc1234567890"), \
+             patch("ouroboros.tools.ci.run_cmd", side_effect=lambda cmd, **kw:
+                   "https://gitlab.com/user/repo.git\n" if "get-url" in cmd else "ouroboros\n"):
+            result = _run_ci_tests(ctx)
+            assert "CI_REMOTE_MISMATCH" in result
+            assert "not a GitHub remote" in result
+
+    def test_repo_with_dots_matches(self, ctx):
+        """Repos with dots in their name should match correctly."""
+        from ouroboros.tools.ci import _run_ci_tests
+        settings = {"GITHUB_TOKEN": "test", "GITHUB_REPO": "owner/my.repo.name"}
+        with patch("ouroboros.tools.ci.load_settings", return_value=settings), \
+             patch.dict(os.environ, {"GITHUB_TOKEN": "test", "GITHUB_REPO": "owner/my.repo.name"}), \
+             patch("ouroboros.tools.ci._get_current_branch", return_value="ouroboros"), \
+             patch("ouroboros.tools.ci._get_current_sha", return_value="abc1234567890"), \
+             patch("ouroboros.tools.ci.run_cmd", side_effect=lambda cmd, **kw:
+                   "https://github.com/owner/my.repo.name.git\n" if "get-url" in cmd else "ouroboros\n"), \
+             patch("ouroboros.tools.ci._push_branch", return_value=(True, "ok")), \
+             patch("ouroboros.tools.ci._find_workflow_id", return_value=12345), \
+             patch("ouroboros.tools.ci._trigger_workflow", return_value=(True, "ok")), \
+             patch("ouroboros.tools.ci._poll_workflow_run", return_value={
+                 "status": "completed", "conclusion": "success",
+                 "url": "https://github.com/owner/my.repo.name/actions/runs/1", "run_id": 1}):
+            result = _run_ci_tests(ctx)
+            assert "CI PASSED" in result  # Should not hit CI_REMOTE_MISMATCH
+
     def test_push_failure(self, ctx, _gh_settings):
         from ouroboros.tools.ci import _run_ci_tests
         with patch("ouroboros.tools.ci._get_current_branch", return_value="ouroboros"), \
@@ -206,7 +235,7 @@ class TestRunCiTests:
             "run_id": 1,
         }
         failed_jobs = [
-            {"name": "full-test (windows-latest)", "os": "windows",
+            {"id": 99, "name": "full-test (windows-latest)", "os": "windows",
              "url": "https://github.com/test/jobs/1", "failed_steps": ["Run tests"]},
         ]
         with patch("ouroboros.tools.ci._get_current_branch", return_value="ouroboros"), \
@@ -216,13 +245,11 @@ class TestRunCiTests:
              patch("ouroboros.tools.ci._trigger_workflow", return_value=(True, "ok")), \
              patch("ouroboros.tools.ci._poll_workflow_run", return_value=poll_result), \
              patch("ouroboros.tools.ci._get_failed_jobs", return_value=failed_jobs), \
-             patch("ouroboros.tools.ci._gh_api", return_value=(200, {"jobs": [
-                 {"name": "full-test (windows-latest)", "conclusion": "failure", "id": 99}
-             ]})), \
              patch("ouroboros.tools.ci._get_job_logs", return_value="FAILED test_x.py::test_foo"):
             result = _run_ci_tests(ctx)
             assert "CI FAILED" in result
             assert "windows" in result
+            assert "FAILED test_x.py" in result  # verify log download path exercised
 
     def test_ci_timeout(self, ctx, _gh_settings):
         from ouroboros.tools.ci import _run_ci_tests
