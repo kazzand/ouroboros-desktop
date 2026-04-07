@@ -744,20 +744,20 @@ class TestRemoteConfigSurfacing:
     def test_server_logs_remote_failure(self):
         """server.py must check the (ok, msg) return from configure_remote."""
         server_path = pathlib.Path(REPO) / "server.py"
-        source = server_path.read_text()
+        source = server_path.read_text(encoding="utf-8")
         assert "remote_ok, remote_msg = configure_remote" in source
         assert "Remote configuration failed" in source
 
     def test_settings_save_returns_warnings(self):
         """api_settings_post must surface remote config failures."""
         server_path = pathlib.Path(REPO) / "server.py"
-        source = server_path.read_text()
+        source = server_path.read_text(encoding="utf-8")
         assert '"warnings"' in source
 
     def test_migrate_credentials_wired_at_startup(self):
         """migrate_remote_credentials called at startup after configure_remote."""
         server_path = pathlib.Path(REPO) / "server.py"
-        source = server_path.read_text()
+        source = server_path.read_text(encoding="utf-8")
         assert "migrate_remote_credentials" in source
 
 
@@ -839,6 +839,6 @@ class TestSandboxCoversRepoWrite:
 class TestIndexFullInstruction:
     def test_system_md_warns_against_index_full(self):
         system_md = pathlib.Path(REPO) / "prompts" / "SYSTEM.md"
-        content = system_md.read_text()
+        content = system_md.read_text(encoding="utf-8")
         assert "Do NOT call" in content or "reserved internal name" in content
         assert "knowledge_list" in content
