@@ -68,6 +68,12 @@ def _continuation_source(status: str, *, late_result_pending: bool) -> str:
     return ""
 
 
+def _attempt_accepts_reviewing_update(existing: Any) -> bool:
+    if existing is None:
+        return False
+    return bool(existing.status == "reviewing" or existing.late_result_pending)
+
+
 def _record_commit_attempt(ctx: ToolContext, commit_message: str, status: str,
                            block_reason: str = "", block_details: str = "",
                            duration_sec: float = 0.0, snapshot_hash: str = "",
@@ -95,9 +101,20 @@ def _record_commit_attempt(ctx: ToolContext, commit_message: str, status: str,
         def _mutate(state):
             state.expire_stale_attempts()
             attempt_no = int(getattr(ctx, "_current_review_attempt_number", 0) or 0)
-            existing = None
+            existing = (
+                state.latest_attempt_for(
+                    repo_key=repo_key,
+                    tool_name=tool_name,
+                    task_id=task_id,
+                    attempt=attempt_no,
+                )
+                if attempt_no > 0
+                else None
+            )
             if status == "reviewing":
-                attempt_no = state.next_attempt_number(repo_key, tool_name, task_id)
+                if not _attempt_accepts_reviewing_update(existing):
+                    attempt_no = state.next_attempt_number(repo_key, tool_name, task_id)
+                    existing = None
                 ctx._current_review_attempt_number = attempt_no
             elif attempt_no <= 0:
                 existing = state.latest_attempt_for(
@@ -159,6 +176,7 @@ def _record_commit_attempt(ctx: ToolContext, commit_message: str, status: str,
                         list(getattr(existing, "degraded_reasons", []) or []),
                     ) if str(x).strip()
                 ],
+                started_ts=str(getattr(existing, "started_ts", "") or ""),
             )
             state.record_attempt(attempt)
 

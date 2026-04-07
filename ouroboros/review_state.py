@@ -429,7 +429,7 @@ class AdvisoryReviewState:
             if started_epoch is None:
                 continue
             age_sec = max(0.0, now_epoch - started_epoch)
-            if age_sec <= float(ttl_sec + grace_sec):
+            if age_sec < float(ttl_sec + grace_sec):
                 continue
 
             item.status = "failed"
@@ -1041,7 +1041,7 @@ def _merge_attempt(existing: CommitAttemptRecord, incoming: CommitAttemptRecord)
         post_review_fingerprint=incoming.post_review_fingerprint or existing.post_review_fingerprint,
         fingerprint_status=incoming.fingerprint_status or existing.fingerprint_status,
         degraded_reasons=list(incoming.degraded_reasons or existing.degraded_reasons),
-        started_ts=incoming.started_ts or existing.started_ts or existing.ts,
+        started_ts=existing.started_ts or incoming.started_ts or existing.ts,
         updated_ts=incoming.updated_ts or existing.updated_ts or _utc_now(),
         finished_ts=incoming.finished_ts or existing.finished_ts,
     )

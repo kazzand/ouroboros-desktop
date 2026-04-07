@@ -539,15 +539,73 @@ def test_late_result_pending_is_persisted_and_cleared(tmp_path):
 
     state = load_state(tmp_path)
     assert state.last_commit_attempt is not None
+    assert len(state.attempts) == 1
+    assert state.attempts[0].attempt == 1
     assert state.last_commit_attempt.status == "reviewing"
     assert state.last_commit_attempt.late_result_pending is True
     assert state.last_commit_attempt.phase == "late_wait"
+    started_ts = state.attempts[0].started_ts
 
     _record_commit_attempt(ctx, "late commit", "succeeded", late_result_pending=False)
     updated = load_state(tmp_path)
     assert updated.last_commit_attempt is not None
+    assert len(updated.attempts) == 1
+    assert updated.attempts[0].attempt == 1
     assert updated.last_commit_attempt.status == "succeeded"
     assert updated.last_commit_attempt.late_result_pending is False
+    assert updated.attempts[0].started_ts == started_ts
+
+
+def test_repeated_reviewing_updates_reuse_same_attempt_and_leave_no_ghost_active_attempt(tmp_path):
+    """Phase 2 regression: one logical reviewed flow must not leave sibling active attempts."""
+    from ouroboros.tools.commit_gate import _check_overlapping_review_attempt, _record_commit_attempt
+    from ouroboros.review_state import load_state
+
+    ctx = MagicMock()
+    ctx.drive_root = str(tmp_path)
+    ctx.repo_dir = str(tmp_path)
+    ctx.task_id = "task-flow"
+    ctx._current_review_tool_name = "repo_commit"
+    ctx._current_review_commit_message = "flow commit"
+
+    _record_commit_attempt(ctx, "flow commit", "reviewing")
+    state = load_state(tmp_path)
+    assert len(state.attempts) == 1
+    assert ctx._current_review_attempt_number == 1
+    started_ts = state.attempts[0].started_ts
+
+    _record_commit_attempt(
+        ctx,
+        "flow commit",
+        "reviewing",
+        phase="review",
+        pre_review_fingerprint="abc123",
+        fingerprint_status="pending",
+    )
+    _record_commit_attempt(
+        ctx,
+        "flow commit",
+        "blocked",
+        block_reason="critical_findings",
+        block_details="Critical review findings present",
+    )
+
+    updated = load_state(tmp_path)
+    assert len(updated.attempts) == 1
+    attempt = updated.attempts[0]
+    assert attempt.attempt == 1
+    assert attempt.status == "blocked"
+    assert attempt.started_ts == started_ts
+    assert updated.get_active_attempts() == []
+
+    fresh_ctx = MagicMock()
+    fresh_ctx.drive_root = str(tmp_path)
+    fresh_ctx.repo_dir = str(tmp_path)
+    fresh_ctx.task_id = "task-next"
+    fresh_ctx._current_review_tool_name = "repo_commit"
+
+    msg = _check_overlapping_review_attempt(fresh_ctx)
+    assert msg is None
 
 
 def test_overlap_guard_blocks_active_reviewed_attempt(tmp_path):
@@ -572,8 +630,8 @@ def test_overlap_guard_blocks_active_reviewed_attempt(tmp_path):
     assert "REVIEWED_ATTEMPT_IN_PROGRESS" in msg
 
 
-def test_overlap_guard_auto_expires_stale_attempt(tmp_path):
-    """Phase 2: overlap guard should auto-expire stale hung attempts after TTL+grace."""
+def test_overlap_guard_auto_expires_stale_attempt_at_exact_ttl_boundary(tmp_path):
+    """Phase 2: overlap guard should expire stale attempts at the exact TTL+grace boundary."""
     from ouroboros.tools.commit_gate import _check_overlapping_review_attempt, _record_commit_attempt
     from ouroboros.review_state import (
         _REVIEW_ATTEMPT_GRACE_SEC,
@@ -592,10 +650,14 @@ def test_overlap_guard_auto_expires_stale_attempt(tmp_path):
     old_ts = "2026-01-01T00:00:00+00:00"
 
     def _mutate(state):
-        attempt = state.last_commit_attempt
-        attempt.ts = old_ts
-        attempt.started_ts = old_ts
-        attempt.updated_ts = old_ts
+        for attempt in state.attempts:
+            attempt.ts = old_ts
+            attempt.started_ts = old_ts
+            attempt.updated_ts = old_ts
+        if state.last_commit_attempt is not None:
+            state.last_commit_attempt.ts = old_ts
+            state.last_commit_attempt.started_ts = old_ts
+            state.last_commit_attempt.updated_ts = old_ts
 
     update_state(tmp_path, _mutate)
 
@@ -605,7 +667,7 @@ def test_overlap_guard_auto_expires_stale_attempt(tmp_path):
     fresh_ctx.task_id = "task-fresh"
     fresh_ctx._current_review_tool_name = "repo_commit"
 
-    with patch("ouroboros.review_state._utc_now", return_value="2026-01-01T00:32:10+00:00"):
+    with patch("ouroboros.review_state._utc_now", return_value="2026-01-01T00:32:00+00:00"):
         msg = _check_overlapping_review_attempt(fresh_ctx)
     assert msg is None
 
@@ -613,6 +675,7 @@ def test_overlap_guard_auto_expires_stale_attempt(tmp_path):
     assert updated.last_commit_attempt is not None
     assert updated.last_commit_attempt.status == "failed"
     assert updated.last_commit_attempt.phase == "expired"
+    assert updated.last_commit_attempt.finished_ts == "2026-01-01T00:32:00+00:00"
 
 
 # ---------------------------------------------------------------------------
