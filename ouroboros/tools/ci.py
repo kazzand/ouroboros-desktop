@@ -8,6 +8,7 @@ import os
 import re
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -173,6 +174,27 @@ def _get_failed_jobs(token: str, repo: str, run_id: int) -> List[dict]:
     return failed
 
 
+class _NoAuthRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Strip Authorization header on cross-domain redirects.
+
+    GitHub's job-logs endpoint returns a 302 to a signed Azure Blob Storage
+    URL.  urllib's default handler forwards the Authorization header to Azure,
+    which rejects it with 403.  This handler drops the header when the redirect
+    target differs from the original domain.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        new_req = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if new_req is None:
+            return None
+        # If redirected to a different host, strip auth
+        orig_host = urllib.parse.urlparse(req.full_url).netloc
+        new_host = urllib.parse.urlparse(newurl).netloc
+        if orig_host != new_host:
+            new_req.remove_header("Authorization")
+        return new_req
+
+
 def _get_job_logs(token: str, repo: str, job_id: int) -> str:
     """Download job logs (returns raw text, truncated)."""
     try:
@@ -180,7 +202,8 @@ def _get_job_logs(token: str, repo: str, job_id: int) -> str:
         req = urllib.request.Request(url)
         req.add_header("Authorization", f"token {token}")
         req.add_header("Accept", "application/vnd.github+json")
-        with urllib.request.urlopen(req, timeout=60) as resp:
+        opener = urllib.request.build_opener(_NoAuthRedirectHandler)
+        with opener.open(req, timeout=60) as resp:
             raw = resp.read().decode(errors="replace")
             # Return last 5000 chars (most relevant — test output is at the end)
             if len(raw) > 5000:
