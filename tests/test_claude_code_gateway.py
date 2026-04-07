@@ -237,14 +237,20 @@ class TestImportFallback:
         # so ImportError is raised before any code runs.
         # This documents that the SDK is a hard requirement (no CLI fallback).
         #
-        # To simulate absence even when SDK is installed, we set
-        # sys.modules["claude_agent_sdk"] = None — this makes Python's import
-        # machinery raise ImportError instead of searching sys.path.
+        # To simulate absence even when SDK is installed, we must:
+        # 1. Save and remove ALL claude_agent_sdk* entries from sys.modules
+        # 2. Set sys.modules["claude_agent_sdk"] = None (triggers ImportError)
+        # 3. Remove the cached gateway module
+        # Without step 1, Python may resolve sub-module imports from cached
+        # entries even when the top-level package is blocked.
         import importlib
-        saved = sys.modules.get("claude_agent_sdk")
-        sentinel = object()  # distinguish "was absent" from "was None"
-        if saved is None and "claude_agent_sdk" not in sys.modules:
-            saved = sentinel
+
+        # Save all SDK-related modules so we can restore them
+        saved_modules = {}
+        for key in list(sys.modules):
+            if key == "claude_agent_sdk" or key.startswith("claude_agent_sdk."):
+                saved_modules[key] = sys.modules.pop(key)
+
         try:
             # Block the import — setting to None triggers ImportError
             sys.modules["claude_agent_sdk"] = None
@@ -253,14 +259,15 @@ class TestImportFallback:
             with pytest.raises(ImportError):
                 importlib.import_module("ouroboros.gateways.claude_code")
         finally:
-            # Restore previous state
-            if saved is sentinel:
-                sys.modules.pop("claude_agent_sdk", None)
-            else:
-                sys.modules["claude_agent_sdk"] = saved
-            # Re-import with mock/real SDK
+            # Remove the None sentinel
+            sys.modules.pop("claude_agent_sdk", None)
+            # Restore all saved SDK modules
+            sys.modules.update(saved_modules)
+            # If nothing was saved (SDK not installed), ensure mock is in place
+            if not saved_modules:
+                _ensure_gateway_importable()
+            # Re-import gateway with real/mock SDK
             sys.modules.pop("ouroboros.gateways.claude_code", None)
-            _ensure_gateway_importable()
             importlib.import_module("ouroboros.gateways.claude_code")
 
 
