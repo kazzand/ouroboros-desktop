@@ -233,24 +233,32 @@ class TestImportFallback:
 
     def test_gateway_import_requires_sdk(self):
         """Without the real SDK (or our mock), import should raise ImportError."""
-        # We can't truly un-mock here, but we can verify the design intent:
         # The module does `from claude_agent_sdk import ...` at module level,
         # so ImportError is raised before any code runs.
         # This documents that the SDK is a hard requirement (no CLI fallback).
+        #
+        # To simulate absence even when SDK is installed, we set
+        # sys.modules["claude_agent_sdk"] = None — this makes Python's import
+        # machinery raise ImportError instead of searching sys.path.
         import importlib
         saved = sys.modules.get("claude_agent_sdk")
+        sentinel = object()  # distinguish "was absent" from "was None"
+        if saved is None and "claude_agent_sdk" not in sys.modules:
+            saved = sentinel
         try:
-            # Temporarily remove the mock
-            sys.modules.pop("claude_agent_sdk", None)
-            # Also remove cached gateway module
+            # Block the import — setting to None triggers ImportError
+            sys.modules["claude_agent_sdk"] = None
+            # Also remove cached gateway module so it re-imports
             sys.modules.pop("ouroboros.gateways.claude_code", None)
             with pytest.raises(ImportError):
                 importlib.import_module("ouroboros.gateways.claude_code")
         finally:
-            # Restore
-            if saved is not None:
+            # Restore previous state
+            if saved is sentinel:
+                sys.modules.pop("claude_agent_sdk", None)
+            else:
                 sys.modules["claude_agent_sdk"] = saved
-            # Re-import with mock
+            # Re-import with mock/real SDK
             sys.modules.pop("ouroboros.gateways.claude_code", None)
             _ensure_gateway_importable()
             importlib.import_module("ouroboros.gateways.claude_code")

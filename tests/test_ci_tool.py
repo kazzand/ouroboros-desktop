@@ -299,6 +299,43 @@ class TestToolRegistration:
         assert "timeout_minutes" in schema["parameters"]["properties"]
 
 
+class TestRedirectHandler:
+    """Verify _NoAuthRedirectHandler strips Authorization on cross-domain redirects."""
+
+    def test_strips_auth_on_cross_domain(self):
+        from ouroboros.tools.ci import _NoAuthRedirectHandler
+        import urllib.request
+
+        handler = _NoAuthRedirectHandler()
+        # Original request to github.com
+        orig_req = urllib.request.Request("https://api.github.com/repos/o/r/actions/jobs/1/logs")
+        orig_req.add_header("Authorization", "token ghp_secret123")
+
+        # Simulate redirect to Azure Blob Storage (different domain)
+        new_req = handler.redirect_request(
+            orig_req, None, 302, "Found", {},
+            "https://productionresults.blob.core.windows.net/logs/job-123?sig=abc"
+        )
+        assert new_req is not None
+        assert new_req.get_header("Authorization") is None
+
+    def test_keeps_auth_on_same_domain(self):
+        from ouroboros.tools.ci import _NoAuthRedirectHandler
+        import urllib.request
+
+        handler = _NoAuthRedirectHandler()
+        orig_req = urllib.request.Request("https://api.github.com/repos/o/r/actions/jobs/1/logs")
+        orig_req.add_header("Authorization", "token ghp_secret123")
+
+        # Redirect to same domain
+        new_req = handler.redirect_request(
+            orig_req, None, 302, "Found", {},
+            "https://api.github.com/repos/o/r/actions/jobs/1/logs?redirect=true"
+        )
+        assert new_req is not None
+        assert new_req.get_header("Authorization") == "token ghp_secret123"
+
+
 class TestProgressEmission:
     def test_progress_events_emitted(self, ctx, _gh_settings):
         """Verify that progress events are emitted during workflow."""
