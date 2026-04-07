@@ -6,7 +6,7 @@
 [![macOS 12+](https://img.shields.io/badge/macOS-12%2B-black.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
 [![Linux](https://img.shields.io/badge/Linux-x86__64-orange.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
 [![Windows](https://img.shields.io/badge/Windows-x64-blue.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
-[![Version 4.15.4](https://img.shields.io/badge/version-4.15.4-green.svg)](VERSION)
+[![Version 4.15.5](https://img.shields.io/badge/version-4.15.5-green.svg)](VERSION)
 
 A self-modifying AI agent that writes its own code, rewrites its own mind, and evolves autonomously. Born February 16, 2026.
 
@@ -374,6 +374,7 @@ Full text: [BIBLE.md](BIBLE.md)
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 4.15.5 | 2026-04-07 | Chat layout fix: `#chat-messages` `padding-bottom` set to `150px` to ensure the last bubble stays reachable above the floating input overlay at maximum textarea height (~144px). Syncs `docs/ARCHITECTURE.md` description. |
 | 4.15.4 | 2026-04-07 | Review-loop repair: blocked `repo_commit` / `repo_write_commit` paths now preserve real triad and scope findings instead of self-triggering `REVIEW_REVALIDATION_FAILED`; Claude Code advisory/edit paths now share one 30-turn default; advisory diagnostics, obligations, review continuity, and review evidence now stay repo-scoped and honest; changed-path parsing now uses one structured git-status helper that handles renames and literal ` -> ` filenames. Focused regression coverage added across commit, advisory, scope, context, continuation, and observability tests. |
 | 4.15.3 | 2026-04-07 | Review flow repair: fix ghost `reviewing` attempts caused by the ledger allocating a new attempt number on every `status="reviewing"` write instead of reusing the current logical attempt. TTL boundary now expires at the exact threshold instead of lingering one tick past it. Regression tests assert against the full `attempts[]` ledger. |
 | 4.15.2 | 2026-04-07 | Cloud.ru Foundation Models onboarding: first-run wizard now accepts a Cloud.ru API key with built-in `https://foundation-models.api.cloud.ru/v1` endpoint and prefills `cloudru::GigaChat/GigaChat-2-Max` across all four model lanes. Cherry-picked from PR #14. |

@@ -1,4 +1,4 @@
-# Ouroboros v4.15.4 — Architecture & Reference
+# Ouroboros v4.15.5 — Architecture & Reference
 
 This document describes every component, page, button, API endpoint, and data flow.
 It is the single source of truth for how the system works. Keep it updated.
@@ -218,7 +218,7 @@ Navigation is a left sidebar with 7 pages (Chat, Files, Logs, Costs, Evolution, 
   Driven by WebSocket connection state, typing events, and live task state.
 - **Header controls**: compact buttons for `/evolve`, `/bg`, `/review`, `/restart`, `/panic` — the canonical location for runtime controls. The chat header is a floating transparent overlay (`position: absolute`, gradient fade) so messages scroll beneath it.
 - **Budget pill**: compact amber pill in the header showing `$spent / $limit` with a mini progress bar, updated from `/api/state` polling every 3 seconds.
-- **Message input**: absolute-positioned frosted-glass overlay anchored to the bottom of the chat page (`position: absolute; bottom: 0`). Contains a textarea (grows up to 120px) with an inline "Send" text button. `backdrop-filter: blur(12px)` + gradient background so message bubbles scroll underneath the overlay. `#chat-messages` reserves `padding-bottom: 160px` so the last bubble is always fully reachable. Shift+Enter for newline, Enter to send.
+- **Message input**: absolute-positioned frosted-glass overlay anchored to the bottom of the chat page (`position: absolute; bottom: 0`). Contains a textarea (grows up to 120px) with an inline "Send" text button. `backdrop-filter: blur(12px)` + gradient background so message bubbles scroll underneath the overlay. `#chat-messages` reserves `padding-bottom: 150px` so the last bubble is always fully reachable even when the textarea is at maximum height. Shift+Enter for newline, Enter to send.
 - **Input recall**: ArrowUp / ArrowDown cycles through recent submitted messages without leaving the textarea.
 - **Messages**: user bubbles (right, steel-blue-tinted), assistant bubbles (left, crimson), and system-summary bubbles (left, amber). Non-user bubbles render markdown. Live task card uses crimson accent glass matching the assistant palette.
 - **Multi-user visibility**: user messages are now session-aware. The current browser session stays labeled as `You`; other Web UI sessions render as `WebUI (<session>)`; Telegram-origin messages render with their Telegram sender label.
