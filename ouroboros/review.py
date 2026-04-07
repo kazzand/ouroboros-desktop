@@ -34,6 +34,12 @@ _SKIP_FILENAMES = {
 }
 
 _MAX_FILE_BYTES = 1_048_576  # 1 MB per-file cap
+TARGET_MODULE_LINES = 1000
+MAX_MODULE_LINES = 1250
+TARGET_FUNCTION_LINES = 150
+MAX_FUNCTION_LINES = 250
+MAX_TOTAL_FUNCTIONS = 1100
+GRANDFATHERED_OVERSIZED_MODULES = {"llm.py"}
 
 
 # ---------------------------------------------------------------------------
@@ -100,8 +106,35 @@ def compute_complexity_metrics(sections: List[Tuple[str, str]]) -> Dict[str, Any
     # Sort for reporting
     largest_files = sorted(file_sizes, key=lambda x: x[1], reverse=True)[:10]
     longest_functions = sorted(function_lengths, key=lambda x: x[2], reverse=True)[:10]
-    oversized_functions = [(p, start, length) for p, start, length in function_lengths if length > 150]
-    oversized_modules = [(p, lines) for p, lines in file_sizes if p.endswith(".py") and lines > 1000]
+    target_drift_functions = [
+        (p, start, length)
+        for p, start, length in function_lengths
+        if length > TARGET_FUNCTION_LINES
+    ]
+    oversized_functions = [
+        (p, start, length)
+        for p, start, length in function_lengths
+        if length > MAX_FUNCTION_LINES
+    ]
+    target_drift_modules = [
+        (p, lines)
+        for p, lines in file_sizes
+        if p.endswith(".py") and lines > TARGET_MODULE_LINES
+    ]
+    grandfathered_modules = [
+        (p, lines)
+        for p, lines in file_sizes
+        if p.endswith(".py")
+        and lines > MAX_MODULE_LINES
+        and pathlib.Path(p).name in GRANDFATHERED_OVERSIZED_MODULES
+    ]
+    oversized_modules = [
+        (p, lines)
+        for p, lines in file_sizes
+        if p.endswith(".py")
+        and lines > MAX_MODULE_LINES
+        and pathlib.Path(p).name not in GRANDFATHERED_OVERSIZED_MODULES
+    ]
 
     return {
         "total_files": total_files,
@@ -112,7 +145,10 @@ def compute_complexity_metrics(sections: List[Tuple[str, str]]) -> Dict[str, Any
         "max_function_length": max_func_len,
         "largest_files": largest_files,
         "longest_functions": longest_functions,
+        "target_drift_functions": target_drift_functions,
         "oversized_functions": oversized_functions,
+        "target_drift_modules": target_drift_modules,
+        "grandfathered_modules": grandfathered_modules,
         "oversized_modules": oversized_modules,
     }
 

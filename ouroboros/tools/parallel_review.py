@@ -66,6 +66,21 @@ def _format_scope_advisory_msg(scope_result) -> str:
     return "---\n" + "\n".join(parts) if parts else ""
 
 
+def _format_advisory_entry(entry) -> str:
+    if isinstance(entry, dict):
+        severity = str(entry.get("severity", "advisory") or "advisory").upper()
+        tags = []
+        if entry.get("tag"):
+            tags.append(str(entry.get("tag")))
+        if entry.get("model"):
+            tags.append(f"model={entry.get('model')}")
+        label = str(entry.get("item") or entry.get("reason") or "?")
+        reason = str(entry.get("reason", "") or "")
+        tag_prefix = " ".join(f"[{tag}]" for tag in tags)
+        return f"[{severity}] {tag_prefix} {label}: {reason}".strip()
+    return str(entry)
+
+
 # ── Core parallel orchestration ──────────────────────────────────────────────
 
 def run_parallel_review(ctx, commit_message, *, goal="", scope="", review_rebuttal=""):
@@ -157,7 +172,7 @@ def aggregate_review_verdict(review_err, scope_result, triad_block_reason, triad
     - (False, None, '', [], items) when both reviewers passed — caller should surface scope_advisory_items.
     - (True, msg, reason, findings, items) when blocked.
 
-    scope_advisory_items is a list of strings formatted for ctx._review_advisory,
+    scope_advisory_items is a list of structured advisory entries for ctx._review_advisory,
     so non-blocking scope findings stay visible on the main thread.
     """
     _combined_blocked = False
@@ -168,11 +183,21 @@ def aggregate_review_verdict(review_err, scope_result, triad_block_reason, triad
     # Build scope advisory items for ctx surfacing (regardless of blocked/not)
     if scope_result is not None:
         for f in (scope_result.critical_findings or []):
-            _scope_advisory_items.append(
-                f"SCOPE CRITICAL (advisory mode): [scope:{f['item']}] {f.get('reason', '')}")
+            _scope_advisory_items.append({
+                "severity": "critical",
+                "tag": "scope",
+                "item": str(f.get("item", "") or ""),
+                "reason": str(f.get("reason", "") or ""),
+                "verdict": "FAIL",
+            })
         for f in (scope_result.advisory_findings or []):
-            _scope_advisory_items.append(
-                f"SCOPE WARN: [scope:{f['item']}] {f.get('reason', '')}")
+            _scope_advisory_items.append({
+                "severity": "advisory",
+                "tag": "scope",
+                "item": str(f.get("item", "") or ""),
+                "reason": str(f.get("reason", "") or ""),
+                "verdict": "FAIL",
+            })
 
     if review_err:
         _combined_blocked = True
@@ -209,8 +234,7 @@ def aggregate_review_verdict(review_err, scope_result, triad_block_reason, triad
 
     if triad_advisory and not review_err:
         adv_text = "\n".join(
-            f"  ⚠️ Advisory: {a}" if isinstance(a, str)
-            else f"  ⚠️ Advisory: {a.get('item', '?')}: {a.get('reason', '')}"
+            f"  ⚠️ Advisory: {_format_advisory_entry(a)}"
             for a in triad_advisory[:5]
         )
         combined_msg += f"\n\n---\nTriad advisory findings:\n{adv_text}"

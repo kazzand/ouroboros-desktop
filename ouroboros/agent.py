@@ -365,6 +365,16 @@ class OuroborosAgent:
                         )
                     except Exception:
                         pass
+                    try:
+                        from ouroboros.task_continuation import capture_review_continuation_from_state
+                        capture_review_continuation_from_state(
+                            self.env.drive_root,
+                            task,
+                            source="task_exception",
+                            warning=f"{type(e).__name__}: {e}",
+                        )
+                    except Exception:
+                        log.debug("Failed to persist review continuation after task exception", exc_info=True)
 
             if not isinstance(text, str) or not text.strip():
                 text = "⚠️ Model returned an empty response. Try rephrasing your request."

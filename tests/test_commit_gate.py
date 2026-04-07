@@ -683,11 +683,11 @@ def test_advisory_prompt_strictness_formulations():
 
 
 def test_advisory_prompt_references_architecture_doc_via_read_tool():
-    """Advisory prompt must reference ARCHITECTURE.md so the reviewer can fetch it via Read tool.
+    """Advisory prompt must inline ARCHITECTURE.md content when available.
 
-    ARCHITECTURE.md is excluded from the prompt body (to keep advisory context lean and
-    avoid prompt-bloat that caused CLI timeouts). Instead the prompt instructs the reviewer
-    to use the Read tool to access it when needed for version-sync / self_consistency checks.
+    The v4.15.1 prompt restores ARCHITECTURE.md directly into the advisory context so
+    the reviewer always sees version-sync and module-structure facts without an extra
+    read step. The touched-file pack must avoid duplicating it separately.
     """
     import subprocess
     adv_mod = _get_advisory_module()
@@ -705,12 +705,10 @@ def test_advisory_prompt_references_architecture_doc_via_read_tool():
 
         prompt = adv_mod._build_advisory_prompt(repo_dir, "test commit")
 
-        # ARCHITECTURE.md must be referenced (via Read-tool hint) but NOT inlined into the prompt
-        # body — it is too large (~60K chars) and caused silent CLI timeouts on wider snapshots.
-        assert "ARCHITECTURE.md" in prompt, "Prompt must reference ARCHITECTURE.md"
-        # The reference is a Read-tool hint, not full content injection
-        assert "Ouroboros v99.0.0" not in prompt, (
-            "ARCHITECTURE.md content must NOT be inlined — only reference it via Read tool hint"
+        assert "ARCHITECTURE.md" in prompt, "Prompt must include an ARCHITECTURE.md section"
+        assert "## ARCHITECTURE.md" in prompt, "Prompt should expose ARCHITECTURE.md as a first-class section"
+        assert "Ouroboros v99.0.0" in prompt, (
+            "ARCHITECTURE.md content should now be inlined for advisory review"
         )
 
 

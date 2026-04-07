@@ -1,4 +1,4 @@
-# Ouroboros v4.15.0 — Architecture & Reference
+# Ouroboros v4.15.1 — Architecture & Reference
 
 This document describes every component, page, button, API endpoint, and data flow.
 It is the single source of truth for how the system works. Keep it updated.
@@ -55,12 +55,14 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on localhost:8765
       ├── launcher_bootstrap.py ← Bundle-to-repo bootstrap and managed sync helpers (used by launcher.py)
       ├── provider_models.py   ← Provider-specific model ID helpers, direct-provider defaults (OpenAI, Anthropic)
       ├── reflection.py        ← Execution reflection and pattern capture
+      ├── review_evidence.py   ← Structured review findings/obligations snapshot for summaries and reflections
       ├── server_auth.py       ← Non-localhost auth gate (OUROBOROS_NETWORK_PASSWORD)
       ├── server_control.py    ← Process-control helpers: restart, panic stop
       ├── server_entrypoint.py ← CLI argument parsing, port-binding helpers
       ├── server_history_api.py ← Chat history + cost breakdown endpoints
       ├── server_runtime.py    ← Server startup/onboarding and WebSocket liveness helpers
       ├── server_web.py        ← Static web file helpers (NoCacheStaticFiles, web dir resolver)
+      ├── task_continuation.py ← Durable per-task review continuation state across restart/outage
       ├── task_results.py      ← Durable task result/status files (task_results/<id>.json)
       ├── tool_capabilities.py ← SSOT for tool sets (core, parallel-safe, truncation, browser)
       ├── tool_policy.py       ← Tool access policy and gating (imports from tool_capabilities)
@@ -69,8 +71,10 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on localhost:8765
       ├── gateways/            ← External API adapters (thin transport, no business logic)
       │   └── claude_code.py   ← Claude Agent SDK gateway (edit + read-only paths)
       ├── tools/               ← Auto-discovered tool plugins
+      │   ├── claude_advisory_review.py ← Advisory pre-review tool (read-only Claude Agent SDK)
       │   ├── commit_gate.py     ← Advisory freshness gate and commit-attempt recording (extracted from git.py)
       │   ├── parallel_review.py ← Parallel triad+scope orchestration and verdict aggregation (extracted from git.py)
+      │   ├── review.py          ← Triad diff review (3-model parallel review against CHECKLISTS.md)
       │   ├── review_helpers.py  ← Shared review helpers (section loader, file packs, intent)
       │   └── scope_review.py   ← Blocking scope reviewer (opus, fail-closed)
       └── compat.py            ← Cross-platform process/path/locking helpers
@@ -114,7 +118,9 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on localhost:8765
 │   ├── settings.json   ← User settings (API keys, models, budget)
 │   ├── state/
 │   │   ├── state.json  ← Runtime state (spent_usd, session_id, branch, etc.)
-│   │   └── queue_snapshot.json
+│   │   ├── advisory_review.json ← Durable advisory/review ledger (runs, attempts, obligations)
+│   │   ├── queue_snapshot.json
+│   │   └── review_continuations/ ← Per-task blocked-review continuation payloads (+ quarantined corrupt files under `corrupt/`)
 │   ├── memory/
 │   │   ├── identity.md     ← Agent's self-description (persistent)
 │   │   ├── scratchpad.md   ← Working memory (auto-generated from scratchpad_blocks.json)
@@ -537,12 +543,13 @@ backward compatibility but is not the runtime authority.
   Includes `review_rebuttal` parameter for disputing reviewer feedback.
 - **`repo_write_commit`**: legacy single-file write+commit (kept for compatibility).
   Also runs unified review before commit.
-- **Unified pre-commit review** (v3.24.0): 3 models review staged diff against
-  `docs/CHECKLISTS.md`. Review always runs before commit. `Blocking` mode keeps
-  critical findings as hard gates; `Advisory` mode surfaces the same findings
-  as warnings and lets the commit continue. Review history carried across
-  blocking iterations. Quorum: at least 2 of 3 reviewers must succeed in
-  blocking mode. Deterministic preflight (uses `git diff --cached --name-status`;
+- **Unified pre-commit review** (v3.24.0): triad diff review (3 models against
+  `docs/CHECKLISTS.md`) plus a blocking scope review that runs in parallel on the
+  same staged snapshot. `Blocking` mode keeps critical findings as hard gates;
+  `Advisory` mode surfaces the same findings as warnings and lets the commit
+  continue. Review history carried across blocking iterations. Quorum: at least
+  2 of 3 triad reviewers must succeed in blocking mode. Deterministic preflight
+  (uses `git diff --cached --name-status`;
   renames expand to `D src + A dst`; copies expand to `A dst` only; deleted files excluded
   from companion-file presence checks) catches VERSION/README mismatches; blocks when any
   `.py` file under `ouroboros/` or `supervisor/` is added, modified, deleted, or renamed
@@ -609,6 +616,9 @@ the constitutional guard is that the file itself must remain non-deletable.
 - Triggered at end of task when tool calls had errors or results contained
   blocking markers (`REVIEW_BLOCKED`, `TESTS_FAILED`, `COMMIT_BLOCKED`, etc.)
 - Light LLM produces 150-250 word reflection capturing goal, errors, root cause, lessons
+- Reflection prompt now includes structured review evidence (recent reviewed attempts,
+  advisory runs, open obligations, live freshness, continuations) so blocked-review lessons
+  affect process memory instead of collapsing into a generic failure note.
 - Stored in `logs/task_reflections.jsonl`; last 20 entries loaded into dynamic context
 - Pattern register: recurring error classes tracked in `memory/knowledge/patterns.md`
   via LLM, loaded into semi-stable context as "Known error patterns"
@@ -628,6 +638,8 @@ the constitutional guard is that the file itself must remain non-deletable.
 - Duplicate rejects are persisted explicitly, so `wait_for_task()` can report honest status instead of pretending the task is still running.
 - Completed subtasks persist the full result text; parent tasks no longer see silently clipped child output.
 - When a subtask completes, a compact trace summary is included alongside the full result.
+- Task results also persist `review_evidence` so blocked-review history, obligations, and
+  advisory state can feed summaries, reflections, and later diagnostics from the same durable record.
 - Parent tasks see tool call counts, error counts, and agent notes.
 - Trace compaction remains explicit: max 4000 chars with visible omission markers, plus first/last 15 tool calls for long traces.
 
@@ -637,6 +649,9 @@ the constitutional guard is that the file itself must remain non-deletable.
 - As of v3.20.0, `patterns.md` (Pattern Register) is injected into semi-stable context, and execution reflections from `task_reflections.jsonl` are injected into dynamic context.
 - As of v3.22.0, all docs are always in static context: BIBLE.md (180k), ARCHITECTURE.md (60k), DEVELOPMENT.md (30k), README.md (10k), CHECKLISTS.md (5k).
 - `Health Invariants` are placed at the start of the dynamic context block, before drive state/runtime/recent sections, so warnings influence planning before the model reads the noisier tail sections.
+- Main task context now injects a dedicated `Review Continuity` section between runtime and recent-history sections:
+  live repo gate status, stale markers, bypass reasons, open obligations, open review continuations,
+  and the recent review ledger.
 - `build_recent_sections()` keeps recent dialogue broad, but task-scopes recent progress/tools/events when `task_id` is available.
 - `build_health_invariants()` is split into focused helpers and now also surfaces recent provider/routing errors plus local context overflows.
 - Local-model path no longer silently slices the live system prompt. It compacts non-core sections explicitly and raises an overflow error if core context still cannot fit.
@@ -653,7 +668,7 @@ touched-file pack builder (`build_touched_file_pack`, 1MB file limit; sensitive 
 (`build_full_repo_pack` — no char cap, binary/vendored/sensitive filtering, replaces deprecated
 `build_broader_repo_pack`), HEAD snapshot section builder, goal/scope resolution,
 advisory SDK diagnostic helpers (`get_advisory_runtime_diagnostics`, `format_advisory_sdk_error`)
-shared with `claude_advisory_review.py` to keep that module within the ~1000-line context-window limit (P5).
+shared with `claude_advisory_review.py` to keep that module closer to the one-context-window target (P5).
 `_FILE_SIZE_LIMIT` was raised from 100KB to 1MB in v4.13.0 to stop cutting off normal-sized files.
 
 All LLM calls in the review stack (triad `_query_model`, scope `run_scope_review`) route through
@@ -666,14 +681,12 @@ errors surface via the same observability path.
 - **`advisory_pre_review`** tool: runs a read-only Claude Agent SDK review of the current
   worktree BEFORE `repo_commit`. Permitted tools: `Read`, `Grep`, `Glob` only (no Edit/Bash).
   Model resolved via `resolve_claude_code_model()` — respects `CLAUDE_CODE_MODEL` setting,
-  defaults to `opus` (same helper used by `claude_code_edit`). Prompt includes only the "Repo Commit Checklist" section from
-  CHECKLISTS.md (precise section loader), plus BIBLE.md, DEVELOPMENT.md,
+  defaults to `opus` (same helper used by `claude_code_edit`). Prompt includes the "Repo Commit Checklist" section from
+  CHECKLISTS.md (precise section loader), plus BIBLE.md, DEVELOPMENT.md, ARCHITECTURE.md,
   touched-file pack, goal/scope sections, git status, and worktree diff.
-  `ARCHITECTURE.md` is NOT inlined (too large — ~60K chars caused silent CLI timeouts on wide
-  snapshots); instead the prompt references it as a Read-tool hint so the reviewer can fetch it
-  when needed for version-sync / self_consistency checks.
 - **Advisory budget gate** (v4.15.0): if the assembled advisory prompt exceeds
-  `_ADVISORY_PROMPT_MAX_CHARS` (~400K chars / ~100K tokens), advisory is skipped with a
+  `_ADVISORY_PROMPT_MAX_CHARS` (~1.6M chars / ~400K tokens — Claude Code has a 1M token
+  context, so 400K tokens leaves healthy headroom), advisory is skipped with a
   non-blocking `⚠️ ADVISORY_SKIPPED:` warning instead of timing out silently.
 - **Obligation-based blocking history injection** (v4.12.0): when previous `repo_commit`
   calls were blocked, their `critical_findings` are accumulated as structured `ObligationItem`
@@ -688,14 +701,17 @@ errors surface via the same observability path.
   item in the same run). `on_successful_commit()` clears all obligations on a successful commit.
 - **Auto-stale on edit** (v4.12.0): `_repo_write` and `_str_replace_editor` automatically call
   `mark_advisory_stale_after_edit()` after any successful worktree write, setting
-  `last_stale_from_edit_ts` and marking all fresh/bypassed runs as stale. `add_run()` clears
-  this flag when any advisory runs for the current snapshot (including `parse_failure`).
+  `last_stale_from_edit_ts` and marking all fresh/bypassed runs as stale. This was later generalized
+  to repo-scoped invalidation after successful worktree mutations from `_repo_write`,
+  `_str_replace_editor`, `claude_code_edit`, and mutating `run_shell` / commit paths.
+  `add_run()` clears this flag when any advisory runs for the current snapshot (including `parse_failure`).
 - **`review_status`** tool: read-only diagnostic showing advisory freshness, open obligations,
   staleness-from-edit, last commit attempt state, and a concrete next-step recommendation.
   Returns structured JSON with: `latest_advisory_status`, `latest_advisory_hash`, `stale_from_edit`,
   `open_obligations_count`, `next_step`, plus `last_commit_attempt` details when blocked/failed.
 - **`review_state.py`**: durable state. State file: `data/state/advisory_review.json`.
-  Stores last 10 advisory runs plus bounded blocking-attempt history and open obligations.
+  Stores advisory runs plus a typed reviewed-attempt ledger, bounded blocking-attempt history,
+  open obligations, stale markers, repo/tool/task identities, and reviewed-diff fingerprints.
   Advisory runs have: `snapshot_hash`, `commit_message`, `status`
   (fresh/stale/bypassed/skipped/parse_failure), `items`, `raw_result` (full, no truncation), audit fields,
   `snapshot_paths` (optional list of paths used to compute the scoped hash — `None` = whole repo).
@@ -706,14 +722,27 @@ errors surface via the same observability path.
   `is_fresh()` considers `status in ("fresh", "bypassed", "skipped")` — budget-gate skips
   are treated as valid coverage so the commit gate does not re-block after a non-blocking skip.
   Commit attempts have: `status` (reviewing/blocked/succeeded/failed), `block_reason`
-  (no_advisory/critical_findings/review_quorum/parse_failure/infra_failure/scope_blocked/preflight),
-  `block_details`, `duration_sec`, `critical_findings` (structured list of `{verdict, severity, item, reason, model}`).
+  (no_advisory/critical_findings/review_quorum/parse_failure/infra_failure/scope_blocked/preflight/overlap_guard/revalidation_failed/fingerprint_unavailable),
+  `block_details`, `duration_sec`, `critical_findings`, `advisory_findings`, `readiness_warnings`,
+  `late_result_pending`, `pre_review_fingerprint`, `post_review_fingerprint`, `fingerprint_status`,
+  `degraded_reasons`, and `(repo_key, tool_name, task_id, attempt)` identity.
   New fields: `blocking_history` (last 10 blocked attempts), `open_obligations` (list of
   `ObligationItem` with `obligation_id`, `item`, `severity`, `reason`, `source_attempt_ts`, `source_attempt_msg`, `status`, `resolved_by`),
-  `last_stale_from_edit_ts` (timestamp when a write-tool last invalidated the advisory).
+  `last_stale_from_edit_ts` / `last_stale_reason` / `last_stale_repo_key`, plus explicit lock-backed state updates.
   `add_blocking_attempt()` populates open obligations from `critical_findings`; `on_successful_commit()`
-  clears all obligations. `mark_advisory_stale_after_edit()` sets `last_stale_from_edit_ts` and
-  marks all fresh and bypassed runs as stale — called automatically by `_repo_write` and `_str_replace_editor`.
+  clears all obligations. Advisory invalidation is repo-scoped and triggered automatically by successful
+  mutations from `_repo_write`, `_str_replace_editor`, `claude_code_edit`, mutating `run_shell`, and
+  reviewed commit flows when they change worktree state.
+- **`task_continuation.py`**: durable `data/state/review_continuations/<task_id>.json` payloads for blocked or interrupted review work.
+  Built from durable review state, isolated per task, cleared only for the
+  current task on successful reviewed commits, and surfaced on startup plus in
+  `Review Continuity` context. Corrupt active payloads are quarantined under
+  `review_continuations/corrupt/` so valid state can replace them without losing
+  the corruption signal.
+- **`review_evidence.py`**: structured collector that snapshots review ledger state, live advisory freshness,
+  open obligations, and continuations into `task_results`, task summaries, and
+  execution reflections. When `task_id` is present, `recent_attempts` stays
+  task-scoped rather than silently falling back to another task's repo history.
 - **Snapshot hash**: deterministic SHA-256 of changed file content digests only.
   Commit message is NOT part of the hash (decoupled for less brittle freshness).
   Path-aware: `paths` parameter scopes the hash to specific files.
@@ -739,7 +768,7 @@ errors surface via the same observability path.
 - `_scope_review_history` carries scope findings across retry rounds. Stored as `{snapshot_key: [entries]}` where `snapshot_key` is a SHA-256 prefix of the staged diff — findings from a prior blocked attempt on a different diff are not shown to the reviewer. Cleared to `{}` on a successful commit. Not in safety-critical registry.py (accessed via `getattr`).
 - History snapshot taken before parallel launch so scope sees consistent state regardless of triad execution order.
 - Applies to both `_repo_commit_push` and `_repo_write_commit` (legacy path).
-- Orchestration logic extracted to `ouroboros/tools/parallel_review.py` (P5 Minimalism — keeps git.py under 1000 lines).
+- Orchestration logic extracted to `ouroboros/tools/parallel_review.py` (P5 Minimalism — relieves git.py size pressure).
 
 #### Triad diff review (enriched)
 

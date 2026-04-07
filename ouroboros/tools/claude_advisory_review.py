@@ -33,12 +33,15 @@ from ouroboros.review_state import (
     compute_snapshot_hash,
     format_status_section,
     load_state,
+    make_repo_key,
     save_state,
+    update_state,
     _utc_now,
 )
 from ouroboros.tools.review_helpers import (
+    build_advisory_changed_context,
+    build_blocking_findings_json_section,
     load_checklist_section,
-    build_touched_file_pack,
     build_goal_section,
     build_scope_section,
     get_advisory_runtime_diagnostics as _get_runtime_diagnostics,
@@ -55,7 +58,8 @@ log = logging.getLogger(__name__)
 
 _MAX_DIFF_CHARS_ERROR = 500_000  # Fail loudly above this — split the commit
 # Advisory prompt budget gate — non-blocking skip when prompt too large (mirrors scope review)
-_ADVISORY_PROMPT_MAX_CHARS = 400_000  # ~100K tokens
+# Claude Code has a 1M token context; 1.6M chars ≈ 400K tokens leaves healthy headroom.
+_ADVISORY_PROMPT_MAX_CHARS = 1_600_000  # ~400K tokens
 
 
 def _load_doc(repo_dir: pathlib.Path, relpath: str, fallback: str = "") -> str:
@@ -148,64 +152,10 @@ def _build_blocking_history_section(drive_root: pathlib.Path) -> str:
     except Exception:
         return ""
 
-    open_obs = state.get_open_obligations()
-    blocking_history = state.blocking_history
-
-    # Only emit when there are actual open obligations — if all are resolved,
-    # the section is no longer needed and its "issues NOT fixed" language is false.
-    if not open_obs:
-        return ""
-
-    lines = [
-        "## Unresolved obligations from previous blocking rounds",
-        "Previous `repo_commit` calls were BLOCKED. The issues below are still unresolved.",
-        "Your advisory review should explicitly address EACH obligation:",
-        "  - If fixed: state WHAT in the current snapshot closes it.",
-        "  - If not fixed: FAIL the corresponding checklist item.",
-        "A generic PASS without addressing these obligations is a weak signal.",
-        "",
-        f"### Open obligations ({len(open_obs)} unresolved):",
-    ]
-    for i, ob in enumerate(open_obs, 1):
-        lines.append(f"**Obligation {i}** [id={ob.obligation_id}]")
-        lines.append(f"  Checklist item: `{ob.item}` (severity: {ob.severity})")
-        lines.append(f"  Issue: {ob.reason}")
-        lines.append(f"  Source: {ob.source_attempt_ts[:16]} | commit: \"{ob.source_attempt_msg[:80]}\"")
-        lines.append("")
-
-    # Also include a deduplicated summary of blocking_history for full context
-    if blocking_history:
-        lines.append("### Blocking history summary (most recent first):")
-        lines.append("")
-        seen_reasons: set = set()
-        for attempt in reversed(blocking_history[-4:]):  # last 4 blocking attempts
-            ts = attempt.ts[:16]
-            reason = attempt.block_reason
-            key = f"{reason}:{attempt.commit_message[:40]}"
-            if key in seen_reasons:
-                continue
-            seen_reasons.add(key)
-            lines.append(f"- [{ts}] block_reason={reason} | \"{attempt.commit_message[:80]}\"")
-            # Show critical findings from this attempt
-            for finding in (attempt.critical_findings or [])[:4]:
-                if isinstance(finding, dict):
-                    reason_txt = _truncate_review_reason(str(finding.get('reason', '')))
-                    lines.append(f"    CRITICAL [{finding.get('item','?')}]: {reason_txt}")
-            # Fallback: parse block_details if no structured findings
-            if not attempt.critical_findings and attempt.block_details:
-                for detail_line in attempt.block_details.split("\n"):
-                    stripped = detail_line.strip()
-                    if stripped.startswith("CRITICAL:") or stripped.startswith("  CRITICAL:"):
-                        lines.append(f"    {_truncate_review_reason(stripped)}")
-        lines.append("")
-
-    lines.append(
-        "REQUIRED: For each obligation above, your JSON output MUST include an entry "
-        "for the corresponding checklist item — either PASS (with evidence of the fix) "
-        "or FAIL (if the issue persists). Do NOT omit these items."
+    return build_blocking_findings_json_section(
+        state.get_open_obligations(),
+        state.blocking_history,
     )
-
-    return "\n".join(lines)
 
 
 def _build_advisory_prompt(
@@ -213,10 +163,12 @@ def _build_advisory_prompt(
     commit_message: str,
     goal: str = "",
     scope: str = "",
-    paths: Optional[List[str]] = None,
+    resolved_paths: Optional[List[str]] = None,
     drive_root: Optional[pathlib.Path] = None,
     diff: Optional[str] = None,
     changed_files: Optional[str] = None,
+    touched_pack: str = "",
+    omitted_paths: Optional[List[str]] = None,
 ) -> str:
     """Build the read-only advisory review prompt.
 
@@ -235,12 +187,11 @@ def _build_advisory_prompt(
     except Exception:
         checklists = _load_doc(repo_dir, "docs/CHECKLISTS.md", "(CHECKLISTS.md not found)")
     dev_guide = _load_doc(repo_dir, "docs/DEVELOPMENT.md", "(DEVELOPMENT.md not found)")
+    arch_doc = _load_doc(repo_dir, "docs/ARCHITECTURE.md", "(ARCHITECTURE.md not found)")
     if diff is None:
-        diff = _get_staged_diff(repo_dir, paths=paths)
+        diff = _get_staged_diff(repo_dir, paths=resolved_paths)
     if changed_files is None:
-        changed_files = _get_changed_file_list(repo_dir, paths=paths)
-
-    touched_pack, _omitted = build_touched_file_pack(repo_dir, paths)
+        changed_files = _get_changed_file_list(repo_dir, paths=resolved_paths)
     goal_section = build_goal_section(goal, scope, commit_message)
     scope_section = build_scope_section(scope)
 
@@ -248,6 +199,15 @@ def _build_advisory_prompt(
     blocking_history = ""
     if drive_root:
         blocking_history = _build_blocking_history_section(drive_root)
+
+    omitted_note = ""
+    if omitted_paths:
+        preview = ", ".join(list(omitted_paths)[:5])
+        if len(omitted_paths) > 5:
+            preview += f", +{len(omitted_paths) - 5} more"
+        omitted_note = (
+            f"\n*(Inline pack contains omission notes for {len(omitted_paths)} path(s): {preview})*\n"
+        )
 
     prompt = f"""\
 You are performing a pre-commit review of an Ouroboros self-modifying AI agent codebase.
@@ -299,9 +259,9 @@ Return ONLY a JSON array. Each element:
 
 {bible}
 
-Note: ARCHITECTURE.md is available in the repo at docs/ARCHITECTURE.md — use the Read tool
-to inspect it if you need to check version sync (item 7/8/9) or module structure (item 13).
-It is excluded from this prompt to keep the advisory context lean.
+## ARCHITECTURE.md (System structure — critical for version sync and module checks)
+
+{arch_doc}
 
 {blocking_history}
 
@@ -316,6 +276,7 @@ It is excluded from this prompt to keep the advisory context lean.
 ## Current touched files (full content — read these with the Read tool for deeper inspection)
 
 {touched_pack}
+{omitted_note}
 
 ## Staged diff
 
@@ -373,20 +334,25 @@ def _run_claude_advisory(
 
     # Parse touched paths from porcelain output to avoid a second git-status call inside
     # build_touched_file_pack.  Lines are "XY filename" or "(clean — no changed files)".
-    resolved_paths: list[str] = list(paths) if paths is not None else []
-    if not paths and not changed_files_text.startswith("(clean"):
-        resolved_paths = []
-        for line in changed_files_text.splitlines():
-            if len(line) >= 4:
-                entry = line[3:]
-                if " -> " in entry:
-                    entry = entry.split(" -> ", 1)[1]
-                resolved_paths.append(entry.strip())
-
     try:
+        always_inlined = {"docs/ARCHITECTURE.md"}
+        resolved_paths, touched_pack, omitted_paths = build_advisory_changed_context(
+            repo_dir,
+            changed_files_text=changed_files_text,
+            paths=paths,
+            exclude_paths=always_inlined,
+        )
         prompt = _build_advisory_prompt(
-            repo_dir, commit_message, goal=goal, scope=scope, paths=resolved_paths,
-            drive_root=drive_root, diff=diff_text, changed_files=changed_files_text,
+            repo_dir,
+            commit_message,
+            goal=goal,
+            scope=scope,
+            resolved_paths=resolved_paths,
+            drive_root=drive_root,
+            diff=diff_text,
+            changed_files=changed_files_text,
+            touched_pack=touched_pack,
+            omitted_paths=omitted_paths,
         )
     except RuntimeError as exc:
         return [], f"⚠️ ADVISORY_ERROR: failed to build advisory prompt: {exc}"
@@ -520,17 +486,31 @@ def _record_bypass(ctx: ToolContext, state: "AdvisoryReviewState", snapshot_hash
                    snapshot_paths: Optional[List[str]] = None) -> str:
     """Audit, record, and save a bypassed advisory run. Returns JSON response."""
     _audit_bypass(ctx, snapshot_hash, commit_message, reason, task_id)
-    run = AdvisoryRunRecord(
-        snapshot_hash=snapshot_hash,
-        commit_message=commit_message,
-        status="bypassed",
-        ts=_utc_now(),
-        bypass_reason=reason,
-        bypassed_by_task=task_id,
-        snapshot_paths=snapshot_paths,
-    )
-    state.add_run(run)
-    save_state(drive_root, state)
+    repo_key = make_repo_key(pathlib.Path(ctx.repo_dir))
+
+    def _mutate(bypass_state: "AdvisoryReviewState") -> None:
+        next_run_attempt = len(
+            bypass_state.filter_advisory_runs(
+                repo_key=repo_key,
+                tool_name="advisory_pre_review",
+                task_id=task_id,
+            )
+        ) + 1
+        bypass_state.add_run(AdvisoryRunRecord(
+            snapshot_hash=snapshot_hash,
+            commit_message=commit_message,
+            status="bypassed",
+            ts=_utc_now(),
+            bypass_reason=reason,
+            bypassed_by_task=task_id,
+            snapshot_paths=snapshot_paths,
+            repo_key=repo_key,
+            tool_name="advisory_pre_review",
+            task_id=task_id,
+            attempt=next_run_attempt,
+        ))
+
+    update_state(drive_root, _mutate)
     if "ANTHROPIC_API_KEY" in reason:
         msg = (
             "⚠️ ANTHROPIC_API_KEY is not set — advisory review skipped automatically. "
@@ -659,6 +639,7 @@ def _handle_advisory_pre_review(
     """
     repo_dir = pathlib.Path(ctx.repo_dir)
     drive_root = pathlib.Path(ctx.drive_root)
+    repo_key = make_repo_key(repo_dir)
 
     snapshot_hash = compute_snapshot_hash(repo_dir, commit_message, paths=paths)
     state = load_state(drive_root)
@@ -726,18 +707,30 @@ def _handle_advisory_pre_review(
     # snapshot as having been reviewed (is_fresh returns True for status="skipped").
     if raw_result.startswith("⚠️ ADVISORY_SKIPPED:"):
         snapshot_summary = f"{changed_files.count(chr(10)) + 1} file(s) changed"
-        skip_run = AdvisoryRunRecord(
-            snapshot_hash=snapshot_hash,
-            commit_message=commit_message,
-            status="skipped",
-            ts=_utc_now(),
-            items=[],
-            snapshot_summary=snapshot_summary,
-            raw_result=raw_result,
-            snapshot_paths=paths,
-        )
-        state.add_run(skip_run)
-        save_state(drive_root, state)
+        def _mutate_skip(skip_state: AdvisoryReviewState) -> None:
+            next_run_attempt = len(
+                skip_state.filter_advisory_runs(
+                    repo_key=repo_key,
+                    tool_name="advisory_pre_review",
+                    task_id=task_id,
+                )
+            ) + 1
+            skip_state.add_run(AdvisoryRunRecord(
+                snapshot_hash=snapshot_hash,
+                commit_message=commit_message,
+                status="skipped",
+                ts=_utc_now(),
+                items=[],
+                snapshot_summary=snapshot_summary,
+                raw_result=raw_result,
+                snapshot_paths=paths,
+                repo_key=repo_key,
+                tool_name="advisory_pre_review",
+                task_id=task_id,
+                attempt=next_run_attempt,
+            ))
+
+        update_state(drive_root, _mutate_skip)
         return json.dumps({
             "status": "skipped",
             "snapshot_hash": snapshot_hash,
@@ -766,6 +759,16 @@ def _handle_advisory_pre_review(
         snapshot_summary=snapshot_summary,
         raw_result=raw_result,
         snapshot_paths=paths,
+        repo_key=repo_key,
+        tool_name="advisory_pre_review",
+        task_id=task_id,
+        attempt=len(
+            state.filter_advisory_runs(
+                repo_key=repo_key,
+                tool_name="advisory_pre_review",
+                task_id=task_id,
+            )
+        ) + 1,
     )
     state.add_run(run)
 
@@ -821,7 +824,13 @@ def _handle_advisory_pre_review(
     return json.dumps(result, ensure_ascii=False, indent=2)
 
 
-def _handle_review_status(ctx: ToolContext) -> str:
+def _handle_review_status(
+    ctx: ToolContext,
+    repo_key: str = "",
+    tool_name: str = "",
+    task_id: str = "",
+    attempt: Optional[int] = None,
+) -> str:
     """Show recent advisory pre-review run history AND last commit attempt state.
 
     Includes: advisory run history, staleness from edits, open obligations from
@@ -829,9 +838,24 @@ def _handle_review_status(ctx: ToolContext) -> str:
     """
     drive_root = pathlib.Path(ctx.drive_root)
     state = load_state(drive_root)
+    repo_filter = repo_key or None
+    tool_filter = tool_name or None
+    task_filter = task_id or None
+    filtered_runs = state.filter_advisory_runs(
+        repo_key=repo_filter,
+        tool_name=tool_filter,
+        task_id=task_filter,
+        attempt=attempt,
+    )
+    filtered_attempts = state.filter_attempts(
+        repo_key=repo_filter,
+        tool_name=tool_filter,
+        task_id=task_filter,
+        attempt=attempt,
+    )
 
     runs_data = []
-    for run in reversed(state.runs[-5:]):
+    for run in reversed(filtered_runs[-5:]):
         findings = [i for i in (run.items or []) if isinstance(i, dict)
                     and str(i.get("verdict", "")).upper() == "FAIL"]
         critical = [i for i in findings if str(i.get("severity", "")).lower() == "critical"]
@@ -844,9 +868,13 @@ def _handle_review_status(ctx: ToolContext) -> str:
             "total_findings": len(findings),
             "snapshot_summary": run.snapshot_summary,
             "bypass_reason": run.bypass_reason or None,
+            "repo_key": run.repo_key or None,
+            "tool_name": run.tool_name or None,
+            "task_id": run.task_id or None,
+            "attempt": int(run.attempt or 0) or None,
         })
 
-    latest = state.latest()
+    latest = filtered_runs[-1] if filtered_runs else state.latest()
 
     # Compute current snapshot hash using the same paths scope as the latest run
     # so path-scoped advisories don't appear falsely stale.
@@ -878,11 +906,18 @@ def _handle_review_status(ctx: ToolContext) -> str:
         state.last_stale_from_edit_ts[:16] if state.last_stale_from_edit_ts
         else ("now (hash mismatch)" if hash_mismatch else None)
     )
+    stale_reason = state.last_stale_reason or (
+        "Current snapshot hash no longer matches the latest advisory run."
+        if hash_mismatch else None
+    )
 
     # Build commit attempt section
+    selected_attempt = filtered_attempts[-1] if filtered_attempts else (
+        None if (repo_filter or tool_filter or task_filter or attempt is not None) else state.last_commit_attempt
+    )
     commit_attempt_data = None
-    if state.last_commit_attempt:
-        ca = state.last_commit_attempt
+    if selected_attempt:
+        ca = selected_attempt
         commit_attempt_data = {
             "status": ca.status,
             "commit_message": ca.commit_message[:80],
@@ -890,7 +925,44 @@ def _handle_review_status(ctx: ToolContext) -> str:
             "duration_sec": round(ca.duration_sec, 1),
             "block_reason": ca.block_reason or None,
             "block_details_preview": _truncate_review_artifact(ca.block_details, limit=300) if ca.block_details else None,
+            "repo_key": ca.repo_key or None,
+            "tool_name": ca.tool_name or None,
+            "task_id": ca.task_id or None,
+            "attempt": int(ca.attempt or 0) or None,
+            "phase": ca.phase or None,
+            "blocked": bool(ca.blocked),
+            "late_result_pending": bool(ca.late_result_pending),
+            "critical_findings": len(ca.critical_findings or []),
+            "advisory_findings": len(ca.advisory_findings or []),
+            "obligation_ids": list(ca.obligation_ids or []),
+            "readiness_warnings": list(ca.readiness_warnings or []),
+            "pre_review_fingerprint": ca.pre_review_fingerprint[:12] or None,
+            "post_review_fingerprint": ca.post_review_fingerprint[:12] or None,
+            "fingerprint_status": ca.fingerprint_status or None,
+            "degraded_reasons": list(ca.degraded_reasons or []),
         }
+
+    attempts_data = []
+    for entry in reversed(filtered_attempts[-8:]):
+        attempts_data.append({
+            "repo_key": entry.repo_key or None,
+            "tool_name": entry.tool_name or None,
+            "task_id": entry.task_id or None,
+            "attempt": int(entry.attempt or 0) or None,
+            "phase": entry.phase or None,
+            "status": entry.status,
+            "blocked": bool(entry.blocked),
+            "late_result_pending": bool(entry.late_result_pending),
+            "critical_findings": len(entry.critical_findings or []),
+            "advisory_findings": len(entry.advisory_findings or []),
+            "obligation_ids": list(entry.obligation_ids or []),
+            "readiness_warnings": list(entry.readiness_warnings or []),
+            "pre_review_fingerprint": entry.pre_review_fingerprint[:12] or None,
+            "post_review_fingerprint": entry.post_review_fingerprint[:12] or None,
+            "fingerprint_status": entry.fingerprint_status or None,
+            "degraded_reasons": list(entry.degraded_reasons or []),
+            "ts": entry.ts[:16],
+        })
 
     # Open obligations (already computed above as open_obs for effective_is_fresh)
     obligations_data = []
@@ -908,7 +980,7 @@ def _handle_review_status(ctx: ToolContext) -> str:
     # Determine readiness and actionable next step (via module-level helper)
 
     # Build human-readable summary
-    ca = state.last_commit_attempt
+    ca = selected_attempt
     if ca and ca.status in ("blocked", "failed"):
         reason_map = {
             "no_advisory": "No fresh advisory pre-review found. Run advisory_pre_review first.",
@@ -918,12 +990,17 @@ def _handle_review_status(ctx: ToolContext) -> str:
             "infra_failure": "Infrastructure failure (git lock, git command, or review API). Check block_details.",
             "scope_blocked": "Scope reviewer blocked the commit. Address scope review findings.",
             "preflight": "Preflight check failed (missing VERSION/README). Stage all related files.",
+            "revalidation_failed": "The staged diff changed after review. Re-run advisory and review on the final staged diff.",
+            "fingerprint_unavailable": "The staged diff could not be fingerprinted for revalidation. Fix the git diff issue and retry.",
+            "overlap_guard": "Another reviewed attempt is still active. Wait for it to finish or expire before retrying.",
         }
         block_action = reason_map.get(
             ca.block_reason,
             f"{ca.status}: {ca.block_reason or 'unknown'}. Check block_details."
         )
         label = "BLOCKED" if ca.status == "blocked" else "FAILED"
+        if ca.late_result_pending:
+            block_action += " Late result is still pending."
         status_msg = f"Last commit {label} ({ca.block_reason or 'unclassified'}): {block_action}"
     else:
         # Use effective (gate-accurate) status derived from live snapshot, not latest run
@@ -949,7 +1026,7 @@ def _handle_review_status(ctx: ToolContext) -> str:
     # Never show "latest run status" here — that can be from a different snapshot and is
     # confusing / internally contradictory.  If a blocking commit attempt is recorded we
     # prepend that context, but the current-snapshot status always closes the sentence.
-    if state.last_commit_attempt and state.last_commit_attempt.status in ("blocked", "failed"):
+    if ca and ca.status in ("blocked", "failed"):
         # Keep the block-action sentence from above but append the live advisory state so
         # they remain consistent even when the worktree has changed since the last block.
         status_msg = f"{status_msg}  |  Current advisory: {effective_status}"
@@ -961,7 +1038,15 @@ def _handle_review_status(ctx: ToolContext) -> str:
         "latest_advisory_hash": effective_hash,
         "stale_from_edit": stale_from_edit,
         "stale_from_edit_ts": stale_from_edit_ts,
+        "stale_reason": stale_reason,
+        "filters": {
+            "repo_key": repo_filter,
+            "tool_name": tool_filter,
+            "task_id": task_filter,
+            "attempt": attempt,
+        },
         "advisory_runs": runs_data,
+        "attempts": attempts_data,
         "last_commit_attempt": commit_attempt_data,
         "open_obligations": obligations_data,
         "open_obligations_count": len(obligations_data),
@@ -1039,7 +1124,24 @@ def get_tools() -> list:
                 ),
                 "parameters": {
                     "type": "object",
-                    "properties": {},
+                    "properties": {
+                        "repo_key": {
+                            "type": "string",
+                            "description": "Optional repo identity filter for attempt/advisory history.",
+                        },
+                        "tool_name": {
+                            "type": "string",
+                            "description": "Optional tool-name filter (for example repo_commit or repo_write_commit).",
+                        },
+                        "task_id": {
+                            "type": "string",
+                            "description": "Optional task-id filter for attempt/advisory history.",
+                        },
+                        "attempt": {
+                            "type": "integer",
+                            "description": "Optional attempt number filter within the selected repo/tool/task scope.",
+                        },
+                    },
                     "required": [],
                 },
             },

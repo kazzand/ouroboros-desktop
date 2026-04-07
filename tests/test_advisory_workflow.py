@@ -147,6 +147,54 @@ def test_mark_stale_after_edit_invalidates_bypassed_only_state(tmp_path):
     assert loaded.last_stale_from_edit_ts != ""
 
 
+def test_invalidate_advisory_after_mutation_targets_matching_repo(tmp_path):
+    """Phase 3: repo-scoped invalidation should stale only the mutated repo when identity is known."""
+    from ouroboros.review_state import (
+        AdvisoryRunRecord,
+        AdvisoryReviewState,
+        invalidate_advisory_after_mutation,
+        load_state,
+        save_state,
+        _utc_now,
+    )
+
+    drive_root = _make_drive_root(tmp_path)
+    repo_a = tmp_path / "repo-a"
+    repo_b = tmp_path / "repo-b"
+    (repo_a / ".git").mkdir(parents=True)
+    (repo_b / ".git").mkdir(parents=True)
+
+    state = AdvisoryReviewState()
+    state.add_run(AdvisoryRunRecord(
+        snapshot_hash="hash-a",
+        commit_message="repo a",
+        status="fresh",
+        ts=_utc_now(),
+        repo_key=str(repo_a),
+    ))
+    state.add_run(AdvisoryRunRecord(
+        snapshot_hash="hash-b",
+        commit_message="repo b",
+        status="fresh",
+        ts=_utc_now(),
+        repo_key=str(repo_b),
+    ))
+    save_state(drive_root, state)
+
+    invalidate_advisory_after_mutation(
+        drive_root,
+        mutation_root=repo_b,
+        changed_paths=["foo.py"],
+        source_tool="claude_code_edit",
+    )
+
+    loaded = load_state(drive_root)
+    statuses = {run.repo_key: run.status for run in loaded.advisory_runs}
+    assert statuses[str(repo_a)] == "fresh"
+    assert statuses[str(repo_b)] == "stale"
+    assert "claude_code_edit mutated the worktree" in loaded.last_stale_reason
+
+
 # ---------------------------------------------------------------------------
 # 2. ObligationItem creation
 # ---------------------------------------------------------------------------
@@ -390,7 +438,8 @@ def test_build_blocking_history_section_contains_all_obligations(tmp_path):
     assert "Unresolved obligations" in result
     assert "tests_affected" in result
     assert "version_bump" in result
-    assert "REQUIRED" in result
+    assert "```json" in result
+    assert "recent_blocking_attempts" in result
 
 
 def test_build_blocking_history_section_instructions_present(tmp_path):
@@ -494,6 +543,29 @@ def test_review_status_includes_stale_from_edit(tmp_path):
     assert result["stale_from_edit"] is True
     assert result["stale_from_edit_ts"] is not None
     assert "next_step" in result
+
+
+def test_review_status_surfaces_explicit_stale_reason(tmp_path):
+    """Phase 3: review_status should expose the concrete invalidation reason."""
+    drive_root = _make_drive_root(tmp_path)
+    from ouroboros.review_state import (
+        AdvisoryReviewState, AdvisoryRunRecord, save_state, _utc_now,
+    )
+    state = AdvisoryReviewState()
+    state.runs.append(AdvisoryRunRecord("h1", "v1", "stale", _utc_now()))
+    state.last_stale_from_edit_ts = "2026-04-05T13:00:00+00:00"
+    state.last_stale_reason = "claude_code_edit mutated the worktree; advisory freshness invalidated."
+    save_state(drive_root, state)
+
+    ctx = MagicMock()
+    ctx.drive_root = str(drive_root)
+    ctx.repo_dir = str(tmp_path)
+
+    from ouroboros.tools.claude_advisory_review import _handle_review_status
+    result = json.loads(_handle_review_status(ctx))
+
+    assert result["stale_from_edit"] is True
+    assert result["stale_reason"] == state.last_stale_reason
 
 
 def test_review_status_includes_open_obligations(tmp_path):

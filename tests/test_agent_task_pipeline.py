@@ -112,3 +112,109 @@ def test_build_trace_summary_shows_structured_failure_facts():
     assert "exit_code=-9" in summary
     assert "signal=SIGKILL" in summary
     assert "Agent notes (supplementary, not source of truth)" in summary
+
+
+def test_task_summary_prompt_includes_review_evidence(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "test-openai-key")
+    monkeypatch.setenv("OUROBOROS_MODEL_LIGHT", "openai::gpt-5.4-mini")
+
+    captured = {}
+
+    class FakeLlm:
+        def chat(self, *, messages, model, reasoning_effort, max_tokens):
+            captured["prompt"] = messages[0]["content"]
+            return {"content": "summary with review evidence"}, {"cost": 0}
+
+    drive_logs = tmp_path / "logs"
+    drive_logs.mkdir(parents=True)
+
+    pipeline._run_task_summary(
+        env=None,
+        llm=FakeLlm(),
+        task={"id": "task-review", "type": "task", "text": "Fix commit flow"},
+        usage={"rounds": 4, "cost": 0.02},
+        llm_trace={"tool_calls": [{"tool": "repo_commit", "args": {}}], "reasoning_notes": []},
+        drive_logs=drive_logs,
+        review_evidence={
+            "has_evidence": True,
+            "recent_attempts": [{
+                "status": "blocked",
+                "critical_findings": [{
+                    "severity": "critical",
+                    "item": "tests_affected",
+                    "reason": "broken",
+                }],
+            }],
+        },
+    )
+
+    assert "Structured review evidence" in captured["prompt"]
+    assert "tests_affected" in captured["prompt"]
+    assert "critical" in captured["prompt"]
+
+
+def test_store_task_result_persists_review_evidence(tmp_path):
+    env = SimpleNamespace(drive_root=tmp_path)
+
+    pipeline._store_task_result(
+        env=env,
+        task={"id": "task-store", "type": "task", "text": "hi"},
+        text="done",
+        usage={"rounds": 2, "cost": 0.1},
+        llm_trace={"tool_calls": [], "reasoning_notes": []},
+        review_evidence={"has_evidence": True, "open_obligations": [{"item": "tests_affected"}]},
+    )
+
+    payload = json.loads((tmp_path / "task_results" / "task-store.json").read_text(encoding="utf-8"))
+    assert payload["review_evidence"]["has_evidence"] is True
+    assert payload["review_evidence"]["open_obligations"][0]["item"] == "tests_affected"
+
+
+def test_store_task_result_preserves_failed_status(tmp_path):
+    from ouroboros.task_results import STATUS_FAILED, write_task_result
+
+    env = SimpleNamespace(drive_root=tmp_path)
+    write_task_result(tmp_path, "task-failed", STATUS_FAILED, result="initial failure")
+
+    pipeline._store_task_result(
+        env=env,
+        task={"id": "task-failed", "type": "task", "text": "hi"},
+        text="final failure reply",
+        usage={"rounds": 1, "cost": 0.0},
+        llm_trace={"tool_calls": [], "reasoning_notes": []},
+        review_evidence={},
+    )
+
+    payload = json.loads((tmp_path / "task_results" / "task-failed.json").read_text(encoding="utf-8"))
+    assert payload["status"] == STATUS_FAILED
+    assert payload["result"] == "final failure reply"
+
+
+def test_collect_review_evidence_keeps_recent_attempts_task_scoped(tmp_path):
+    from ouroboros.review_evidence import collect_review_evidence
+    from ouroboros.review_state import AdvisoryReviewState, CommitAttemptRecord, make_repo_key, save_state
+
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir(parents=True)
+    (repo_dir / ".git").mkdir()
+
+    state = AdvisoryReviewState()
+    state.record_attempt(CommitAttemptRecord(
+        ts="2026-04-07T10:00:00+00:00",
+        commit_message="other task attempt",
+        status="blocked",
+        repo_key=make_repo_key(repo_dir),
+        tool_name="repo_commit",
+        task_id="task-other",
+        attempt=1,
+        block_reason="critical_findings",
+    ))
+    save_state(tmp_path, state)
+
+    evidence = collect_review_evidence(
+        tmp_path,
+        task_id="task-current",
+        repo_dir=repo_dir,
+    )
+
+    assert evidence["recent_attempts"] == []

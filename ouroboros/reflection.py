@@ -48,6 +48,9 @@ The task had errors. Write a concise 150-250 word reflection covering:
 4. What should be done differently next time?
 
 Be concrete — cite specific file names, tool names, error messages. No platitudes.
+If structured review evidence exists, incorporate the critical/advisory findings and
+open obligations into the root-cause analysis. Mention them individually with their
+severity and item/tag identity rather than collapsing them into a generic "review failed".
 
 ## Task goal
 
@@ -60,6 +63,10 @@ Be concrete — cite specific file names, tool names, error messages. No platitu
 ## Error details
 
 {error_details}
+
+## Structured review evidence
+
+{review_evidence}
 
 Write the reflection now. Plain text, no markdown headers.
 """
@@ -146,6 +153,7 @@ def generate_reflection(
     trace_summary: str,
     llm_client: Any,
     usage_dict: Dict[str, Any],
+    review_evidence: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Call the light LLM to produce an execution reflection.
 
@@ -160,11 +168,17 @@ def generate_reflection(
         1 for tc in (llm_trace.get("tool_calls") or [])
         if isinstance(tc, dict) and _tool_call_is_failure(tc)
     )
+    try:
+        from ouroboros.review_evidence import format_review_evidence_for_prompt
+        review_evidence_text = format_review_evidence_for_prompt(review_evidence or {})
+    except Exception:
+        review_evidence_text = "(review evidence unavailable)"
 
     prompt = _REFLECTION_PROMPT.format(
         goal=goal or "(no goal text)",
         trace_summary=_truncate_with_notice(trace_summary, 2000),
         error_details=error_details,
+        review_evidence=_truncate_with_notice(review_evidence_text, 2500),
     )
 
     light_model = os.environ.get("OUROBOROS_MODEL_LIGHT") or DEFAULT_LIGHT_MODEL
@@ -189,6 +203,7 @@ def generate_reflection(
         "cost_usd": round(float(usage_dict.get("cost", 0)), 4),
         "error_count": error_count,
         "key_markers": markers,
+        "review_evidence": review_evidence or {},
         "reflection": reflection_text,
     }
 

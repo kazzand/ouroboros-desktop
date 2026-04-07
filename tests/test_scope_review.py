@@ -585,7 +585,11 @@ class TestGitWiring:
         assert all(f.get("item") != "intent_alignment" for f in findings), \
             "Advisory-mode scope criticals must not be recorded as blocking findings"
         # But should appear in scope_advisory_items for visibility
-        assert any("intent_alignment" in item for item in scope_adv)
+        assert any(
+            (isinstance(item, dict) and item.get("item") == "intent_alignment")
+            or (isinstance(item, str) and "intent_alignment" in item)
+            for item in scope_adv
+        )
 
     def test_scope_advisory_visible_on_successful_commit(self):
         """Non-blocking scope advisory findings must be returned even when commit is not blocked."""
@@ -612,7 +616,11 @@ class TestGitWiring:
         assert combined_msg is None
         # But scope advisory items must be returned for caller to surface
         assert len(scope_adv) > 0
-        assert any("architecture_fit" in item for item in scope_adv)
+        assert any(
+            (isinstance(item, dict) and item.get("item") == "architecture_fit")
+            or (isinstance(item, str) and "architecture_fit" in item)
+            for item in scope_adv
+        )
 
     def test_scope_review_skipped_surfaces_through_aggregation_path(self):
         """Budget-skip advisories must survive aggregation and caller-side surfacing."""
@@ -645,8 +653,16 @@ class TestGitWiring:
         assert not blocked
         assert combined_msg is None
         assert findings == []
-        assert any("scope_review_skipped" in item for item in scope_adv)
-        assert any("scope_review_skipped" in item for item in ctx._review_advisory)
+        assert any(
+            (isinstance(item, dict) and item.get("item") == "scope_review_skipped")
+            or (isinstance(item, str) and "scope_review_skipped" in item)
+            for item in scope_adv
+        )
+        assert any(
+            (isinstance(item, dict) and item.get("item") == "scope_review_skipped")
+            or (isinstance(item, str) and "scope_review_skipped" in item)
+            for item in ctx._review_advisory
+        )
 
     def test_triad_crash_resets_stale_findings(self):
         """If triad crashes, stale ctx findings from prior attempt must not bleed into current run."""

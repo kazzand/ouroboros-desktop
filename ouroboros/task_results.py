@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import os
 import pathlib
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from ouroboros.utils import utc_now_iso
 
@@ -37,6 +37,24 @@ def load_task_result(drive_root: Any, task_id: str) -> Optional[Dict[str, Any]]:
         return json.loads(path.read_text(encoding="utf-8"))
     except Exception:
         return None
+
+
+def list_task_results(
+    drive_root: Any,
+    *,
+    statuses: Optional[List[str]] = None,
+) -> List[Dict[str, Any]]:
+    wanted = {str(item) for item in list(statuses or []) if str(item).strip()}
+    results: List[Dict[str, Any]] = []
+    for path in sorted(task_results_dir(drive_root).glob("*.json")):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if wanted and str(data.get("status") or "") not in wanted:
+            continue
+        results.append(data)
+    return results
 
 
 def write_task_result(

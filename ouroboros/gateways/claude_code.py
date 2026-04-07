@@ -271,6 +271,8 @@ async def _run_edit_async(
                     if subtype and subtype != "success":
                         result.success = False
                         result.error = f"Agent ended with subtype: {subtype}"
+                    # Stop iterating after ResultMessage — CLI subprocess exits here.
+                    break
     except Exception as e:
         result.success = False
         result.error = f"{type(e).__name__}: {e}"
@@ -348,6 +350,11 @@ async def _run_readonly_async(
                 if subtype and subtype != "success":
                     result.success = False
                     result.error = f"Agent ended with subtype: {subtype}"
+                # Stop iterating — the CLI subprocess exits after ResultMessage.
+                # Continuing the loop causes "Command failed with exit code 1" in
+                # SDK's message reader when it tries to read from the already-closed
+                # subprocess stdout. Break here to avoid the spurious error.
+                break
     except Exception as e:
         result.success = False
         result.error = f"{type(e).__name__}: {e}"

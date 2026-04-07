@@ -367,6 +367,31 @@ class TestSensitiveFileGuard:
         assert "production_key_xyz" not in result
         assert "sensitive" in result.lower() or "omitted" in result.lower()
 
+    def test_touched_file_pack_redacts_secret_like_content_in_normal_file(self, tmp_path):
+        """Secret-like literals inside normal text files should be redacted, not leaked."""
+        (tmp_path / "client.py").write_text(
+            'API_KEY = "sk-ant-abcdefghijklmnopqrstuvwxyz1234567890"\nprint("ok")\n',
+            encoding="utf-8",
+        )
+        mod = _get_module("ouroboros.tools.review_helpers")
+        pack, omitted = mod.build_touched_file_pack(tmp_path, ["client.py"])
+        assert omitted == []
+        assert "sk-ant-" not in pack
+        assert "***REDACTED***" in pack
+        assert "secret-like content redacted" in pack.lower()
+
+    def test_touched_file_pack_uses_collision_safe_fence(self, tmp_path):
+        """Files containing triple backticks must be wrapped in a longer fence."""
+        (tmp_path / "snippet.md").write_text(
+            "Before\n```\ninside fence\n```\nAfter\n",
+            encoding="utf-8",
+        )
+        mod = _get_module("ouroboros.tools.review_helpers")
+        pack, omitted = mod.build_touched_file_pack(tmp_path, ["snippet.md"])
+        assert omitted == []
+        assert "````md" in pack
+        assert "inside fence" in pack
+
     def test_head_snapshot_omits_mixed_case_credentials(self, tmp_path):
         """Mixed-case Credentials.JSON must be omitted from HEAD snapshot."""
         import subprocess

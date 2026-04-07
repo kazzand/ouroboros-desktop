@@ -19,9 +19,9 @@ When a new reviewable concern appears, add it here — not in prompts or docs.
 ```
 
 **Rules:**
-- `repo_write` and `str_replace_editor` automatically mark advisory as **stale** after any
-  successful write. Other edit paths (e.g. claude_code_edit) do not currently auto-stale —
-  run advisory_pre_review explicitly after using them.
+- Successful worktree mutations automatically mark advisory as **stale**. This includes
+  `repo_write`, `str_replace_editor`, `claude_code_edit`, and mutating `run_shell` /
+  reviewed-commit paths when they change tracked worktree state.
 - Any stale advisory → must re-run advisory before repo_commit.
 - Do NOT interleave edits and advisory calls: `edit → advisory → edit → advisory` wastes two
   expensive advisory cycles. Finish all edits first.
@@ -42,8 +42,8 @@ When a new reviewable concern appears, add it here — not in prompts or docs.
   to confirm each obligation is resolved, though the gate does not enforce this at the code level.
 - Open obligations are cleared automatically on a successful commit.
 - Both triad-review blocks and scope-review blocks produce structured obligations.
-- **Note:** `claude_code_edit` does not currently auto-stale advisory — run
-  `advisory_pre_review` explicitly after using it.
+- **Note:** conservative false-stale is acceptable. If you are unsure whether a mutating path
+  changed the relevant repo snapshot, re-run `advisory_pre_review` explicitly.
 
 ---
 
@@ -69,7 +69,7 @@ Ouroboros repository.
 | # | item | what to check | severity when FAIL |
 |---|------|---------------|--------------------|
 | 1 | bible_compliance | Does the diff violate any BIBLE.md principle? | critical |
-| 2 | development_compliance | Does it follow DEVELOPMENT.md patterns? Check explicitly: (a) naming conventions (snake_case modules/vars, PascalCase classes, UPPER_SNAKE_CASE constants); (b) entity type rules — Gateway classes contain ONLY transport, no business logic; Tool functions are thin wrappers; (c) module size ≤ 1000 lines, methods ≤ 150 lines, ≤ 8 params; (d) no gratuitous abstract layers (P5 Minimalism); (e) new LLM calls go through the shared `LLMClient`/`llm.py` layer, not ad-hoc HTTP clients; (f) cognitive artifacts (identity.md, scratchpad, task reflections, review outputs) must NOT use hardcoded `[:N]` truncation — explicit omission notes required; (g) new `get_tools()` exports follow the ToolEntry pattern in registry.py. | critical |
+| 2 | development_compliance | Does it follow DEVELOPMENT.md patterns? Check explicitly: (a) naming conventions (snake_case modules/vars, PascalCase classes, UPPER_SNAKE_CASE constants); (b) entity type rules — Gateway classes contain ONLY transport, no business logic; Tool functions are thin wrappers; (c) module-size target stays near one context window (~1000 lines) with a hard fail above 1250 lines for non-grandfathered modules, method-size target stays under 150 lines with a hard fail above 250 lines, and functions keep `<= 8` params; (d) no gratuitous abstract layers (P5 Minimalism); (e) new LLM calls go through the shared `LLMClient`/`llm.py` layer, not ad-hoc HTTP clients; (f) cognitive artifacts (identity.md, scratchpad, task reflections, review outputs) must NOT use hardcoded `[:N]` truncation — explicit omission notes required; (g) new `get_tools()` exports follow the ToolEntry pattern in registry.py. | critical |
 | 3 | secrets_check | Are secrets, API keys, .env files, credentials present in the diff? | critical |
 | 4 | code_quality | Careful code review: bugs, logic errors, crashes, regressions, race conditions, resource leaks? | critical |
 | 5 | security_issues | Security vulnerabilities: injection, path traversal, secret leakage, unsafe operations? | critical |

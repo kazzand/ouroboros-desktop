@@ -168,6 +168,106 @@ class TestAdvisoryReviewStatusInContext:
         section = format_status_section(state)
         assert "No advisory runs" in section
 
+    def test_review_continuity_context_surfaces_live_gate_and_continuation(self, tmp_path):
+        from ouroboros.agent_task_pipeline import build_review_context
+        from ouroboros.context import build_llm_messages
+        from ouroboros.memory import Memory
+        from ouroboros.review_state import (
+            AdvisoryReviewState,
+            AdvisoryRunRecord,
+            CommitAttemptRecord,
+            compute_snapshot_hash,
+            make_repo_key,
+            save_state,
+        )
+        from ouroboros.task_continuation import ReviewContinuation, save_review_continuation
+        from ouroboros.task_results import STATUS_COMPLETED, write_task_result
+
+        env = self._make_env(tmp_path)
+        (tmp_path / "repo" / ".git").mkdir(parents=True, exist_ok=True)
+        (tmp_path / "repo" / "prompts").mkdir(parents=True, exist_ok=True)
+        (tmp_path / "repo" / "prompts" / "SYSTEM.md").write_text("System", encoding="utf-8")
+        (tmp_path / "repo" / "BIBLE.md").write_text("Bible", encoding="utf-8")
+        (tmp_path / "repo" / "docs" / "CHECKLISTS.md").write_text("Checklist", encoding="utf-8")
+        (tmp_path / "repo" / "tracked.py").write_text("print('hi')\n", encoding="utf-8")
+
+        repo_key = make_repo_key(tmp_path / "repo")
+        snapshot_hash = compute_snapshot_hash(tmp_path / "repo")
+        state = AdvisoryReviewState()
+        state.add_run(AdvisoryRunRecord(
+            snapshot_hash=snapshot_hash,
+            commit_message="test commit",
+            status="bypassed",
+            ts="2026-04-07T09:59:00+00:00",
+            repo_key=repo_key,
+            bypass_reason="manual audit override",
+        ))
+        state.advisory_runs[-1].status = "stale"
+        state.last_stale_from_edit_ts = "2026-04-07T10:00:00+00:00"
+        state.last_stale_reason = "claude_code_edit mutated tracked.py"
+        state.last_stale_repo_key = repo_key
+        state.record_attempt(CommitAttemptRecord(
+            ts="2026-04-07T10:01:00+00:00",
+            commit_message="blocked commit",
+            status="blocked",
+            repo_key=repo_key,
+            tool_name="repo_commit",
+            task_id="task-old",
+            attempt=1,
+            critical_findings=[{
+                "item": "tests_affected",
+                "reason": "Fix the failing test before commit",
+                "severity": "critical",
+                "verdict": "FAIL",
+            }],
+            readiness_warnings=["Review was blocked and needs follow-up."],
+        ))
+        save_state(tmp_path, state)
+
+        save_review_continuation(
+            tmp_path,
+            ReviewContinuation(
+                task_id="task-old",
+                source="blocked_review",
+                stage="blocking_review",
+                repo_key=repo_key,
+                tool_name="repo_commit",
+                attempt=1,
+                block_reason="critical_findings",
+                critical_findings=[{
+                    "item": "tests_affected",
+                    "reason": "Fix the failing test before commit",
+                    "severity": "critical",
+                    "verdict": "FAIL",
+                }],
+                readiness_warnings=["Review was blocked and needs follow-up."],
+            ),
+            expect_task_id="task-old",
+        )
+        write_task_result(
+            tmp_path,
+            "task-old",
+            STATUS_COMPLETED,
+            result="Commit blocked by review.",
+        )
+
+        messages, _ = build_llm_messages(
+            env=env,
+            memory=Memory(drive_root=tmp_path),
+            task={"id": "task-new", "type": "task", "text": "continue"},
+            review_context_builder=lambda: build_review_context(env),
+        )
+        dynamic_text = messages[0]["content"][2]["text"]
+
+        assert "## Review Continuity" in dynamic_text
+        assert "repo_commit_ready=no" in dynamic_text
+        assert "bypass_reason=manual audit override" in dynamic_text
+        assert "stale_marker=2026-04-07T10:00:00" in dynamic_text
+        assert "### Open review continuations" in dynamic_text
+        assert "critical_finding=tests_affected: Fix the failing test before commit" in dynamic_text
+        assert "### Historical review ledger" in dynamic_text
+        assert dynamic_text.index("## Runtime context") < dynamic_text.index("## Review Continuity")
+
 
 class TestRuntimeEnvSection:
     """build_runtime_section includes runtime_env with platform and is_desktop."""

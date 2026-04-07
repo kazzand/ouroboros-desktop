@@ -12,7 +12,7 @@ import json
 import asyncio
 import logging
 import pathlib
-from typing import List, Optional
+from typing import Any, List, Optional
 
 from ouroboros.llm import LLMClient
 from ouroboros.pricing import infer_api_key_type, infer_model_category
@@ -548,8 +548,49 @@ def _single_line(text: str) -> str:
     return " ".join(str(text or "").split())
 
 
-def _append_review_warning(ctx: ToolContext, text: str) -> None:
-    warning = _single_line(text)
+def _review_entry(
+    *,
+    severity: str,
+    item: str,
+    reason: str,
+    model: str = "",
+    tag: str = "triad",
+    verdict: str = "FAIL",
+) -> dict:
+    entry = {
+        "severity": severity,
+        "item": item,
+        "reason": reason,
+        "tag": tag,
+        "verdict": verdict,
+    }
+    if model:
+        entry["model"] = model
+    return entry
+
+
+def _format_review_entry(entry: Any, *, default_severity: str = "advisory") -> str:
+    if isinstance(entry, dict):
+        severity = str(entry.get("severity", default_severity) or default_severity).upper()
+        tags = []
+        if entry.get("tag"):
+            tags.append(str(entry.get("tag")))
+        if entry.get("model"):
+            tags.append(f"model={entry.get('model')}")
+        if entry.get("obligation_id"):
+            tags.append(f"obligation={entry.get('obligation_id')}")
+        label = str(entry.get("item") or entry.get("reason") or "?")
+        reason = _single_line(str(entry.get("reason", "") or ""))
+        tag_prefix = " ".join(f"[{tag}]" for tag in tags)
+        return f"[{severity}] {tag_prefix} {label}: {reason}".strip()
+    return _single_line(str(entry))
+
+
+def _append_review_warning(ctx: ToolContext, text: Any) -> None:
+    if isinstance(text, dict):
+        ctx._review_advisory.append(text)
+        return
+    warning = _single_line(str(text))
     if warning:
         ctx._review_advisory.append(warning)
 
@@ -597,6 +638,7 @@ def _collect_review_findings(ctx: ToolContext, model_results: list) -> tuple[lis
     errored_models: List[str] = []
     # Structured critical findings for obligation tracking (list of dicts)
     structured_critical: List[dict] = []
+    structured_advisory: List[dict] = []
 
     for mr in model_results:
         model_name = mr.get("model", "?")
@@ -608,6 +650,12 @@ def _collect_review_findings(ctx: ToolContext, model_results: list) -> tuple[lis
             advisory_warns.append(
                 f"[{model_name}] Model unavailable this round: {raw_text[:200]}"
             )
+            structured_advisory.append(_review_entry(
+                severity="advisory",
+                item="review_model_unavailable",
+                reason=f"Model unavailable this round: {raw_text[:200]}",
+                model=model_name,
+            ))
             try:
                 append_jsonl(ctx.drive_logs() / "events.jsonl", {
                     "ts": utc_now_iso(), "type": "review_model_error",
@@ -637,18 +685,24 @@ def _collect_review_findings(ctx: ToolContext, model_results: list) -> tuple[lis
             desc = f"[{model_name}] {item_name}: {reason}"
             if severity == "critical":
                 critical_fails.append(desc)
-                structured_critical.append({
-                    "verdict": "FAIL",
-                    "severity": "critical",
-                    "item": item_name,
-                    "reason": reason,
-                    "model": model_name,
-                })
+                structured_critical.append(_review_entry(
+                    severity="critical",
+                    item=str(item_name),
+                    reason=str(reason),
+                    model=model_name,
+                ))
             else:
                 advisory_warns.append(desc)
+                structured_advisory.append(_review_entry(
+                    severity="advisory",
+                    item=str(item_name),
+                    reason=str(reason),
+                    model=model_name,
+                ))
 
     # Store structured findings on ctx for obligation tracking
     ctx._last_review_critical_findings = structured_critical
+    ctx._last_review_advisory_findings = structured_advisory
 
     return critical_fails, advisory_warns, errored_models
 
@@ -677,17 +731,21 @@ def _build_critical_block_message(
             "- If the same critical repeats: implement what the reviewer asks, or split the change, or report the blockage to the user instead of retrying"
         )
 
+    critical_entries = list(getattr(ctx, "_last_review_critical_findings", []) or critical_fails)
+    advisory_entries = list(getattr(ctx, "_last_review_advisory_findings", []) or advisory_warns)
+
     return (
         f"⚠️ REVIEW_BLOCKED{iteration_note}: Critical issues found by reviewers.\n"
         "Commit has NOT been created. Fix the issues and try again. Use review_rebuttal\n"
         "ONLY if a finding is factually incorrect — not to argue against requested tests\n"
         "or artifacts. If the same finding repeats after a rebuttal, implement the fix\n"
         "instead of re-arguing.\n\n"
-        + "\n".join(f"  CRITICAL: {f}" for f in critical_fails)
+        + "Critical findings:\n"
+        + "\n".join(f"  - {_format_review_entry(f, default_severity='critical')}" for f in critical_entries)
         + (
             "\n\nAdvisory warnings:\n"
-            + "\n".join(f"  WARN: {w}" for w in advisory_warns)
-            if advisory_warns else ""
+            + "\n".join(f"  - {_format_review_entry(w)}" for w in advisory_entries)
+            if advisory_entries else ""
         )
         + errored_note
         + soft_hint
@@ -921,10 +979,10 @@ def _run_unified_review(ctx: ToolContext, commit_message: str,
             ctx,
             "Review enforcement=Advisory: critical review findings did not block commit.",
         )
-        for finding in critical_fails:
-            _append_review_warning(ctx, f"CRITICAL (advisory mode): {finding}")
-        for warning in advisory_warns:
-            _append_review_warning(ctx, f"WARN: {warning}")
+        for finding in getattr(ctx, "_last_review_critical_findings", []) or []:
+            _append_review_warning(ctx, finding)
+        for warning in getattr(ctx, "_last_review_advisory_findings", []) or []:
+            _append_review_warning(ctx, warning)
         if errored_note:
             _append_review_warning(ctx, errored_note)
 
@@ -934,6 +992,8 @@ def _run_unified_review(ctx: ToolContext, commit_message: str,
 
     if errored_note:
         advisory_warns.append(errored_note.strip())
-    if advisory_warns:
-        ctx._review_advisory = advisory_warns
+    if advisory_warns or getattr(ctx, "_last_review_advisory_findings", None):
+        ctx._review_advisory = list(getattr(ctx, "_last_review_advisory_findings", []) or [])
+        if errored_note:
+            ctx._review_advisory.append(errored_note.strip())
     return None
