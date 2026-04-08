@@ -8,9 +8,12 @@ Runs on every `make test` on all platforms.
 
 import ast
 import pathlib
+import sys
 from typing import List, Set
 
 import pytest
+
+IS_WINDOWS_PLATFORM = sys.platform == "win32"
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 
@@ -193,3 +196,20 @@ def test_platform_layer_exports_core_symbols():
     assert isinstance(IS_LINUX, bool)
     # Exactly one should be True (or none on exotic platforms)
     assert sum([IS_WINDOWS, IS_MACOS, IS_LINUX]) <= 1
+
+
+@pytest.mark.skipif(not IS_WINDOWS_PLATFORM, reason="Windows-only")
+def test_win32_overlapped_class_cached():
+    """_win32_overlapped_class must return the same class object on every call.
+
+    ctypes rejects pointer arguments when the underlying Structure class differs
+    even if the layout is identical.  If lock creates one OVERLAPPED class and
+    unlock creates another, UnlockFileEx will raise ctypes.ArgumentError.
+    """
+    from ouroboros.platform_layer import _win32_overlapped_class
+    cls1 = _win32_overlapped_class()
+    cls2 = _win32_overlapped_class()
+    assert cls1 is cls2, (
+        "_win32_overlapped_class() returned different class objects — "
+        "this will cause ctypes.ArgumentError in unlock path"
+    )

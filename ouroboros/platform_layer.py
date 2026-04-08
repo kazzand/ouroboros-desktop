@@ -139,13 +139,24 @@ def file_unlock(fd: int) -> None:
 _win32_overlapped: dict = {}
 
 
+_OVERLAPPED_CLS = None  # cached once per process
+
+
 def _win32_overlapped_class():
-    """Build a portable OVERLAPPED ctypes Structure.
+    """Return the portable OVERLAPPED ctypes Structure (cached).
 
     ``wintypes.ULONG_PTR`` is absent on some Python/Windows builds, so we use
     ``ctypes.c_void_p`` which is pointer-width on all architectures (4 bytes on
     32-bit, 8 bytes on 64-bit) — exactly what ``ULONG_PTR`` is.
+
+    The class is created once and reused so that lock/unlock share the same
+    ``ctypes.POINTER(OVERLAPPED)`` type — ctypes rejects pointer arguments whose
+    underlying Structure class object differs even if the layout is identical.
     """
+    global _OVERLAPPED_CLS
+    if _OVERLAPPED_CLS is not None:
+        return _OVERLAPPED_CLS
+
     import ctypes
     from ctypes import wintypes
 
@@ -158,6 +169,7 @@ def _win32_overlapped_class():
             ("hEvent", wintypes.HANDLE),
         ]
 
+    _OVERLAPPED_CLS = OVERLAPPED
     return OVERLAPPED
 
 
