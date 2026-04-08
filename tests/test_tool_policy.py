@@ -52,3 +52,39 @@ def test_advisory_tools_in_initial_schemas():
     names = {schema["function"]["name"] for schema in initial_tool_schemas(registry)}
     assert "advisory_pre_review" in names
     assert "review_status" in names
+
+
+def test_enable_tools_does_not_duplicate_active_tool_schemas():
+    registry = _build_registry()
+    tool_schemas = initial_tool_schemas(registry)
+    messages = []
+    tool_schemas, _enabled_extra = loop_mod._setup_dynamic_tools(registry, tool_schemas, messages)
+
+    core_result = registry.execute("enable_tools", {"tools": "advisory_pre_review"})
+    names_after_core = [schema["function"]["name"] for schema in tool_schemas]
+    assert names_after_core.count("advisory_pre_review") == 1
+    assert "already active" in core_result
+
+    extra_result = registry.execute("enable_tools", {"tools": "multi_model_review"})
+    names_after_extra = [schema["function"]["name"] for schema in tool_schemas]
+    assert names_after_extra.count("multi_model_review") == 1
+    assert "Enabled: multi_model_review" in extra_result
+
+    extra_again_result = registry.execute("enable_tools", {"tools": "multi_model_review"})
+    names_after_extra_again = [schema["function"]["name"] for schema in tool_schemas]
+    assert names_after_extra_again.count("multi_model_review") == 1
+    assert "already active" in extra_again_result
+
+
+def test_list_available_tools_hides_enabled_extra_tools():
+    registry = _build_registry()
+    tool_schemas = initial_tool_schemas(registry)
+    messages = []
+    loop_mod._setup_dynamic_tools(registry, tool_schemas, messages)
+
+    before = registry.execute("list_available_tools", {})
+    assert "multi_model_review" in before
+
+    registry.execute("enable_tools", {"tools": "multi_model_review"})
+    after = registry.execute("list_available_tools", {})
+    assert "multi_model_review" not in after

@@ -17,6 +17,7 @@ from typing import Any, Dict, List
 
 from ouroboros.compat import IS_WINDOWS, kill_process_tree
 from ouroboros.config import load_settings
+from ouroboros.tools.commit_gate import _invalidate_advisory
 from ouroboros.tools.registry import ToolContext, ToolEntry
 from ouroboros.utils import utc_now_iso, run_cmd
 
@@ -125,6 +126,21 @@ def _format_process_failure(prefix: str, action: str, res: CompletedProcess) -> 
         f"{prefix}: {action} with {_describe_returncode(res.returncode)}.\n\n"
         f"{_format_process_output(res.stdout or '', res.stderr or '')}"
     )
+
+
+def _resolve_git_root(path: pathlib.Path) -> pathlib.Path | None:
+    try:
+        from ouroboros.review_state import discover_repo_root
+        root = discover_repo_root(path)
+        return root if (root / ".git").exists() else None
+    except Exception:
+        return None
+
+
+def _status_snapshot(repo_dir: pathlib.Path | None) -> list[str]:
+    if repo_dir is None:
+        return []
+    return sorted(_get_changed_files(repo_dir))
 
 
 # ---------------------------------------------------------------------------
@@ -236,6 +252,8 @@ def _run_shell(ctx: ToolContext, cmd, cwd: str = "") -> str:
         candidate = (ctx.repo_dir / cwd).resolve()
         if candidate.exists() and candidate.is_dir():
             work_dir = candidate
+    repo_root = _resolve_git_root(pathlib.Path(work_dir))
+    before_changed = _status_snapshot(repo_root)
 
     timeout_sec = _resolve_effective_timeout(_RUN_SHELL_DEFAULT_TIMEOUT_SEC)
     try:
@@ -249,6 +267,14 @@ def _run_shell(ctx: ToolContext, cmd, cwd: str = "") -> str:
                 "⚠️ SHELL_EXIT_ERROR",
                 "command exited",
                 res,
+            )
+        after_changed = _status_snapshot(repo_root)
+        if after_changed != before_changed:
+            _invalidate_advisory(
+                ctx,
+                changed_paths=after_changed or before_changed,
+                mutation_root=repo_root,
+                source_tool="run_shell",
             )
         return f"exit_code=0\n{_format_process_output(res.stdout or '', res.stderr or '')}"
     except subprocess.TimeoutExpired:
@@ -353,8 +379,12 @@ def _claude_code_edit(ctx: ToolContext, prompt: str, cwd: str = "",
         candidate = (ctx.repo_dir / cwd).resolve()
         if candidate.exists():
             work_dir = str(candidate)
+    work_dir_path = pathlib.Path(work_dir).resolve()
+    target_repo_root = _resolve_git_root(work_dir_path) or pathlib.Path(ctx.repo_dir)
+    before_changed = _status_snapshot(target_repo_root)
 
-    model = os.environ.get("CLAUDE_CODE_MODEL", "opus").strip()
+    from ouroboros.gateways.claude_code import resolve_claude_code_model
+    model = resolve_claude_code_model()
 
     lock = _acquire_git_lock(ctx)
     try:
@@ -366,7 +396,10 @@ def _claude_code_edit(ctx: ToolContext, prompt: str, cwd: str = "",
         ctx.emit_progress_fn("Delegating to Claude Agent SDK...")
 
         try:
-            from ouroboros.gateways.claude_code import run_edit
+            from ouroboros.gateways.claude_code import (
+                DEFAULT_CLAUDE_CODE_MAX_TURNS,
+                run_edit,
+            )
 
             system_prompt = (
                 f"STRICT: Only modify files inside {work_dir}. "
@@ -378,16 +411,16 @@ def _claude_code_edit(ctx: ToolContext, prompt: str, cwd: str = "",
                 prompt=prompt,
                 cwd=work_dir,
                 model=model,
-                max_turns=25,
+                max_turns=DEFAULT_CLAUDE_CODE_MAX_TURNS,
                 budget=budget,
                 system_prompt=system_prompt,
             )
 
-            result.changed_files = _get_changed_files(pathlib.Path(ctx.repo_dir))
-            result.diff_stat = _get_diff_stat(pathlib.Path(ctx.repo_dir))
+            result.changed_files = _get_changed_files(target_repo_root)
+            result.diff_stat = _get_diff_stat(target_repo_root)
 
             if validate and result.success:
-                result.validation_summary = _run_validation(pathlib.Path(ctx.repo_dir))
+                result.validation_summary = _run_validation(target_repo_root)
 
             if result.cost_usd > 0:
                 ctx.pending_events.append({
@@ -405,6 +438,15 @@ def _claude_code_edit(ctx: ToolContext, prompt: str, cwd: str = "",
 
             if not result.success:
                 return f"⚠️ CLAUDE_CODE_ERROR: {result.error}\n\n{result.result_text}"
+
+            after_changed = _status_snapshot(target_repo_root)
+            if after_changed != before_changed:
+                _invalidate_advisory(
+                    ctx,
+                    changed_paths=result.changed_files or after_changed or before_changed,
+                    mutation_root=target_repo_root,
+                    source_tool="claude_code_edit",
+                )
 
             return result.to_tool_output()
 

@@ -247,9 +247,17 @@ def _setup_dynamic_tools(tools_registry, tool_schemas, messages):
     Returns (tool_schemas, enabled_extra_set).
     """
     enabled_extra: set = set()
+    active_tool_names = {
+        str(schema.get("function", {}).get("name") or "").strip()
+        for schema in tool_schemas
+        if str(schema.get("function", {}).get("name") or "").strip()
+    }
 
     def _handle_list_tools(ctx=None, **kwargs):
-        non_core = list_non_core_tools(tools_registry)
+        non_core = [
+            t for t in list_non_core_tools(tools_registry)
+            if t["name"] not in active_tool_names
+        ]
         if not non_core:
             return "All tools are already in your active set."
         lines = [f"**{len(non_core)} additional tools available** (use `enable_tools` to activate):\n"]
@@ -262,11 +270,12 @@ def _setup_dynamic_tools(tools_registry, tool_schemas, messages):
         enabled, not_found = [], []
         for name in names:
             schema = tools_registry.get_schema_by_name(name)
-            if schema and name not in enabled_extra:
+            if schema and name not in active_tool_names:
                 tool_schemas.append(schema)
                 enabled_extra.add(name)
+                active_tool_names.add(name)
                 enabled.append(name)
-            elif name in enabled_extra:
+            elif name in active_tool_names:
                 enabled.append(f"{name} (already active)")
             else:
                 not_found.append(name)

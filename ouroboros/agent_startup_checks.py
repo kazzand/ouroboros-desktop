@@ -197,6 +197,83 @@ def check_budget(env: Any) -> Tuple[dict, int]:
         return {"status": "error", "error": str(e)}, 0
 
 
+def check_review_continuations(env: Any) -> Tuple[dict, int]:
+    try:
+        from ouroboros.task_continuation import list_review_continuations
+        from ouroboros.task_results import (
+            STATUS_CANCELLED,
+            STATUS_COMPLETED,
+            STATUS_FAILED,
+            STATUS_INTERRUPTED,
+            STATUS_REJECTED_DUPLICATE,
+            STATUS_REQUESTED,
+            STATUS_RUNNING,
+            STATUS_SCHEDULED,
+            list_task_results,
+        )
+
+        continuations, corrupt = list_review_continuations(env.drive_root)
+        task_rows = list_task_results(
+            env.drive_root,
+            statuses=[
+                STATUS_REQUESTED,
+                STATUS_SCHEDULED,
+                STATUS_RUNNING,
+                STATUS_INTERRUPTED,
+                STATUS_COMPLETED,
+                STATUS_FAILED,
+                STATUS_CANCELLED,
+                STATUS_REJECTED_DUPLICATE,
+            ],
+        )
+        task_by_id = {
+            str(item.get("task_id") or ""): item
+            for item in task_rows
+            if str(item.get("task_id") or "").strip()
+        }
+
+        rows = []
+        interrupted = []
+        for item in continuations:
+            task_status = str((task_by_id.get(item.task_id) or {}).get("status") or "")
+            row = {
+                "task_id": item.task_id,
+                "task_status": task_status or "missing",
+                "source": item.source,
+                "stage": item.stage,
+                "repo_key": item.repo_key,
+                "tool_name": item.tool_name,
+                "attempt": item.attempt,
+                "block_reason": item.block_reason,
+                "obligation_ids": list(item.obligation_ids or []),
+                "critical_findings": len(item.critical_findings or []),
+                "advisory_findings": len(item.advisory_findings or []),
+                "updated_ts": item.updated_ts,
+            }
+            rows.append(row)
+            if task_status == STATUS_INTERRUPTED:
+                interrupted.append(row)
+
+        status = "ok"
+        issues = 0
+        if rows or corrupt:
+            status = "warning"
+        if rows:
+            issues += 1
+        if corrupt:
+            status = "error"
+            issues += 1
+
+        return {
+            "status": status,
+            "open_review_continuations": rows[:20],
+            "interrupted_tasks": interrupted[:20],
+            "corrupt": corrupt[:20],
+        }, issues
+    except Exception as e:
+        return {"status": "error", "error": str(e)}, 1
+
+
 def verify_system_state(env: Any, git_sha: str) -> None:
     """Bible Principle 1: verify system state on every startup."""
     checks: Dict[str, Any] = {}
@@ -240,6 +317,23 @@ def verify_system_state(env: Any, git_sha: str) -> None:
     if not configured_model:
         issues += 1
 
+    # Reconcile stale hung reviewed attempts left by abrupt process death
+    try:
+        import pathlib
+        from ouroboros.review_state import _utc_now, update_state
+        drive_root = pathlib.Path(env.drive_root) if hasattr(env, "drive_root") else env.drive_path("").parent
+        expired = update_state(
+            drive_root,
+            lambda st: st.expire_stale_attempts(now_ts=_utc_now()),
+        )
+        if expired:
+            log.warning("Auto-expired %d stale reviewed attempt(s) on startup", len(expired))
+    except Exception:
+        log.debug("Failed to reconcile commit attempt state", exc_info=True)
+
+    checks["review_continuations"], issue_count = check_review_continuations(env)
+    issues += issue_count
+
     event = {
         "ts": utc_now_iso(),
         "type": "startup_verification",
@@ -251,21 +345,6 @@ def verify_system_state(env: Any, git_sha: str) -> None:
 
     if issues > 0:
         log.warning(f"Startup verification found {issues} issue(s): {checks}")
-
-    # Reconcile stale 'reviewing' commit attempts left by abrupt process death
-    try:
-        import pathlib
-        from ouroboros.review_state import load_state, save_state
-        drive_root = pathlib.Path(env.drive_root) if hasattr(env, "drive_root") else env.drive_path("").parent
-        st = load_state(drive_root)
-        if st.last_commit_attempt and st.last_commit_attempt.status == "reviewing":
-            st.last_commit_attempt.status = "failed"
-            st.last_commit_attempt.block_reason = "infra_failure"
-            st.last_commit_attempt.block_details = "Process died while reviewing (reconciled on startup)"
-            save_state(drive_root, st)
-            log.warning("Reconciled stale 'reviewing' commit attempt → failed")
-    except Exception:
-        log.debug("Failed to reconcile commit attempt state", exc_info=True)
 
 
 def inject_crash_report(env: Any) -> None:

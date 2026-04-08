@@ -7,7 +7,7 @@ Integrates with the existing browser screenshot workflow:
 
 Two tools:
   - analyze_screenshot: analyze the last browser screenshot using VLM
-  - vlm_query: analyze any image (URL or base64) with a custom prompt
+  - vlm_query: analyze any image (file path, URL, or base64) with a custom prompt
 """
 
 from __future__ import annotations
@@ -66,15 +66,90 @@ def _analyze_screenshot(ctx: ToolContext, prompt: str = "Describe what you see i
         return f"⚠️ VLM analysis failed: {e}"
 
 
-def _vlm_query(ctx: ToolContext, prompt: str, image_url: str = "", image_base64: str = "", image_mime: str = "image/png", model: str = "") -> str:
+_IMAGE_MAGIC: List[tuple] = [
+    (b'\x89PNG\r\n\x1a\n', "image/png"),
+    (b'\xff\xd8\xff', "image/jpeg"),
+    (b'GIF87a', "image/gif"),
+    (b'GIF89a', "image/gif"),
+]
+_IMAGE_WEBP_MAGIC = (b'RIFF', b'WEBP')
+_VLM_MAX_FILE_BYTES = 20 * 1024 * 1024  # 20 MB
+
+
+def _path_is_under(path: "pathlib.Path", root: "pathlib.Path") -> bool:
+    """Return True if path is root itself or a descendant of root (no symlink escape).
+    Both path and root should already be resolved before calling this.
     """
-    Analyze any image using a Vision LLM. Provide either image_url or image_base64.
+    try:
+        path.relative_to(root.resolve())
+        return True
+    except ValueError:
+        return False
+
+
+def _detect_image_mime_for_vlm(raw: bytes) -> str:
+    """Return MIME type string or empty string if not a recognised image."""
+    for magic, mime in _IMAGE_MAGIC:
+        if raw[:len(magic)] == magic:
+            return mime
+    if raw[:4] == _IMAGE_WEBP_MAGIC[0] and raw[8:12] == _IMAGE_WEBP_MAGIC[1]:
+        return "image/webp"
+    return ""
+
+
+def _allowed_file_roots() -> List["pathlib.Path"]:
+    """Return absolute paths that file_path is allowed to resolve under.
+
+    When OUROBOROS_DATA_DIR is set, only that data root's uploads/ is allowed.
+    When absent, falls back to the default ~/Ouroboros/data/uploads.
+    This ensures each runtime instance is isolated to its own configured data directory.
     """
-    if not image_url and not image_base64:
-        return "⚠️ Provide either image_url or image_base64."
+    import pathlib
+    data_dir = os.environ.get("OUROBOROS_DATA_DIR", "")
+    if data_dir:
+        return [pathlib.Path(data_dir).expanduser().resolve() / "uploads"]
+    return [pathlib.Path("~/Ouroboros/data/uploads").expanduser().resolve()]
+
+
+def _vlm_query(ctx: ToolContext, prompt: str, image_url: str = "", image_base64: str = "", image_mime: str = "image/png", file_path: str = "", model: str = "") -> str:
+    """
+    Analyze any image using a Vision LLM.
+    Provide one of: file_path (local file), image_url (public URL), or image_base64.
+    file_path is preferred when the image is already on disk (e.g. data/uploads/).
+    file_path is restricted to the uploads directory (data/uploads/).
+    """
+    if not image_url and not image_base64 and not file_path:
+        return "⚠️ Provide one of: file_path, image_url, or image_base64."
 
     images: List[Dict[str, Any]] = []
-    if image_url:
+    if file_path:
+        import base64
+        import pathlib
+        fp = pathlib.Path(file_path).expanduser().resolve()
+        if not fp.exists():
+            return f"⚠️ File not found: {file_path}"
+        # Security: reject paths outside the allowed uploads roots
+        allowed = _allowed_file_roots()
+        if not any(_path_is_under(fp, root) for root in allowed):
+            return (
+                f"⚠️ file_path must be inside the uploads directory (data/uploads/). "
+                f"Resolved path: {fp}. Use send_photo or read_file for other paths."
+            )
+        if fp.stat().st_size > _VLM_MAX_FILE_BYTES:
+            return f"⚠️ File too large ({fp.stat().st_size} bytes). Max {_VLM_MAX_FILE_BYTES} bytes."
+        try:
+            raw = fp.read_bytes()
+        except Exception as e:
+            return f"⚠️ Failed to read image file: {e}"
+        # Fail-closed MIME detection: reject non-image files
+        mime = _detect_image_mime_for_vlm(raw)
+        if not mime:
+            return (
+                f"⚠️ File does not appear to be a supported image (PNG/JPEG/GIF/WEBP). "
+                f"Only image files may be sent to the VLM via file_path."
+            )
+        images.append({"base64": base64.b64encode(raw).decode(), "mime": mime})
+    elif image_url:
         images.append({"url": image_url})
     else:
         images.append({"base64": image_base64, "mime": image_mime})
@@ -153,7 +228,9 @@ def get_tools() -> List[ToolEntry]:
                 "name": "vlm_query",
                 "description": (
                     "Analyze any image using a Vision LLM. "
-                    "Provide either image_url (public URL) or image_base64 (base64-encoded PNG/JPEG). "
+                    "Provide one of: file_path (local file, preferred — avoids large base64 in arguments), "
+                    "image_url (public URL), or image_base64 (base64-encoded PNG/JPEG). "
+                    "Use file_path for files already on disk (e.g. data/uploads/ attachments). "
                     "Use for: analyzing charts, reading diagrams, understanding screenshots, checking UI."
                 ),
                 "parameters": {
@@ -162,6 +239,10 @@ def get_tools() -> List[ToolEntry]:
                         "prompt": {
                             "type": "string",
                             "description": "What to analyze or describe about the image",
+                        },
+                        "file_path": {
+                            "type": "string",
+                            "description": "Local file path to image (preferred — reads from disk, avoids base64 in arguments). Must be inside data/uploads/ directory.",
                         },
                         "image_url": {
                             "type": "string",

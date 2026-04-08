@@ -127,3 +127,80 @@ def test_repo_commit_is_deterministically_whitelisted():
     from ouroboros.safety import _is_whitelisted
 
     assert _is_whitelisted("repo_commit", {"commit_message": "fix: test"})
+
+
+def test_python_m_pytest_is_deterministically_whitelisted():
+    from ouroboros.safety import _is_whitelisted
+
+    assert _is_whitelisted(
+        "run_shell",
+        {"cmd": ["python3", "-m", "pytest", "tests/test_scope_review.py", "-q"]},
+    )
+
+
+def test_string_python_m_pytest_is_deterministically_whitelisted():
+    from ouroboros.safety import _is_whitelisted
+
+    assert _is_whitelisted(
+        "run_shell",
+        {"cmd": "python3 -m pytest tests/test_scope_review.py -q"},
+    )
+
+
+def test_json_array_string_python_m_pytest_is_deterministically_whitelisted():
+    from ouroboros.safety import _is_whitelisted
+
+    assert _is_whitelisted(
+        "run_shell",
+        {"cmd": '["python3", "-m", "pytest", "tests/test_scope_review.py", "-q"]'},
+    )
+
+
+def test_python_literal_list_string_pytest_is_deterministically_whitelisted():
+    from ouroboros.safety import _is_whitelisted
+
+    assert _is_whitelisted(
+        "run_shell",
+        {"cmd": "['python3', '-m', 'pytest', 'tests/test_scope_review.py', '-q']"},
+    )
+
+
+def test_python_inline_code_is_not_whitelisted():
+    from ouroboros.safety import _is_whitelisted
+
+    assert not _is_whitelisted(
+        "run_shell",
+        {"cmd": ["python3", "-c", "print('hello')"]},
+    )
+
+
+def test_python_non_pytest_module_is_not_whitelisted():
+    from ouroboros.safety import _is_whitelisted
+
+    assert not _is_whitelisted(
+        "run_shell",
+        {"cmd": ["python3", "-m", "http.server", "8000"]},
+    )
+
+
+@pytest.mark.parametrize(
+    "cmd",
+    [
+        ["/tmp/git", "status"],
+        ["/tmp/pytest", "-q"],
+        ["./rg", "needle", "."],
+    ],
+)
+def test_path_spoofed_safe_basenames_are_not_whitelisted(cmd):
+    from ouroboros.safety import _is_whitelisted
+
+    assert not _is_whitelisted("run_shell", {"cmd": cmd})
+
+
+def test_python_named_wrapper_is_not_whitelisted():
+    from ouroboros.safety import _is_whitelisted
+
+    assert not _is_whitelisted(
+        "run_shell",
+        {"cmd": "/tmp/python-malicious -m pytest tests/test_scope_review.py -q"},
+    )

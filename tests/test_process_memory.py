@@ -144,6 +144,43 @@ class TestHelperFunctions:
         assert "status=non_zero_exit" in details
         assert "signal=SIGKILL" in details
 
+    def test_generate_reflection_includes_review_evidence(self):
+        from ouroboros.reflection import generate_reflection
+
+        captured = {}
+
+        class FakeLlm:
+            def chat(self, *, messages, model, reasoning_effort, max_tokens):
+                captured["prompt"] = messages[0]["content"]
+                return {"content": "Reflection mentions tests_affected."}, {"cost": 0}
+
+        entry = generate_reflection(
+            task={"id": "task-1", "type": "task", "text": "Fix commit flow"},
+            llm_trace={"tool_calls": [{
+                "tool": "repo_commit",
+                "is_error": False,
+                "result": "⚠️ REVIEW_BLOCKED: blocked by tests_affected",
+            }]},
+            trace_summary="repo_commit blocked",
+            llm_client=FakeLlm(),
+            usage_dict={"rounds": 3, "cost": 0.01},
+            review_evidence={
+                "has_evidence": True,
+                "recent_attempts": [{
+                    "status": "blocked",
+                    "critical_findings": [{
+                        "severity": "critical",
+                        "item": "tests_affected",
+                        "reason": "broken",
+                    }],
+                }],
+            },
+        )
+
+        assert "Structured review evidence" in captured["prompt"]
+        assert "tests_affected" in captured["prompt"]
+        assert entry["review_evidence"]["has_evidence"] is True
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Reflection context loading

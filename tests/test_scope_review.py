@@ -127,7 +127,8 @@ class TestTouchedFilePack:
         assert "```" not in pack or "image.png" not in pack.split("```")[1] if "```" in pack else True
 
     def test_omits_large_files(self, tmp_path):
-        (tmp_path / "huge.py").write_text("x" * 200_000, encoding="utf-8")
+        # _FILE_SIZE_LIMIT is now 1MB; write a file slightly above that threshold
+        (tmp_path / "huge.py").write_bytes(b"x" * (1_048_576 + 1))
         mod = _get_module("ouroboros.tools.review_helpers")
         pack, omitted = mod.build_touched_file_pack(tmp_path, ["huge.py"])
         assert "huge.py" in omitted
@@ -190,7 +191,7 @@ class TestScopeFailClosed:
         assert "DELETED" in prompt
 
     def test_build_scope_prompt_blocks_on_partial_omission(self, tmp_path):
-        """_build_scope_prompt returns omitted filenames when some files are binary."""
+        """_build_scope_prompt returns _TouchedContextStatus(status='omitted') when some files are binary."""
         import subprocess
         subprocess.run(["git", "init"], cwd=str(tmp_path), capture_output=True)
         (tmp_path / "docs").mkdir(exist_ok=True)
@@ -209,9 +210,12 @@ class TestScopeFailClosed:
         subprocess.run(["git", "add", "."], cwd=str(tmp_path), capture_output=True)
 
         mod = _get_module("ouroboros.tools.scope_review")
-        prompt, omitted = mod._build_scope_prompt(tmp_path, "test msg")
-        assert omitted is not None
-        assert "image.png" in omitted
+        prompt, context_status = mod._build_scope_prompt(tmp_path, "test msg")
+        # Returns (None, _TouchedContextStatus) on fail-closed
+        assert prompt is None
+        assert context_status is not None
+        assert context_status.status == "omitted"
+        assert "image.png" in context_status.omitted_paths
 
     def test_build_scope_prompt_clean_when_all_readable(self, tmp_path):
         """_build_scope_prompt returns None omitted when all files are readable."""
@@ -266,8 +270,9 @@ class TestRunScopeReviewFailClosed:
             ctx, "test commit",
             goal="test goal", scope="test scope",
         )
-        assert "SCOPE_REVIEW_BLOCKED" in result
-        assert "bin.png" in result
+        assert result.blocked
+        assert "SCOPE_REVIEW_BLOCKED" in result.block_message
+        assert "bin.png" in result.block_message
 
     def test_build_scope_prompt_deletion_not_blocked_e2e(self, tmp_path):
         """_build_scope_prompt must NOT signal empty for deletion-only diffs.
@@ -355,10 +360,12 @@ class TestScopeReviewModule:
         source = inspect.getsource(mod._build_scope_prompt)
         assert "Intent / Scope Review Checklist" in source
 
-    def test_scope_prompt_includes_broader_repo_pack(self):
+    def test_scope_prompt_includes_full_repo_pack(self):
+        # scope_review now uses build_full_repo_pack (DRY, no char cap)
+        # The call is in _gather_scope_packs which _build_scope_prompt delegates to
         mod = _get_module("ouroboros.tools.scope_review")
-        source = inspect.getsource(mod._build_scope_prompt)
-        assert "build_broader_repo_pack" in source
+        source = inspect.getsource(mod._gather_scope_packs)
+        assert "build_full_repo_pack" in source
 
 
 # ---------------------------------------------------------------------------
@@ -460,20 +467,234 @@ class TestGitWiring:
         assert "scope" in sig.parameters
 
     def test_scope_review_wired_in_commit(self):
-        """_repo_commit_push must call scope review after triad review."""
+        """_repo_commit_push must call _run_parallel_review which runs scope review."""
         git = _get_module("ouroboros.tools.git")
         source = inspect.getsource(git._repo_commit_push)
-        assert "run_scope_review" in source
-        # Scope review must come after triad review
-        triad_pos = source.find("_run_unified_review")
-        scope_pos = source.find("run_scope_review")
-        assert triad_pos < scope_pos
+        assert "_run_parallel_review" in source
+        # The parallel helper must contain both triad and scope review
+        parallel_source = inspect.getsource(git._run_parallel_review)
+        assert "run_scope_review" in parallel_source
+        assert "_run_unified_review" in parallel_source
+        # ThreadPoolExecutor must be used for parallel execution
+        assert "ThreadPoolExecutor" in parallel_source
 
     def test_repo_write_commit_not_bypass_scope(self):
-        """Legacy _repo_write_commit uses advisory gate; scope review is in the unified path."""
+        """Legacy _repo_write_commit also calls _run_parallel_review (parallel)."""
         git = _get_module("ouroboros.tools.git")
         source = inspect.getsource(git._repo_write_commit)
         assert "_check_advisory_freshness" in source
+        # Scope review must be wired in legacy path too via _run_parallel_review
+        assert "_run_parallel_review" in source
+        parallel_source = inspect.getsource(git._run_parallel_review)
+        assert "run_scope_review" in parallel_source
+        assert "ThreadPoolExecutor" in parallel_source
+
+    def test_parallel_execution_both_always_run(self):
+        """Both triad and scope futures are always submitted regardless of each other's result."""
+        git = _get_module("ouroboros.tools.git")
+        source = inspect.getsource(git._run_parallel_review)
+        # Both submissions must be present before any result() call
+        submit_triad = source.find("_run_triad")
+        submit_scope = source.find("_run_scope")
+        result_triad = source.find("triad_fut.result()")
+        result_scope = source.find("scope_fut.result()")
+        # Both must be submitted, and submissions must precede result() calls
+        assert submit_triad > 0
+        assert submit_scope > 0
+        assert result_triad > 0
+        assert result_scope > 0
+        # Both submitted before any result() is collected
+        assert submit_triad < result_triad
+        assert submit_scope < result_scope
+
+    def test_aggregated_verdict_both_blockers_shown(self):
+        """When both triad and scope block, both messages must appear in combined output."""
+        import types
+        import unittest.mock as mock
+        scope_mod = _get_module("ouroboros.tools.scope_review")
+        pr_mod = _get_module("ouroboros.tools.parallel_review")
+
+        triad_error = "⚠️ REVIEW_BLOCKED: triad finding"
+        scope_blocked = scope_mod.ScopeReviewResult(
+            blocked=True,
+            block_message="⚠️ SCOPE_REVIEW_BLOCKED: scope finding",
+            critical_findings=[{"verdict": "FAIL", "item": "intent_alignment",
+                                "severity": "critical", "reason": "scope blocked", "model": "test"}],
+        )
+        ctx = types.SimpleNamespace(
+            repo_dir=None, _last_review_critical_findings=[], _review_advisory=[])
+        with mock.patch.object(pr_mod, "run_cmd", return_value=""):
+            blocked, combined_msg, block_reason, findings, scope_adv = pr_mod.aggregate_review_verdict(
+                triad_error, scope_blocked, "critical_findings", [], ctx,
+                "test commit", 0.0, ctx.repo_dir)
+        assert blocked
+        assert "triad finding" in combined_msg
+        assert "scope finding" in combined_msg
+        assert "Both triad review AND scope review" in combined_msg
+        assert len(findings) == 1
+
+    def test_triad_advisory_included_when_scope_blocks(self):
+        """When triad passes but has advisory findings and scope blocks, all findings appear."""
+        import types
+        import unittest.mock as mock
+        scope_mod = _get_module("ouroboros.tools.scope_review")
+        pr_mod = _get_module("ouroboros.tools.parallel_review")
+
+        scope_blocked = scope_mod.ScopeReviewResult(
+            blocked=True,
+            block_message="⚠️ SCOPE_REVIEW_BLOCKED: scope critical finding",
+            critical_findings=[{"verdict": "FAIL", "item": "intent_alignment",
+                                "severity": "critical", "reason": "scope blocked", "model": "test"}],
+        )
+        triad_advisory = [{"item": "context_building", "reason": "advisory note"}]
+        ctx = types.SimpleNamespace(
+            repo_dir=None, _last_review_critical_findings=[], _review_advisory=[])
+        with mock.patch.object(pr_mod, "run_cmd", return_value=""):
+            blocked, combined_msg, block_reason, findings, scope_adv = pr_mod.aggregate_review_verdict(
+                None, scope_blocked, "scope_blocked", triad_advisory, ctx,
+                "test commit", 0.0, ctx.repo_dir)
+        assert blocked
+        assert "scope critical finding" in combined_msg
+        assert "advisory note" in combined_msg
+        assert len(findings) == 1
+
+    def test_advisory_mode_scope_criticals_not_in_blocking_findings(self):
+        """Advisory-mode scope critical findings must NOT be added to _combined_findings."""
+        import types
+        import unittest.mock as mock
+        scope_mod = _get_module("ouroboros.tools.scope_review")
+        pr_mod = _get_module("ouroboros.tools.parallel_review")
+
+        # Triad blocks; scope does NOT block but has critical findings (advisory enforcement)
+        triad_error = "⚠️ REVIEW_BLOCKED: triad issue"
+        scope_advisory_crit = scope_mod.ScopeReviewResult(
+            blocked=False,  # advisory mode — not blocked
+            block_message="",
+            critical_findings=[{"verdict": "FAIL", "item": "intent_alignment",
+                                "severity": "critical", "reason": "advisory-only scope note", "model": "test"}],
+            advisory_findings=[],
+        )
+        ctx = types.SimpleNamespace(
+            repo_dir=None, _last_review_critical_findings=[], _review_advisory=[])
+        with mock.patch.object(pr_mod, "run_cmd", return_value=""):
+            blocked, combined_msg, block_reason, findings, scope_adv = pr_mod.aggregate_review_verdict(
+                triad_error, scope_advisory_crit, "critical_findings", [], ctx,
+                "test commit", 0.0, ctx.repo_dir)
+        assert blocked
+        # Advisory-mode scope criticals must NOT appear in durable blocking findings
+        assert all(f.get("item") != "intent_alignment" for f in findings), \
+            "Advisory-mode scope criticals must not be recorded as blocking findings"
+        # But should appear in scope_advisory_items for visibility
+        assert any(
+            (isinstance(item, dict) and item.get("item") == "intent_alignment")
+            or (isinstance(item, str) and "intent_alignment" in item)
+            for item in scope_adv
+        )
+
+    def test_scope_advisory_visible_on_successful_commit(self):
+        """Non-blocking scope advisory findings must be returned even when commit is not blocked."""
+        import types
+        import unittest.mock as mock
+        scope_mod = _get_module("ouroboros.tools.scope_review")
+        pr_mod = _get_module("ouroboros.tools.parallel_review")
+
+        # Scope passes (not blocked) but has advisory findings
+        scope_advisory = scope_mod.ScopeReviewResult(
+            blocked=False,
+            block_message="",
+            critical_findings=[],
+            advisory_findings=[{"verdict": "PASS", "item": "architecture_fit",
+                                "severity": "advisory", "reason": "minor concern", "model": "test"}],
+        )
+        ctx = types.SimpleNamespace(
+            repo_dir=None, _last_review_critical_findings=[], _review_advisory=[])
+        with mock.patch.object(pr_mod, "run_cmd", return_value=""):
+            blocked, combined_msg, block_reason, findings, scope_adv = pr_mod.aggregate_review_verdict(
+                None, scope_advisory, "", [], ctx, "test commit", 0.0, ctx.repo_dir)
+        # Should NOT block
+        assert not blocked
+        assert combined_msg is None
+        # But scope advisory items must be returned for caller to surface
+        assert len(scope_adv) > 0
+        assert any(
+            (isinstance(item, dict) and item.get("item") == "architecture_fit")
+            or (isinstance(item, str) and "architecture_fit" in item)
+            for item in scope_adv
+        )
+
+    def test_scope_review_skipped_surfaces_through_aggregation_path(self):
+        """Budget-skip advisories must survive aggregation and caller-side surfacing."""
+        import types
+        import unittest.mock as mock
+        scope_mod = _get_module("ouroboros.tools.scope_review")
+        pr_mod = _get_module("ouroboros.tools.parallel_review")
+
+        scope_advisory = scope_mod.ScopeReviewResult(
+            blocked=False,
+            block_message="",
+            critical_findings=[],
+            advisory_findings=[{
+                "verdict": "FAIL",
+                "item": "scope_review_skipped",
+                "severity": "advisory",
+                "reason": "⚠️ SCOPE_REVIEW_SKIPPED: Full scope-review prompt exceeds budget.",
+                "model": "scope_reviewer",
+            }],
+        )
+        ctx = types.SimpleNamespace(
+            repo_dir=None, _last_review_critical_findings=[], _review_advisory=[])
+        with mock.patch.object(pr_mod, "run_cmd", return_value=""):
+            blocked, combined_msg, block_reason, findings, scope_adv = pr_mod.aggregate_review_verdict(
+                None, scope_advisory, "", [], ctx, "test commit", 0.0, ctx.repo_dir)
+
+        if scope_adv:
+            ctx._review_advisory.extend(scope_adv)
+
+        assert not blocked
+        assert combined_msg is None
+        assert findings == []
+        assert any(
+            (isinstance(item, dict) and item.get("item") == "scope_review_skipped")
+            or (isinstance(item, str) and "scope_review_skipped" in item)
+            for item in scope_adv
+        )
+        assert any(
+            (isinstance(item, dict) and item.get("item") == "scope_review_skipped")
+            or (isinstance(item, str) and "scope_review_skipped" in item)
+            for item in ctx._review_advisory
+        )
+
+    def test_triad_crash_resets_stale_findings(self):
+        """If triad crashes, stale ctx findings from prior attempt must not bleed into current run."""
+        import types
+        import unittest.mock as mock
+        pr_mod = _get_module("ouroboros.tools.parallel_review")
+
+        # Seed stale fields from a previous attempt
+        ctx = types.SimpleNamespace(
+            repo_dir=None,
+            _last_review_block_reason="critical_findings",
+            _last_review_critical_findings=[
+                {"verdict": "FAIL", "item": "secrets_check", "severity": "critical",
+                 "reason": "stale from prior run", "model": "old-model"}
+            ],
+            _review_advisory=[],
+            _review_history=[],
+            _scope_review_history={},
+        )
+        with mock.patch.object(pr_mod, "run_cmd", return_value=""):
+            with mock.patch("ouroboros.tools.review._run_unified_review",
+                            side_effect=RuntimeError("triad crashed")):
+                with mock.patch("ouroboros.tools.scope_review.run_scope_review") as mock_scope:
+                    from ouroboros.tools.scope_review import ScopeReviewResult
+                    mock_scope.return_value = ScopeReviewResult(blocked=False)
+                    review_err, scope_result, triad_block_reason, _ = pr_mod.run_parallel_review(
+                        ctx, "test commit")
+        # Triad crash must yield infra_failure reason, not the stale critical_findings
+        assert triad_block_reason == "infra_failure"
+        # Stale findings must be cleared — no bleed-through to aggregate
+        assert ctx._last_review_critical_findings == []
+        assert "crashed" in review_err
 
     def test_advisory_freshness_path_aware(self):
         """_check_advisory_freshness must accept paths parameter."""
@@ -714,9 +935,15 @@ class TestSharedLLMRouting:
         assert "llm_usage" in source
 
     def test_scope_review_uses_llm_client(self):
-        """Scope review must use LLMClient for its model call."""
+        """Scope review must use LLMClient for its model call.
+
+        LLMClient is used in _call_scope_llm (called by run_scope_review),
+        so we check the whole module for its presence rather than just
+        the top-level run_scope_review function.
+        """
         mod = _get_module("ouroboros.tools.scope_review")
-        source = inspect.getsource(mod.run_scope_review)
+        # LLMClient is instantiated in _call_scope_llm which run_scope_review delegates to
+        source = inspect.getsource(mod._call_scope_llm)
         assert "LLMClient" in source
 
     def test_scope_review_emits_usage(self):
@@ -752,3 +979,4 @@ class TestAdvisorySchemaEnriched:
         adv = _get_module("ouroboros.tools.claude_advisory_review")
         source = inspect.getsource(adv._handle_advisory_pre_review)
         assert "raw_result[:4000]" not in source
+

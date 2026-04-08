@@ -47,6 +47,7 @@ TOOL_MODULES = [
     "ouroboros.tools.claude_advisory_review",
     "ouroboros.tools.scope_review",
     "ouroboros.tools.review_helpers",
+    "ouroboros.tools.plan_review",
 ]
 
 SUPERVISOR_MODULES = [
@@ -125,6 +126,8 @@ EXPECTED_TOOLS = [
     "enable_tools",
     # Advisory pre-review gate
     "advisory_pre_review", "review_status",
+    # Pre-implementation design review
+    "plan_task",
 ]
 
 
@@ -148,6 +151,7 @@ def test_tool_schemas_valid(registry):
         func = schema["function"]
         assert "name" in func
         assert "description" in func
+        assert isinstance(func["description"], str)
         assert "parameters" in func
         params = func["parameters"]
         assert params["type"] == "object"
@@ -359,14 +363,11 @@ def test_no_env_dumping():
 
 
 def test_no_oversized_modules():
-    """Principle 5: no module exceeds 1050 lines."""
-    max_lines = 1050
-    grandfathered = {
-        # Existing large modules tracked as refactor debt. Keep the gate for all others.
-        "llm.py",
-        "onboarding_wizard.py",
-        "server.py",
-    }
+    """Principle 5: no non-grandfathered module exceeds the hard gate."""
+    from ouroboros.review import GRANDFATHERED_OVERSIZED_MODULES, MAX_MODULE_LINES
+
+    max_lines = MAX_MODULE_LINES
+    grandfathered = set(GRANDFATHERED_OVERSIZED_MODULES)
     violations = []
     for root, dirs, files in os.walk(REPO):
         dirs[:] = [d for d in dirs if d not in _SKIP_DIRS]
@@ -409,9 +410,6 @@ def test_no_bare_except_pass():
 
 # ── AST-based function size check ───────────────────────────────
 
-MAX_FUNCTION_LINES = 250  # Hard limit — anything above is a bug
-
-
 _SKIP_DIRS = {'.git', '__pycache__', 'tests', 'python-standalone', 'build', 'dist',
               'venv', '.venv', 'node_modules', 'assets', '.pytest_cache'}
 
@@ -439,7 +437,9 @@ def _get_function_sizes():
 
 
 def test_no_extremely_oversized_functions():
-    """No function exceeds 200 lines (hard limit)."""
+    """No function exceeds the hard gate."""
+    from ouroboros.review import MAX_FUNCTION_LINES
+
     violations = []
     for fname, func_name, size in _get_function_sizes():
         if size > MAX_FUNCTION_LINES:
@@ -450,9 +450,11 @@ def test_no_extremely_oversized_functions():
 
 def test_function_count_reasonable():
     """Codebase doesn't have too few or too many functions."""
+    from ouroboros.review import MAX_TOTAL_FUNCTIONS
+
     sizes = _get_function_sizes()
     assert len(sizes) >= 100, f"Only {len(sizes)} functions — too few?"
-    assert len(sizes) <= 1000, f"{len(sizes)} functions — too many?"
+    assert len(sizes) <= MAX_TOTAL_FUNCTIONS, f"{len(sizes)} functions — too many?"
 
 
 # ── Pre-push gate tests ──────────────────────────────────────────────

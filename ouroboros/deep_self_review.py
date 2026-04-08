@@ -10,20 +10,28 @@ from __future__ import annotations
 import logging
 import os
 import pathlib
-import subprocess
 from typing import Any, Callable, Dict, Optional, Tuple
 
 log = logging.getLogger(__name__)
 
 _MAX_FILE_BYTES = 1_048_576  # 1 MB
 
-# Security: skip files that may contain secrets (same pattern as legacy review.py)
-_SENSITIVE_EXTENSIONS = {".env", ".pem", ".key", ".p12", ".pfx", ".jks", ".keystore"}
-_SENSITIVE_NAMES = {
-    ".env", ".env.local", ".env.production", ".env.staging",
-    "credentials.json", "service-account.json", "secrets.yaml", "secrets.json",
-    ".git-credentials", ".netrc", ".npmrc", ".pypirc",
-}
+# Filtering constants and binary sniffer — imported from review_helpers (DRY, P5).
+# deep_self_review uses the same exclusion logic as the scope review full-repo pack.
+from ouroboros.tools.review_helpers import (  # noqa: E402
+    _SENSITIVE_EXTENSIONS,
+    _SENSITIVE_NAMES,
+    _VENDORED_SUFFIXES,
+    _VENDORED_NAMES,
+    _FULL_REPO_BINARY_EXTENSIONS as _BINARY_EXTENSIONS,
+    _is_probably_binary,
+    _BINARY_SNIFF_BYTES,
+)
+
+# Directory prefixes to skip entirely (relative to repo_dir, using forward slashes).
+# - assets/  : README screenshots and app icons — no agent logic
+# - webview/ : legacy PyWebView JS helpers, not part of the web SPA or agent core
+_SKIP_DIR_PREFIXES = ("assets/", "webview/")
 
 _MEMORY_WHITELIST = [
     "memory/identity.md",
@@ -65,39 +73,65 @@ def build_review_pack(
     file_count = 0
     skipped: list[str] = []
 
-    # 1. Git-tracked files (fail closed — no silent degradation)
+    # 1. Git-tracked files — read directly from git index via dulwich (fork-safe, no subprocess).
+    # dulwich.repo.Repo opens the index in pure Python; safe to call inside forked workers on macOS.
     try:
-        result = subprocess.run(
-            ["git", "ls-files"],
-            cwd=str(repo_dir),
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        if result.returncode != 0:
-            raise RuntimeError(f"git ls-files exited with code {result.returncode}: {result.stderr.strip()}")
-        tracked = [f.strip() for f in result.stdout.splitlines() if f.strip()]
+        import dulwich.repo as _dulwich_repo  # local import — avoid top-level cost if unused
+        _repo = _dulwich_repo.Repo(str(repo_dir))
+        tracked = sorted(p.decode("utf-8", errors="replace") for p in _repo.open_index())
         if not tracked:
-            raise RuntimeError("git ls-files returned no files — cannot build review pack")
+            raise RuntimeError("dulwich index is empty — cannot build review pack")
+    except ImportError:
+        return "", {"file_count": 0, "total_chars": 0, "skipped": [
+            "FATAL: dulwich not installed. Run: pip install dulwich"
+        ]}
     except Exception as e:
         return "", {"file_count": 0, "total_chars": 0, "skipped": [f"FATAL: {e}"]}
 
     read_errors: list[str] = []
+    repo_dir_resolved = repo_dir.resolve()
     for rel_path in tracked:
         full_path = repo_dir / rel_path
+        # Security: reject symlinks that resolve outside the repository root.
+        # Git can track symlinks pointing outside the repo; reading them would
+        # exfiltrate local secrets into external review-model prompts.
+        try:
+            full_path.resolve().relative_to(repo_dir_resolved)
+        except (OSError, ValueError):
+            skipped.append(f"{rel_path} (path escapes repository root)")
+            continue
         try:
             if not full_path.is_file():
                 continue
-            # Security: skip sensitive files
+            # Skip excluded directory prefixes (assets, webview, etc.)
+            rel_norm = rel_path.replace("\\", "/")
+            if rel_norm.startswith(_SKIP_DIR_PREFIXES):
+                skipped.append(f"{rel_path} (excluded dir)")
+                continue
             fname = full_path.name.lower()
             fsuffix = full_path.suffix.lower()
+            # Security: skip sensitive files
             if fname in _SENSITIVE_NAMES or fsuffix in _SENSITIVE_EXTENSIONS:
                 skipped.append(f"{rel_path} (sensitive)")
                 continue
+            # Binary/media: skip images, fonts, compiled blobs (waste context with garbage)
+            if fsuffix in _BINARY_EXTENSIONS:
+                skipped.append(f"{rel_path} (binary/media)")
+                continue
+            # Vendored/minified: skip third-party bundled assets (waste context window)
+            if fname in _VENDORED_NAMES or any(fname.endswith(s) for s in _VENDORED_SUFFIXES):
+                skipped.append(f"{rel_path} (vendored/minified)")
+                continue
+            # Size guard BEFORE content sniffer so oversized files never trigger a read.
             size = full_path.stat().st_size
             if size > _MAX_FILE_BYTES:
                 skipped.append(f"{rel_path} (>{_MAX_FILE_BYTES // 1024}KB)")
                 parts.append(f"## FILE: {rel_path}\n[SKIPPED: file too large ({size} bytes)]\n")
+                continue
+            # Content-based binary guard: catches unlisted extensions (e.g. .wasm, .bin,
+            # extensionless blobs). Reads only the first _BINARY_SNIFF_BYTES bytes.
+            if _is_probably_binary(full_path):
+                skipped.append(f"{rel_path} (binary/media)")
                 continue
             content = full_path.read_text(encoding="utf-8", errors="replace")
             if not content.strip():
@@ -115,7 +149,7 @@ def build_review_pack(
         error_note += "\n".join(f"  - {e}" for e in read_errors)
         parts.insert(0, error_note + "\n")
 
-    # 2. Memory whitelist files
+    # 2. Memory whitelist files — collected BEFORE writing the omission section
     for rel_mem in _MEMORY_WHITELIST:
         full_path = drive_root / rel_mem
         try:
@@ -130,8 +164,24 @@ def build_review_pack(
                 continue
             parts.append(f"## FILE: drive/{rel_mem}\n{content}\n")
             file_count += 1
-        except Exception:
+        except Exception as e:
+            skipped.append(f"drive/{rel_mem} (read error: {e})")
             continue
+
+    # Append explicit omission section AFTER all passes so every exclusion is captured.
+    # This makes review scope fully auditable by the model and the operator.
+    if skipped:
+        omission_lines = [
+            "## OMITTED FILES (not included in review pack)",
+            "These files were excluded. Reasons: sensitive=secrets/keys, "
+            "vendored/minified=third-party bundled asset, binary/media=images/fonts/compiled blobs, "
+            "excluded_dir=non-agent-logic directory (assets/, webview/), "
+            "too_large=>1MB, read_error=unreadable.",
+            "",
+        ]
+        for entry in skipped:
+            omission_lines.append(f"  - {entry}")
+        parts.append("\n".join(omission_lines) + "\n")
 
     pack_text = "\n".join(parts)
     stats = {
@@ -166,6 +216,23 @@ def run_deep_self_review(
 
     Returns (review_text, usage_dict). On any error, returns an error string
     with empty usage instead of raising.
+
+    macOS fork-safety note
+    ----------------------
+    When the Ouroboros app bundle uses fork() to spawn the inner server.py
+    subprocess, the child process inherits a multithreaded parent state.
+    The first httpx HTTP request triggers macOS proxy detection via
+    SCDynamicStoreCopyProxiesWithOptions() / CFPreferences, which is not
+    fork-safe and causes a SIGSEGV (exit code -11, confirmed in macOS
+    crash reports via the ``"crashed on child side of fork pre-exec"``
+    marker in the ``asi`` field).
+
+    We work around this by asking the shared LLMClient to send this one
+    call with ``trust_env=False`` so httpx never consults env-vars or the
+    OS proxy API.  The flag is passed through
+    ``llm.chat(..., no_proxy=True)`` and handled only in the
+    ``_chat_remote`` path of ``llm.py``.  Regular task LLM calls are
+    unaffected.
     """
     try:
         # 1. Build pack
@@ -198,12 +265,15 @@ def run_deep_self_review(
 
         emit_progress(f"Sending to {model} (~{estimated_tokens:,} tokens). This may take several minutes...")
 
-        # 4. Build messages and call LLM
+        # 4. Build messages
         messages = [
             {"role": "system", "content": _SYSTEM_PROMPT},
             {"role": "user", "content": pack_text},
         ]
 
+        # 5. Call LLM with no_proxy=True to prevent macOS fork-safety SIGSEGV.
+        #    The flag is forwarded to _chat_remote in llm.py which builds a
+        #    one-shot httpx.Client(trust_env=False, mounts={}).
         response, usage = llm.chat(
             messages=messages,
             model=model,
@@ -211,6 +281,7 @@ def run_deep_self_review(
             reasoning_effort="high",
             max_tokens=100_000,
             temperature=None,
+            no_proxy=True,
         )
 
         text = response.get("content") or ""

@@ -48,9 +48,20 @@ def test_vision_query_default_max_tokens():
 
 
 def test_claude_code_edit_sdk_max_turns():
-    """shell.py SDK run_edit path must use max_turns ≥25."""
-    src = open("ouroboros/tools/shell.py").read()
-    assert "max_turns=25" in src
+    """Edit and advisory paths must share the same default Claude Code turn budget."""
+    import inspect
+    from ouroboros.gateways import claude_code as gw
+
+    assert gw.DEFAULT_CLAUDE_CODE_MAX_TURNS == 30
+    assert inspect.signature(gw.run_edit).parameters["max_turns"].default == 30
+    assert inspect.signature(gw.run_readonly).parameters["max_turns"].default == 30
+
+    shell_src = open("ouroboros/tools/shell.py").read()
+    advisory_src = open("ouroboros/tools/claude_advisory_review.py").read()
+    assert "DEFAULT_CLAUDE_CODE_MAX_TURNS" in shell_src
+    assert "DEFAULT_CLAUDE_CODE_MAX_TURNS" in advisory_src
+    assert "max_turns=25" not in shell_src
+    assert "max_turns=8" not in advisory_src
 
 
 def test_claude_code_sdk_only_no_cli_fallback():

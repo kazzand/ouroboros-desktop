@@ -812,18 +812,29 @@ def build_llm_messages(
         build_runtime_section(env, task),
     ])
 
-    dynamic_parts.extend(build_recent_sections(memory, env, task_id=task.get("id", "")))
+    review_section = ""
+    if review_context_builder is not None:
+        try:
+            review_section = str(review_context_builder() or "").strip()
+        except Exception:
+            log.debug("Failed to build review continuity section", exc_info=True)
+    if review_section:
+        dynamic_parts.append(review_section)
+    else:
+        try:
+            from ouroboros.review_state import load_state, format_status_section
+            advisory_state = load_state(pathlib.Path(env.drive_root))
+            if advisory_state.runs or advisory_state.last_commit_attempt:
+                advisory_section = format_status_section(
+                    advisory_state,
+                    repo_dir=pathlib.Path(env.repo_dir),
+                )
+                if advisory_section:
+                    dynamic_parts.append(advisory_section)
+        except Exception:
+            log.debug("Failed to build advisory review status section", exc_info=True)
 
-    # Advisory pre-review status — helps agent see pending findings before committing
-    try:
-        from ouroboros.review_state import load_state, format_status_section
-        advisory_state = load_state(pathlib.Path(env.drive_root))
-        if advisory_state.runs or advisory_state.last_commit_attempt:
-            advisory_section = format_status_section(advisory_state)
-            if advisory_section:
-                dynamic_parts.append(advisory_section)
-    except Exception:
-        log.debug("Failed to build advisory review status section", exc_info=True)
+    dynamic_parts.extend(build_recent_sections(memory, env, task_id=task.get("id", "")))
 
     dynamic_text = "\n\n".join(dynamic_parts)
 

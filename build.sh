@@ -4,6 +4,7 @@ set -e
 SIGN_IDENTITY="Developer ID Application: Ian Mironov (WHY6PAKA5V)"
 NOTARYTOOL_PROFILE="ouroboros-notarize"
 ENTITLEMENTS="entitlements.plist"
+SIGN_MODE="${OUROBOROS_SIGN:-1}"
 
 APP_PATH="dist/Ouroboros.app"
 DMG_NAME="Ouroboros-$(cat VERSION | tr -d '[:space:]').dmg"
@@ -50,35 +51,47 @@ rm -rf build dist
 echo "--- Running PyInstaller ---"
 python3 -m PyInstaller Ouroboros.spec --clean --noconfirm
 
-echo ""
-echo "=== Signing Ouroboros.app ==="
+if [ "$SIGN_MODE" != "0" ]; then
+    echo ""
+    echo "=== Signing Ouroboros.app ==="
 
-echo "--- Finding and signing all Mach-O binaries ---"
-find "$APP_PATH" -type f | while read -r f; do
-    if file "$f" | grep -q "Mach-O"; then
-        codesign -s "$SIGN_IDENTITY" --timestamp --force --options runtime \
-            --entitlements "$ENTITLEMENTS" "$f" 2>&1 || true
-    fi
-done
-echo "Signed embedded binaries"
+    echo "--- Finding and signing all Mach-O binaries ---"
+    find "$APP_PATH" -type f | while read -r f; do
+        if file "$f" | grep -q "Mach-O"; then
+            codesign -s "$SIGN_IDENTITY" --timestamp --force --options runtime \
+                --entitlements "$ENTITLEMENTS" "$f" 2>&1 || true
+        fi
+    done
+    echo "Signed embedded binaries"
 
-echo "--- Signing the app bundle ---"
-codesign -s "$SIGN_IDENTITY" --timestamp --force --options runtime \
-    --entitlements "$ENTITLEMENTS" "$APP_PATH"
+    echo "--- Signing the app bundle ---"
+    codesign -s "$SIGN_IDENTITY" --timestamp --force --options runtime \
+        --entitlements "$ENTITLEMENTS" "$APP_PATH"
 
-echo "--- Verifying signature ---"
-codesign -dvv "$APP_PATH"
-codesign --verify --strict "$APP_PATH"
-echo "Signature OK"
+    echo "--- Verifying signature ---"
+    codesign -dvv "$APP_PATH"
+    codesign --verify --strict "$APP_PATH"
+    echo "Signature OK"
+else
+    echo ""
+    echo "=== Skipping signing (OUROBOROS_SIGN=0) ==="
+fi
 
 echo ""
 echo "=== Creating DMG ==="
 hdiutil create -volname Ouroboros -srcfolder "$APP_PATH" -ov -format UDZO "$DMG_PATH"
 
-codesign -s "$SIGN_IDENTITY" --timestamp "$DMG_PATH"
+if [ "$SIGN_MODE" != "0" ]; then
+    codesign -s "$SIGN_IDENTITY" --timestamp "$DMG_PATH"
+fi
 
 echo ""
 echo "=== Done ==="
-echo "Signed app: $APP_PATH"
-echo "Signed DMG: $DMG_PATH"
+if [ "$SIGN_MODE" != "0" ]; then
+    echo "Signed app: $APP_PATH"
+    echo "Signed DMG: $DMG_PATH"
+else
+    echo "Unsigned app: $APP_PATH"
+    echo "Unsigned DMG: $DMG_PATH"
+fi
 echo "(Not notarized — users need right-click → Open on first launch)"

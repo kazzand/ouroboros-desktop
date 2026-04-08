@@ -253,6 +253,170 @@ def embedded_pip(base_dir: pathlib.Path) -> Optional[pathlib.Path]:
 
 
 # ---------------------------------------------------------------------------
+# Claude Runtime Resolution
+# ---------------------------------------------------------------------------
+
+from dataclasses import dataclass
+
+
+@dataclass
+class ClaudeRuntimeState:
+    """Structured snapshot of Claude runtime availability.
+
+    Produced by ``resolve_claude_runtime()`` so every consumer
+    (gateway, status API, install/repair, diagnostics) works from the
+    same deterministic state instead of ad-hoc probing.
+    """
+    # App-managed runtime (bundled SDK + its bundled CLI)
+    app_managed: bool = False
+    sdk_version: str = ""
+    sdk_path: str = ""
+    cli_path: str = ""
+    cli_version: str = ""
+    interpreter_path: str = ""
+
+    # Legacy user-site runtime (claude-agent-sdk in ~/.local or similar)
+    legacy_detected: bool = False
+    legacy_sdk_path: str = ""
+    legacy_sdk_version: str = ""
+
+    # Operational state
+    ready: bool = False
+    api_key_set: bool = False
+    error: str = ""
+    last_stderr: str = ""
+
+    def status_label(self) -> str:
+        if not self.sdk_version:
+            return "missing"
+        if not self.api_key_set:
+            return "no_api_key"
+        if self.error:
+            return "error"
+        if not self.ready:
+            return "degraded"
+        return "ready"
+
+
+def _find_sdk_package_path() -> Optional[str]:
+    """Return the filesystem path to the installed claude_agent_sdk package."""
+    try:
+        import claude_agent_sdk
+        pkg_file = getattr(claude_agent_sdk, "__file__", None)
+        if pkg_file:
+            return str(pathlib.Path(pkg_file).parent)
+    except ImportError:
+        pass
+    return None
+
+
+def _find_bundled_cli(sdk_path: str) -> Optional[str]:
+    """Locate the bundled CLI binary inside the SDK package."""
+    cli_name = "claude.exe" if IS_WINDOWS else "claude"
+    bundled = pathlib.Path(sdk_path) / "_bundled" / cli_name
+    if bundled.exists() and bundled.is_file():
+        return str(bundled)
+    return None
+
+
+def _probe_cli_version(cli_path: str) -> str:
+    """Run ``claude -v`` and return the version string, or empty on failure."""
+    try:
+        result = subprocess.run(
+            [cli_path, "-v"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            import re
+            m = re.match(r"([0-9]+\.[0-9]+\.[0-9]+)", result.stdout.strip())
+            if m:
+                return m.group(1)
+    except Exception:
+        pass
+    return ""
+
+
+def _detect_legacy_user_site_sdk() -> tuple[bool, str, str]:
+    """Detect a legacy SDK installed outside the app-managed interpreter.
+
+    Returns ``(detected, path, version)``.
+
+    The heuristic: if the SDK package lives under a ``site-packages``
+    directory that is NOT inside an app-managed ``python-standalone``
+    tree, it is considered legacy.
+    """
+    sdk_path = _find_sdk_package_path()
+    if not sdk_path:
+        return False, "", ""
+    normalised = pathlib.Path(sdk_path).resolve()
+    parts_lower = [p.lower() for p in normalised.parts]
+    in_app_bundle = "python-standalone" in parts_lower
+    if in_app_bundle:
+        return False, "", ""
+    try:
+        import importlib.metadata
+        ver = importlib.metadata.version("claude-agent-sdk")
+    except Exception:
+        ver = ""
+    return True, sdk_path, ver
+
+
+def resolve_claude_runtime() -> ClaudeRuntimeState:
+    """Build a deterministic snapshot of the Claude runtime.
+
+    Resolution order:
+      1. Try to find the SDK package in the current interpreter's site-packages.
+      2. If found, locate its bundled CLI binary.
+      3. Check for legacy (non-app-managed) installations.
+      4. Probe CLI version if a binary is available.
+      5. Check for ANTHROPIC_API_KEY in the environment.
+
+    The result is a frozen snapshot — callers should not cache it across
+    restarts because the environment can change.
+    """
+    state = ClaudeRuntimeState()
+    state.interpreter_path = sys.executable
+
+    # SDK availability
+    try:
+        import importlib.metadata
+        state.sdk_version = importlib.metadata.version("claude-agent-sdk")
+    except Exception:
+        pass
+
+    sdk_path = _find_sdk_package_path()
+    if sdk_path:
+        state.sdk_path = sdk_path
+
+    # Determine if app-managed (SDK lives inside python-standalone)
+    if sdk_path:
+        normalised = pathlib.Path(sdk_path).resolve()
+        parts_lower = [p.lower() for p in normalised.parts]
+        state.app_managed = "python-standalone" in parts_lower
+
+    # Bundled CLI
+    if sdk_path:
+        cli = _find_bundled_cli(sdk_path)
+        if cli:
+            state.cli_path = cli
+            state.cli_version = _probe_cli_version(cli)
+
+    # Legacy detection
+    legacy_detected, legacy_path, legacy_ver = _detect_legacy_user_site_sdk()
+    state.legacy_detected = legacy_detected
+    state.legacy_sdk_path = legacy_path
+    state.legacy_sdk_version = legacy_ver
+
+    # API key
+    state.api_key_set = bool(os.environ.get("ANTHROPIC_API_KEY", "").strip())
+
+    # Ready = SDK present + CLI present + API key set
+    state.ready = bool(state.sdk_version and state.cli_path and state.api_key_set)
+
+    return state
+
+
+# ---------------------------------------------------------------------------
 # Node.js download
 # ---------------------------------------------------------------------------
 

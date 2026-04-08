@@ -1,4 +1,4 @@
-# Ouroboros v4.11.8 — Architecture & Reference
+# Ouroboros v4.17.8 — Architecture & Reference
 
 This document describes every component, page, button, API endpoint, and data flow.
 It is the single source of truth for how the system works. Keep it updated.
@@ -30,13 +30,14 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on localhost:8765
   └── ouroboros/               ← Agent core (runs inside worker processes)
       ├── config.py            ← SSOT: paths, settings defaults, load/save, PID lock
       ├── agent.py             ← Task orchestrator
+      ├── chat_upload_api.py   ← Chat file attachment upload/delete endpoints
       ├── agent_startup_checks.py ← Startup verification and health checks
       ├── agent_task_pipeline.py  ← Task execution pipeline orchestration
       ├── loop.py              ← High-level LLM tool loop
       ├── loop_llm_call.py     ← Single-round LLM call + usage accounting
       ├── loop_tool_execution.py ← Tool dispatch and tool-result handling
       ├── pricing.py           ← Model pricing, cost estimation, usage events
-      ├── llm.py               ← Multi-provider LLM routing (OpenRouter/OpenAI/compatible/Cloud.ru)
+      ├── llm.py               ← Multi-provider LLM routing (OpenRouter/OpenAI/compatible/Cloud.ru/Anthropic)
       ├── model_catalog_api.py ← Optional provider model catalog endpoint
       ├── safety.py            ← Dual-layer LLM security supervisor
       ├── consciousness.py     ← Background thinking loop (with progress emission)
@@ -52,9 +53,18 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on localhost:8765
       ├── review_state.py      ← Durable advisory pre-review state (advisory_review.json)
       ├── onboarding_wizard.py ← Shared desktop/web onboarding bootstrap + validation
       ├── owner_inject.py      ← Per-task user message mailbox (compat module name)
+      ├── launcher_bootstrap.py ← Bundle-to-repo bootstrap and managed sync helpers (used by launcher.py)
+      ├── provider_models.py   ← Provider-specific model ID helpers, direct-provider defaults (OpenAI, Anthropic)
       ├── reflection.py        ← Execution reflection and pattern capture
+      ├── review_evidence.py   ← Structured review findings/obligations snapshot for summaries and reflections
+      ├── server_auth.py       ← Non-localhost auth gate (OUROBOROS_NETWORK_PASSWORD)
+      ├── server_control.py    ← Process-control helpers: restart, panic stop
+      ├── server_entrypoint.py ← CLI argument parsing, port-binding helpers
       ├── server_history_api.py ← Chat history + cost breakdown endpoints
       ├── server_runtime.py    ← Server startup/onboarding and WebSocket liveness helpers
+      ├── server_web.py        ← Static web file helpers (NoCacheStaticFiles, web dir resolver)
+      ├── task_continuation.py ← Durable per-task review continuation state across restart/outage
+      ├── task_results.py      ← Durable task result/status files (task_results/<id>.json)
       ├── tool_capabilities.py ← SSOT for tool sets (core, parallel-safe, truncation, browser)
       ├── tool_policy.py       ← Tool access policy and gating (imports from tool_capabilities)
       ├── utils.py             ← Shared utilities
@@ -62,6 +72,11 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on localhost:8765
       ├── gateways/            ← External API adapters (thin transport, no business logic)
       │   └── claude_code.py   ← Claude Agent SDK gateway (edit + read-only paths)
       ├── tools/               ← Auto-discovered tool plugins
+      │   ├── claude_advisory_review.py ← Advisory pre-review tool (read-only Claude Agent SDK)
+      │   ├── commit_gate.py     ← Advisory freshness gate and commit-attempt recording (extracted from git.py)
+      │   ├── parallel_review.py ← Parallel triad+scope orchestration and verdict aggregation (extracted from git.py)
+      │   ├── plan_review.py     ← Pre-implementation design review (3 parallel full-codebase reviewers, plan_task tool)
+      │   ├── review.py          ← Triad diff review (3-model parallel review against CHECKLISTS.md)
       │   ├── review_helpers.py  ← Shared review helpers (section loader, file packs, intent)
       │   └── scope_review.py   ← Blocking scope reviewer (opus, fail-closed)
       └── compat.py            ← Cross-platform process/path/locking helpers
@@ -105,7 +120,9 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on localhost:8765
 │   ├── settings.json   ← User settings (API keys, models, budget)
 │   ├── state/
 │   │   ├── state.json  ← Runtime state (spent_usd, session_id, branch, etc.)
-│   │   └── queue_snapshot.json
+│   │   ├── advisory_review.json ← Durable advisory/review ledger (runs, attempts, obligations)
+│   │   ├── queue_snapshot.json
+│   │   └── review_continuations/ ← Per-task blocked-review continuation payloads (+ quarantined corrupt files under `corrupt/`)
 │   ├── memory/
 │   │   ├── identity.md     ← Agent's self-description (persistent)
 │   │   ├── scratchpad.md   ← Working memory (auto-generated from scratchpad_blocks.json)
@@ -128,7 +145,8 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on localhost:8765
 │   │   ├── tools.jsonl     ← Tool call log with args/results
 │   │   ├── supervisor.jsonl ← Supervisor-level events
 │   │   └── task_reflections.jsonl ← Execution reflections (process memory)
-│   └── archive/            ← Rotated logs, rescue snapshots
+│   ├── archive/            ← Rotated logs, rescue snapshots
+│   └── uploads/            ← Chat file attachments (uploaded via paperclip button)
 └── ouroboros.pid           ← PID lock file (platform lock — auto-released on crash)
 ```
 
@@ -155,10 +173,10 @@ launcher.py main()
 Shown when `settings.json` does not contain any supported remote provider key and has no
 `LOCAL_MODEL_SOURCE`.
 
-- Existing OpenRouter, OpenAI, OpenAI-compatible, Cloud.ru, or local-model-source settings skip the wizard automatically.
+- Existing OpenRouter, OpenAI, OpenAI-compatible, Cloud.ru, Anthropic, or local-model-source settings skip the wizard automatically.
 - The wizard is shared between desktop and web: one HTML/CSS/JS onboarding flow is rendered directly in pywebview for desktop and injected into a blocking web overlay for Docker/browser runs.
 - The wizard is multi-step and provider-aware: it starts with a single access step that accepts multiple remote keys plus optional local-model setup, then shows visible model defaults, a dedicated review-mode step, a dedicated budget step, and the final summary before save.
-- When an Anthropic key is present, onboarding shows an optional `Install Claude Agent SDK` CTA plus `Skip for now`.
+- When an Anthropic key is present, onboarding shows the Claude runtime status with `Repair Runtime` and `Skip for now` options.
 - Desktop first-run uses the same onboarding bundle and talks to Claude SDK install/status through `pywebview` bridge methods.
   Web onboarding uses `/api/claude-code/status` and `/api/claude-code/install`.
 - The wizard blocks progression if nothing runnable is configured.
@@ -203,7 +221,7 @@ Navigation is a left sidebar with 7 pages (Chat, Files, Logs, Costs, Evolution, 
   Driven by WebSocket connection state, typing events, and live task state.
 - **Header controls**: compact buttons for `/evolve`, `/bg`, `/review`, `/restart`, `/panic` — the canonical location for runtime controls. The chat header is a floating transparent overlay (`position: absolute`, gradient fade) so messages scroll beneath it.
 - **Budget pill**: compact amber pill in the header showing `$spent / $limit` with a mini progress bar, updated from `/api/state` polling every 3 seconds.
-- **Message input**: textarea with inline "Send" text button (accent-colored, right-aligned inside the input field). Shift+Enter for newline, Enter to send.
+- **Message input**: absolute-positioned frosted-glass overlay anchored to the bottom of the chat page (`position: absolute; bottom: 0`). Contains a paperclip attachment button (positioned as an absolute overlay inside the textarea on the left; opens a file picker; selected file is staged locally in JS memory and shown as a removable filename preview badge — the file is uploaded to `data/uploads/` only when Send/Enter is triggered; if the WebSocket is offline at send time, upload is blocked with an error (no upload happens when disconnected, preventing orphan files). If the WebSocket drops after upload completes but before message delivery, the queued message references a durable server-side file that persists until explicitly deleted), a textarea (grows up to 120px; `padding-left: 42px` and `padding-right: 52px` leave space for both overlay buttons), and a Send text button (positioned as an absolute overlay inside the textarea on the right, vertically centered; minimal style — no border, transparent background normally, subtle crimson tint on hover/active, accent-color text). The `#chat-input` textarea has `backdrop-filter: blur(16px)` + semi-transparent background (frosted glass). The `#chat-input-area` wrapper uses only a gradient fade overlay (no backdrop-filter) so message bubbles scroll underneath without a sharp-edged blur rectangle. `#chat-messages` `padding-bottom` is set dynamically via `updateMessagesPadding()` in chat.js (real overlay height + 16px buffer), called on page connect, textarea resize, and attachment preview toggle. The CSS default is `84px` (covers min-height state); JS adjusts up to ~160px when the textarea is fully expanded. Shift+Enter for newline, Enter to send.
 - **Input recall**: ArrowUp / ArrowDown cycles through recent submitted messages without leaving the textarea.
 - **Messages**: user bubbles (right, steel-blue-tinted), assistant bubbles (left, crimson), and system-summary bubbles (left, amber). Non-user bubbles render markdown. Live task card uses crimson accent glass matching the assistant palette.
 - **Multi-user visibility**: user messages are now session-aware. The current browser session stays labeled as `You`; other Web UI sessions render as `WebUI (<session>)`; Telegram-origin messages render with their Telegram sender label.
@@ -214,7 +232,7 @@ Navigation is a left sidebar with 7 pages (Chat, Files, Logs, Costs, Evolution, 
   Later progress updates can retake the headline until the task actually finishes.
 - **System summaries**: `direction="system"` entries from `chat.jsonl` are shown in the same timeline with a 📋 label instead of being hidden or treated as user text.
 - **Typing indicator**: animated "thinking dots" bubble appears when the agent is processing.
-- **Persistence**: chat history loaded from server on page load (`/api/chat/history`), survives app restarts. Fallback to sessionStorage.
+- **Persistence**: chat history loaded from server on page load (`/api/chat/history`), survives app restarts. Fallback to sessionStorage. `syncHistory` uses two-pass processing: progress/summary messages are replayed first (building live card timelines), then regular assistant/user messages are processed (calling `finishLiveCard`). This guarantees thinking bubbles are never discarded due to `taskState.completed` being set before progress events are applied. After first load, if any live card is still active (task ongoing mid-reload), `showTyping()` is called to restore the typing indicator.
 - **Duplicate-bubble prevention**: queued local user bubbles carry a `client_message_id`; echoed WebSocket/history messages with the same id are merged instead of duplicated.
 - **Empty-chat init**: if neither server history nor sessionStorage has messages, the UI shows a transient assistant bubble: `Ouroboros has awakened`. This is visual-only and is not written to chat history.
 - **Telegram bridge**: Web UI initiated chats can be mirrored into the bound Telegram chat, Telegram text input is injected back into the same live chat timeline, and Telegram photos are bridged as image-aware user messages (including while a direct-chat turn is already running).
@@ -251,8 +269,8 @@ The Dashboard tab has been removed. Its functionality is now distributed:
 - **Provider cards**: OpenRouter, OpenAI, OpenAI-compatible, Cloud.ru, Anthropic, plus optional Network Password. Cards are collapsible and use masked-secret inputs with show/hide toggles.
 - **API Keys**: OpenRouter, OpenAI, OpenAI-compatible, Cloud.ru, Anthropic, Telegram Bot Token, GitHub Token, and Network Password.
   Keys are displayed as masked values (e.g., `sk-or-v1...`), can be explicitly cleared, and are only overwritten on save if the user enters a new value (not containing `...`).
-- **Claude Agent SDK CTA**: when Anthropic is configured, the Anthropic card exposes `Install Claude Agent SDK` plus live install/status text.
-  This installs the `claude-agent-sdk` Python package used for delegated code editing and advisory review.
+- **Claude Runtime Status**: when Anthropic is configured, the Anthropic card shows app-managed Claude runtime status with `Repair Runtime` action.
+  The Claude runtime (SDK + bundled CLI) powers delegated code editing and advisory review and is managed automatically by the app.
 - **Models**: Main, Code, Light, Fallback.
 - **Model catalog**: optional `Refresh Model Catalog` action calls `/api/model-catalog`. Failures are non-fatal and surfaced as inline warnings.
 - **Model pickers**: searchable provider-aware pickers replace legacy raw dropdowns for remote models.
@@ -261,6 +279,7 @@ The Dashboard tab has been removed. Its functionality is now distributed:
   - OpenAI model values use `openai::...`.
   - OpenAI-compatible model values use `openai-compatible::...`.
   - Cloud.ru model values use `cloudru::...`.
+  - Anthropic model values use `anthropic::...` (e.g. `anthropic::claude-opus-4.6`).
 - **Reasoning Effort**: Five segmented controls for task/chat, evolution, review, scope review, and consciousness.
   Backed by `OUROBOROS_EFFORT_TASK`, `OUROBOROS_EFFORT_EVOLUTION`, `OUROBOROS_EFFORT_REVIEW`,
   `OUROBOROS_EFFORT_SCOPE_REVIEW`, `OUROBOROS_EFFORT_CONSCIOUSNESS`. Loading falls back to legacy
@@ -279,7 +298,7 @@ The Dashboard tab has been removed. Its functionality is now distributed:
 - **Save Settings** button → POST `/api/settings`. Applies to env immediately.
   Budget and tool-timeout changes take effect immediately; provider/runtime changes may still require restart.
 - **Reset All Data** button (Danger Zone) → POST `/api/reset`.
-  Deletes: state/, memory/, logs/, archive/, settings.json.
+  Deletes: state/, memory/, logs/, archive/, uploads/, settings.json.
   Keeps: repo/ (agent code).
   Triggers server restart. On next launch, onboarding wizard appears.
 
@@ -366,8 +385,8 @@ authentication. If the password is blank, non-loopback access stays open by desi
 | POST | `/api/files/upload` | Multipart upload into current Files directory |
 | GET | `/api/settings` | Current settings with masked API keys |
 | POST | `/api/settings` | Update settings (partial update, only provided keys) |
-| GET | `/api/claude-code/status` | Claude Agent SDK installed/version info |
-| POST | `/api/claude-code/install` | Install `claude-agent-sdk` into the current Python interpreter |
+| GET | `/api/claude-code/status` | App-managed Claude runtime status (SDK version, CLI path/version, legacy detection, API key readiness) |
+| POST | `/api/claude-code/install` | Repair/update the app-managed Claude runtime |
 | GET | `/api/model-catalog` | Optional provider model catalog (OpenRouter/OpenAI/compatible/Cloud.ru) |
 | POST | `/api/command` | Send a slash command `{cmd: "/status"}` |
 | POST | `/api/reset` | Delete all runtime data, restart for fresh onboarding |
@@ -380,6 +399,8 @@ authentication. If the password is blank, non-loopback access stays open by desi
 | GET | `/api/local-model/status` | Local model status and readiness |
 | GET | `/api/evolution-data` | Evolution metrics per git tag (LOC, prompt sizes, memory) |
 | GET | `/api/chat/history` | Merged chat + system summaries + progress messages (chronological, limit param) |
+| POST | `/api/chat/upload` | Upload a file attachment; saved to `data/uploads/` with UUID-prefixed unique name; returns `{ok, filename, display_name, path, size, mime}` |
+| DELETE | `/api/chat/upload` | Delete a previously uploaded chat attachment by filename |
 | POST | `/api/local-model/test` | Local model sanity test (chat + tool calling) |
 | GET/POST | `/auth/login` | Password gate entrypoint for non-localhost browser/API access |
 | GET/POST | `/auth/logout` | Clear auth cookie/session |
@@ -475,8 +496,8 @@ backward compatibility but is not the runtime authority.
 - `run_shell` now treats non-zero exits as explicit failed tool outcomes and records exit/signal metadata in the tool trace.
 - `run_shell` recovers `cmd` passed as a string via a three-step cascade: `json.loads` (JSON array strings) → `ast.literal_eval` (Python literal lists) → `shlex.split` (plain shell strings). Only truly unrecoverable input returns `SHELL_ARG_ERROR`. The `cmd` parameter schema remains `type: array` (intended contract), but the runtime gracefully handles LLM misformatting.
 - `set_tool_timeout` persists `OUROBOROS_TOOL_TIMEOUT_SEC` to `settings.json` and hot-applies it without restart.
-- `/api/claude-code/status` returns SDK version info; `/api/claude-code/install` installs `claude-agent-sdk` via pip.
-- Desktop onboarding CTA installs the `claude-agent-sdk` Python package (not the `claude` CLI binary).
+- `/api/claude-code/status` returns app-managed Claude runtime status (SDK version, CLI path/version, app-managed flag, legacy detection, API key readiness, last stderr on failure); `/api/claude-code/install` repairs/updates the app-managed runtime.
+- Desktop onboarding shows Claude runtime status and repair action (the runtime is managed automatically by the app).
 - **`seal_task_transcript`**: called after compaction and before each `call_llm_with_retry`. Marks one stable tool-result boundary with `cache_control: ephemeral` to improve Anthropic prompt cache hits. Reverts all previous seals first so compaction always sees plain strings. Provider handling: OpenRouter (Anthropic models) passes list content blocks through as-is; direct Anthropic path preserves list content for `tool_result` (Anthropic API supports content blocks there); `_strip_cache_control` in `llm.py` now flattens tool-role list content back to a plain string for OpenAI, OpenAI-compatible, Cloud.ru, and local providers.
 - **Reviewed mutative tool timeout handling** (v4.9.0): `repo_commit` and `repo_write_commit`
   are classified as `REVIEWED_MUTATIVE_TOOLS`. When they exceed the configured tool timeout,
@@ -485,11 +506,21 @@ backward compatibility but is not the runtime authority.
   still running" states for commit operations.
 - Context compaction kicks in after round 8 (summarizes old tool results)
 
-### Claude Agent SDK gateway (gateways/claude_code.py)
+### Claude runtime (gateways/claude_code.py + compat.py)
 
-- **Pure transport adapter** for delegated code editing and advisory review
-- Wraps the `claude-agent-sdk` Python package (`ClaudeSDKClient` with async message stream)
-- Raises `ImportError` at module level when SDK is absent — callers return an install hint; there is no CLI subprocess fallback
+- **App-managed runtime**: the app bundle owns a pinned `claude-agent-sdk` + bundled
+  Claude CLI baseline. The SDK's own bundled-CLI-first resolution is preserved — the
+  gateway never overrides CLI path selection via PATH heuristics.
+- **Auth model**: `ANTHROPIC_API_KEY` only. No support for native Claude login.
+- **Full stderr capture**: both edit and readonly paths pass a `stderr` callback into
+  `ClaudeAgentOptions`. Raw CLI stderr is stored in a ring buffer and surfaced in
+  `ClaudeCodeResult.stderr_tail` on failure, eliminating the old "Check stderr output
+  for details" blind spot.
+- **Runtime resolver** (`ouroboros.compat.resolve_claude_runtime`): deterministic
+  snapshot of SDK version, CLI path/version, app-managed vs legacy status, API key
+  readiness. Used by the status API, install/repair endpoint, and gateway diagnostics.
+- **Legacy detection**: SDK installed outside `python-standalone` (e.g. user-site in
+  `~/.local/lib`) is classified as legacy and silently de-prioritized.
 - **Two execution modes:**
   - **Edit mode** (`run_edit`): `allowed_tools=["Read","Edit","Grep","Glob"]`,
     `disallowed_tools=["Bash","MultiEdit"]`, `permission_mode="acceptEdits"`,
@@ -499,14 +530,11 @@ backward compatibility but is not the runtime authority.
     `disallowed_tools=["Bash","Edit","Write","MultiEdit"]` (SDK enforces tool
     restrictions at the CLI level; no hooks needed)
 - **Structured result**: `ClaudeCodeResult` dataclass with `success`, `result_text`,
-  `session_id`, `cost_usd`, `usage`, `error`. Callers populate `changed_files`,
-  `diff_stat`, and `validation_summary` (orchestration lives in tool layer)
+  `session_id`, `cost_usd`, `usage`, `error`, `stderr_tail`. Callers populate
+  `changed_files`, `diff_stat`, and `validation_summary` (orchestration lives in tool layer)
 - **Orchestration in callers**: project context injection (BIBLE.md, DEVELOPMENT.md,
   CHECKLISTS.md, ARCHITECTURE.md), git stat, and post-edit validation live in
   `ouroboros/tools/shell.py` helpers — the gateway stays a pure transport boundary
-- **SDK-only**: `claude-agent-sdk` is the sole transport for `claude_code_edit` and
-  `advisory_pre_review`. There is no CLI subprocess fallback. If the SDK is absent,
-  both tools return a clear install hint: `pip install 'ouroboros[claude-sdk]'`
 - **Defense-in-depth**: post-edit revert in `registry.py` remains as secondary safety layer
 - Safety-critical files mirror: `BIBLE.md`, `ouroboros/safety.py`,
   `ouroboros/tools/registry.py`, `prompts/SAFETY.md`
@@ -515,17 +543,18 @@ backward compatibility but is not the runtime authority.
 
 - **`repo_write`** (v3.24.0): write file(s) to disk WITHOUT committing. Supports single-file
   (`path` + `content`) and multi-file (`files` array) modes. Preferred workflow:
-  `repo_write` all files → `repo_commit` once with the full diff.
-- **`repo_commit`**: stage + unified pre-commit review + commit + tests + auto-tag + auto-push.
+  `repo_write` all files → `advisory_pre_review` on the final diff → `repo_commit`.
+- **`repo_commit`**: stage + advisory freshness gate + unified pre-commit review + commit + tests + auto-tag + auto-push.
   Includes `review_rebuttal` parameter for disputing reviewer feedback.
 - **`repo_write_commit`**: legacy single-file write+commit (kept for compatibility).
-  Also runs unified review before commit.
-- **Unified pre-commit review** (v3.24.0): 3 models review staged diff against
-  `docs/CHECKLISTS.md`. Review always runs before commit. `Blocking` mode keeps
-  critical findings as hard gates; `Advisory` mode surfaces the same findings
-  as warnings and lets the commit continue. Review history carried across
-  blocking iterations. Quorum: at least 2 of 3 reviewers must succeed in
-  blocking mode. Deterministic preflight (uses `git diff --cached --name-status`;
+  Also checks advisory freshness, then runs unified review before commit.
+- **Unified pre-commit review** (v3.24.0): triad diff review (3 models against
+  `docs/CHECKLISTS.md`) plus a blocking scope review that runs in parallel on the
+  same staged snapshot. `Blocking` mode keeps critical findings as hard gates;
+  `Advisory` mode surfaces the same findings as warnings and lets the commit
+  continue. Review history carried across blocking iterations. Quorum: at least
+  2 of 3 triad reviewers must succeed in blocking mode. Deterministic preflight
+  (uses `git diff --cached --name-status`;
   renames expand to `D src + A dst`; copies expand to `A dst` only; deleted files excluded
   from companion-file presence checks) catches VERSION/README mismatches; blocks when any
   `.py` file under `ouroboros/` or `supervisor/` is added, modified, deleted, or renamed
@@ -539,6 +568,59 @@ backward compatibility but is not the runtime authority.
 - **Credential helper**: `git_ops.configure_remote()` stores credentials in repo-local
   `.git/credentials`. `migrate_remote_credentials()` migrates legacy token-in-URL origins.
   Both are wired at startup and on settings save.
+
+### Deterministic preflight checks (`_preflight_check` in `ouroboros/tools/review.py`)
+
+Run before the expensive LLM review on every `repo_commit`. All 8 checks are
+non-fatal on exception (LLM reviewers catch anything that slips through).
+
+| # | Check | Triggers | Action |
+|---|-------|----------|--------|
+| 1 | `version_readme_sync` | VERSION staged but README.md not staged | Block |
+| 2 | `version_in_commit` | Commit message has version pattern but VERSION not staged | Block |
+| 3 | `tests_affected` | `.py` files in `ouroboros/`/`supervisor/` changed without staged tests | Block |
+| 4 | `architecture_doc` | New `.py` in `ouroboros/`/`supervisor/` but `ARCHITECTURE.md` not staged | Block |
+| 5 | `version_values_match` | VERSION staged: pyproject.toml, README badge, ARCHITECTURE.md header in staged index must all match VERSION value | Block on mismatch |
+| 6 | `readme_changelog_row` | VERSION staged: staged README.md changelog must have a table row for the new version | Block if missing |
+| 7 | (reserved) | — | — |
+| 8 | `conftest_no_tests` | `conftest.py` staged with `test_*` functions (AST parse of staged content, not regex/worktree read) | Block with move hint |
+
+### Reviewer calibration (`CRITICAL_FINDING_CALIBRATION` in `ouroboros/tools/review_helpers.py`)
+
+A shared calibration text block injected into triad reviewer prompts (`review.py`),
+scope reviewer prompt (`scope_review.py`), and advisory reviewer prompt
+(`claude_advisory_review.py`). A parallel condensed "Critical threshold rule"
+subsection in `docs/CHECKLISTS.md` provides a summary for the checklist's own context.
+Enforces: (1) exact repo-local artifact required before CRITICAL; (2) hypothetical/
+plugin/env concerns → advisory; (3) one root cause = one FAIL; (4) do not hold
+obligation open by abstracting a fixed concrete issue.
+
+### Obligation grouping (P3, `ouroboros/review_state.py::_update_obligations_from_attempt`)
+
+Each critical finding is identified by a stable fingerprint `sha256(f"{item}:{reason}")[:12]`.
+Two findings with the same `item` but **different reasons** produce **separate obligations**,
+so a reviewer cannot rotate or widen a finding while keeping it formally "open" as a
+moving-target obligation.  An identical finding (same item + same reason) repeated across
+attempts merges into the existing obligation (reason text deduped) instead of duplicating.
+
+`_resolve_matching_obligations` in `ouroboros/tools/claude_advisory_review.py` resolves
+by both `obligation_id` (primary) and `item.lower()` (fallback for legacy saved state),
+so the dual-path resolution handles obligations created under either scheme.
+
+### Shared worktree version-sync preflight (`ouroboros/tools/review_helpers.py::check_worktree_version_sync`)
+
+`check_worktree_version_sync(repo_dir)` reads VERSION, pyproject.toml, README badge, and
+ARCHITECTURE.md header from the **worktree** (before `git add`) and returns a warning string
+on mismatch. The advisory path (`claude_advisory_review.py`) delegates to this shared helper
+via a backward-compatible `_check_worktree_version_sync` alias. The staged-index equivalent
+in `_preflight_check` (review.py) remains separate — it reads from `git show :PATH` after
+staging and is the authoritative gate.
+
+### Self-verification template (P2, `ouroboros/tools/review.py::_build_critical_block_message`)
+
+From attempt ≥ 2, blocked commit messages include a structured self-verification
+table requiring the agent to map each open finding to a status, evidence, and note
+before calling `repo_commit` again. Suppresses the "blind retry" pattern.
 
 ### Safety system (safety.py + registry.py)
 
@@ -592,6 +674,9 @@ the constitutional guard is that the file itself must remain non-deletable.
 - Triggered at end of task when tool calls had errors or results contained
   blocking markers (`REVIEW_BLOCKED`, `TESTS_FAILED`, `COMMIT_BLOCKED`, etc.)
 - Light LLM produces 150-250 word reflection capturing goal, errors, root cause, lessons
+- Reflection prompt now includes structured review evidence (recent reviewed attempts,
+  advisory runs, open obligations, live freshness, continuations) so blocked-review lessons
+  affect process memory instead of collapsing into a generic failure note.
 - Stored in `logs/task_reflections.jsonl`; last 20 entries loaded into dynamic context
 - Pattern register: recurring error classes tracked in `memory/knowledge/patterns.md`
   via LLM, loaded into semi-stable context as "Known error patterns"
@@ -611,6 +696,8 @@ the constitutional guard is that the file itself must remain non-deletable.
 - Duplicate rejects are persisted explicitly, so `wait_for_task()` can report honest status instead of pretending the task is still running.
 - Completed subtasks persist the full result text; parent tasks no longer see silently clipped child output.
 - When a subtask completes, a compact trace summary is included alongside the full result.
+- Task results also persist `review_evidence` so blocked-review history, obligations, and
+  advisory state can feed summaries, reflections, and later diagnostics from the same durable record.
 - Parent tasks see tool call counts, error counts, and agent notes.
 - Trace compaction remains explicit: max 4000 chars with visible omission markers, plus first/last 15 tool calls for long traces.
 
@@ -620,20 +707,51 @@ the constitutional guard is that the file itself must remain non-deletable.
 - As of v3.20.0, `patterns.md` (Pattern Register) is injected into semi-stable context, and execution reflections from `task_reflections.jsonl` are injected into dynamic context.
 - As of v3.22.0, all docs are always in static context: BIBLE.md (180k), ARCHITECTURE.md (60k), DEVELOPMENT.md (30k), README.md (10k), CHECKLISTS.md (5k).
 - `Health Invariants` are placed at the start of the dynamic context block, before drive state/runtime/recent sections, so warnings influence planning before the model reads the noisier tail sections.
+- Main task context now injects a dedicated `Review Continuity` section between runtime and recent-history sections:
+  live repo gate status, stale markers, bypass reasons, open obligations, open review continuations,
+  and the recent review ledger.
 - `build_recent_sections()` keeps recent dialogue broad, but task-scopes recent progress/tools/events when `task_id` is available.
 - `build_health_invariants()` is split into focused helpers and now also surfaces recent provider/routing errors plus local context overflows.
 - Local-model path no longer silently slices the live system prompt. It compacts non-core sections explicitly and raises an overflow error if core context still cannot fit.
 
-### Review stack (advisory → triad → scope → commit)
+### Pre-implementation design review (plan_task)
 
-The commit pipeline runs three review stages before creating a git commit:
+- **Module**: `tools/plan_review.py`. Tool name: `plan_task`.
+- **Purpose**: review a proposed implementation plan BEFORE writing any code. Call this
+  for non-trivial tasks (>2 files or >50 lines of changes) to surface forgotten touchpoints,
+  implicit contract violations, and simpler alternatives before the first edit.
+- **Models**: uses the same 3 models from `OUROBOROS_REVIEW_MODELS` (same as commit triad).
+  Falls back to repeating `OUROBOROS_MODEL` three times if unconfigured.
+- **Inputs**: `plan` (description of what to change), `goal` (problem being solved), and
+  optional `files_to_touch` (repo-relative paths whose HEAD content is injected for context).
+- **Context per reviewer**: full repo pack (same as scope review — no char cap, binary/sensitive
+  filtered via `build_full_repo_pack`) + HEAD snapshots of planned-touch files + "Plan Review
+  Checklist" from `docs/CHECKLISTS.md` + BIBLE.md + DEVELOPMENT.md + ARCHITECTURE.md.
+- **Checklist items**: completeness, correctness, minimalism, bible_alignment,
+  implicit_contracts, testability, architecture_fit, forgotten_docs (8 items total).
+- **Output format per reviewer**: verdict (PASS/RISK/FAIL) + detailed explanation + concrete fix
+  (exact file/function/symbol) + alternative approaches if applicable.
+- **Aggregate signal**: `GREEN` (proceed), `REVIEW_REQUIRED` (risks present), or `REVISE_PLAN` (FAILs found).
+- **Non-blocking**: results are advisory only — the implementer decides what to do.
+- **Budget gate**: if the assembled prompt exceeds `_PLAN_BUDGET_TOKEN_LIMIT` (800K tokens),
+  review is skipped with a non-blocking `⚠️ PLAN_REVIEW_SKIPPED:` warning.
+- **Cost**: ~$6-8 (3 × full-repo-pack reviewers, same cost as scope review × 3).
+  Use for tasks where the alternative is 5+ blocked commits totaling $30-100.
 
-1. **Advisory pre-review** (`tools/claude_advisory_review.py` + `review_state.py`)
-2. **Triad diff review** (`tools/review.py`)
-3. **Blocking scope review** (`tools/scope_review.py`)
+### Review stack (advisory → triad + scope in parallel → commit)
+
+The commit pipeline runs review stages before creating a git commit:
+
+1. **Advisory pre-review** (`tools/claude_advisory_review.py` + `review_state.py`) — runs first, sequentially.
+2. **Triad diff review** (`tools/review.py`) + **Blocking scope review** (`tools/scope_review.py`) — run **concurrently** via `ThreadPoolExecutor` (orchestrated in `tools/parallel_review.py`). Both execute on the same staged snapshot. The agent receives all findings (triad + scope) in a single blocking round.
 
 Shared helpers live in `tools/review_helpers.py`: checklist section loader,
-touched-file pack builder, HEAD snapshot section builder, broader repo pack builder, goal/scope resolution.
+touched-file pack builder (`build_touched_file_pack`, 1MB file limit; sensitive files omitted case-insensitively before any read), full repo pack builder
+(`build_full_repo_pack` — no char cap, binary/vendored/sensitive filtering, replaces deprecated
+`build_broader_repo_pack`), HEAD snapshot section builder, goal/scope resolution,
+advisory SDK diagnostic helpers (`get_advisory_runtime_diagnostics`, `format_advisory_sdk_error`)
+shared with `claude_advisory_review.py` to keep that module closer to the one-context-window target (P5).
+`_FILE_SIZE_LIMIT` was raised from 100KB to 1MB in v4.13.0 to stop cutting off normal-sized files.
 
 All LLM calls in the review stack (triad `_query_model`, scope `run_scope_review`) route through
 the shared `LLMClient` from `ouroboros/llm.py` — the same layer used by the main agent. This ensures
@@ -642,29 +760,80 @@ errors surface via the same observability path.
 
 #### Advisory pre-review gate
 
+- **Worktree version-sync preflight**: `_check_worktree_version_sync` runs before the
+  expensive SDK call. Reads VERSION, pyproject.toml, README badge, and ARCHITECTURE.md
+  header from the worktree (not staged index — advisory runs before `git add`). If they
+  disagree, a warning is emitted via `emit_progress_fn` and the advisory continues.
+  Non-fatal and non-blocking; the staged-index equivalent in `repo_commit` preflight is
+  the authoritative gate.
 - **`advisory_pre_review`** tool: runs a read-only Claude Agent SDK review of the current
   worktree BEFORE `repo_commit`. Permitted tools: `Read`, `Grep`, `Glob` only (no Edit/Bash).
-  Model pinned to `opus`. Prompt includes only the "Repo Commit Checklist" section from
+  Model resolved via `resolve_claude_code_model()` — respects `CLAUDE_CODE_MODEL` setting,
+  defaults to `opus` (same helper used by `claude_code_edit`). Shared Claude Code turn budget:
+  30 turns for both advisory and edit paths. Prompt includes the "Repo Commit Checklist" section from
   CHECKLISTS.md (precise section loader), plus BIBLE.md, DEVELOPMENT.md, ARCHITECTURE.md,
   touched-file pack, goal/scope sections, git status, and worktree diff.
-- **Blocking history injection** (v4.10.6): when the last `repo_commit` was blocked with
-  `critical_findings`, `scope_blocked`, or `parse_failure`, the advisory prompt includes a
-  "Previous blocking review findings" section extracted from `CommitAttemptRecord.block_details`.
-  This ensures advisory catches the same issues that blocking reviewers found, eliminating
-  the loop where advisory says PASS but blocking says FAIL.
-- **Prompt strictness alignment** (v4.10.6): advisory prompt uses the same severity language
-  as the blocking triad review — explicit instructions to read all changed files in full,
-  check every checklist item, report all issues found, and treat bible_compliance/security at
-  the same threshold as blocking reviewers.
-- **`review_status`** tool: read-only diagnostic showing the last 5 advisory runs AND the
-  last commit attempt state (status, block reason, actionable guidance).
+- **Advisory budget gate** (v4.15.0): if the assembled advisory prompt exceeds
+  `_ADVISORY_PROMPT_MAX_CHARS` (~1.6M chars / ~400K tokens — Claude Code has a 1M token
+  context, so 400K tokens leaves healthy headroom), advisory is skipped with a
+  non-blocking `⚠️ ADVISORY_SKIPPED:` warning instead of timing out silently.
+- **Obligation-based blocking history injection** (v4.12.0): when previous `repo_commit`
+  calls were blocked, their `critical_findings` are accumulated as structured `ObligationItem`
+  entries in durable state. When open obligations exist, the advisory prompt includes an
+  "Unresolved obligations from previous blocking rounds" section listing each obligation by id,
+  item, severity, and reason. Advisory MUST explicitly address each obligation by checklist item
+  name — a generic PASS without addressing obligations is a weak signal (expected but not
+  enforced at code level). Blocking history and open obligations are repo-scoped. The prompt
+  section is omitted entirely when no obligations are open.
+- **Obligation resolution**: `_resolve_matching_obligations()` runs on every parseable advisory
+  result (regardless of whether other items fail). An obligation is marked resolved only when the
+  advisory emits an unambiguous PASS for its checklist item (PASS present AND no FAIL for the same
+  item in the same run). `on_successful_commit()` clears all obligations on a successful commit.
+- **Auto-stale on edit** (v4.12.0): `_repo_write` and `_str_replace_editor` automatically call
+  `mark_advisory_stale_after_edit()` after any successful worktree write, setting
+  `last_stale_from_edit_ts` and marking all fresh/bypassed runs as stale. This was later generalized
+  to repo-scoped invalidation after successful worktree mutations from `_repo_write`,
+  `_str_replace_editor`, `claude_code_edit`, and mutating `run_shell` / commit paths.
+  `add_run()` clears this flag when any advisory runs for the current snapshot (including `parse_failure`).
+- **`review_status`** tool: read-only diagnostic showing advisory freshness, open obligations,
+  staleness-from-edit, last commit attempt state, and a concrete next-step recommendation.
+  Returns structured JSON with: `latest_advisory_status`, `latest_advisory_hash`, `stale_from_edit`,
+  `open_obligations_count`, `next_step`, plus `last_commit_attempt` details when blocked/failed.
 - **`review_state.py`**: durable state. State file: `data/state/advisory_review.json`.
-  Stores last 10 advisory runs plus the last `CommitAttemptRecord`.
+  Stores advisory runs plus a typed reviewed-attempt ledger, bounded blocking-attempt history,
+  open obligations, stale markers, repo/tool/task identities, and reviewed-diff fingerprints.
   Advisory runs have: `snapshot_hash`, `commit_message`, `status`
-  (fresh/stale/bypassed), `items`, `raw_result` (full, no truncation), audit fields.
+  (fresh/stale/bypassed/skipped/parse_failure), `items`, `raw_result` (full, no truncation), audit fields,
+  `snapshot_paths` (optional list of paths used to compute the scoped hash — `None` = whole repo).
+  `parse_failure` means the SDK ran but returned unparseable output — repo_commit treats it as
+  no fresh advisory (equivalent to stale) and requires a re-run or explicit bypass.
+  `snapshot_paths` is persisted so `review_status` can recompute the live hash with the same
+  path scope after a reload, preventing false staleness for path-scoped advisory runs.
+  `is_fresh()` considers `status in ("fresh", "bypassed", "skipped")` — budget-gate skips
+  are treated as valid coverage so the commit gate does not re-block after a non-blocking skip.
   Commit attempts have: `status` (reviewing/blocked/succeeded/failed), `block_reason`
-  (no_advisory/critical_findings/review_quorum/parse_failure/infra_failure/scope_blocked/preflight),
-  `block_details`, `duration_sec`.
+  (no_advisory/critical_findings/review_quorum/parse_failure/infra_failure/scope_blocked/preflight/overlap_guard/revalidation_failed/fingerprint_unavailable),
+  `block_details`, `duration_sec`, `critical_findings`, `advisory_findings`, `readiness_warnings`,
+  `late_result_pending`, `pre_review_fingerprint`, `post_review_fingerprint`, `fingerprint_status`,
+  `degraded_reasons`, and `(repo_key, tool_name, task_id, attempt)` identity.
+  New fields: `blocking_history` (last 10 blocked attempts), `open_obligations` (list of
+  `ObligationItem` with `obligation_id`, `item`, `severity`, `reason`, `source_attempt_ts`, `source_attempt_msg`, `status`, `resolved_by`, `repo_key`),
+  `last_stale_from_edit_ts` / `last_stale_reason` / `last_stale_repo_key`, plus explicit lock-backed state updates.
+  `add_blocking_attempt()` populates open obligations from `critical_findings`; `on_successful_commit()`
+  clears all obligations. Advisory invalidation is repo-scoped and triggered automatically by successful
+  mutations from `_repo_write`, `_str_replace_editor`, `claude_code_edit`, mutating `run_shell`, and
+  reviewed commit flows when they change worktree state.
+- **`task_continuation.py`**: durable `data/state/review_continuations/<task_id>.json` payloads for blocked or interrupted review work.
+  Built from durable review state, isolated per task, cleared only for the
+  current task on successful reviewed commits, and surfaced on startup plus in
+  `Review Continuity` context. Corrupt active payloads are quarantined under
+  `review_continuations/corrupt/` so valid state can replace them without losing
+  the corruption signal.
+- **`review_evidence.py`**: structured collector that snapshots review ledger state, live advisory freshness,
+  open obligations, and continuations into `task_results`, task summaries, and
+  execution reflections. When `repo_dir` / `repo_key` is known, open obligations and stale markers stay
+  repo-scoped; when `task_id` is present, `recent_attempts` stays task-scoped rather than silently
+  falling back to another task's repo history.
 - **Snapshot hash**: deterministic SHA-256 of changed file content digests only.
   Commit message is NOT part of the hash (decoupled for less brittle freshness).
   Path-aware: `paths` parameter scopes the hash to specific files.
@@ -676,14 +845,29 @@ errors surface via the same observability path.
 - **Bypass**: `skip_advisory_pre_review=True` — durably audited in `events.jsonl`.
 - **Auto-bypass on missing key**: records a `bypassed` run when `ANTHROPIC_API_KEY` absent.
 - **No-truncation for results**: advisory run results stored in full (no `[:4000]` clipping).
-  Diff is capped at 80K chars with explicit omission note (not silent).
+  Diff >500K chars hard-fails before SDK call (returns `status="error"` immediately); diffs under 500K are passed in full without truncation.
+
+#### Parallel triad + scope execution (v4.14.0)
+
+- Triad review and scope review now run **concurrently** inside a `ThreadPoolExecutor(max_workers=2)`.
+  Both launch on the same staged snapshot (git lock held). Wall-clock time is `max(triad_time, scope_time)`.
+- Scope review now runs even when triad finds critical issues, so the agent still receives ALL findings
+  (triad + scope) in a single blocking round instead of only seeing triad findings on first block.
+  Exception: oversized full prompts trigger the budget gate, which skips scope review with a non-blocking warning.
+- Results are aggregated: if both block, the combined message shows all findings with a note that both
+  reviewers blocked. `block_reason` tracks the primary blocker (triad takes precedence if both block).
+- `_scope_review_history` carries scope findings across retry rounds. Stored as `{snapshot_key: [entries]}` where `snapshot_key` is a SHA-256 prefix of the staged diff — findings from a prior blocked attempt on a different diff are not shown to the reviewer. Cleared to `{}` on a successful commit. Not in safety-critical registry.py (accessed via `getattr`).
+- History snapshot taken before parallel launch so scope sees consistent state regardless of triad execution order.
+- Applies to both `_repo_commit_push` and `_repo_write_commit` (legacy path).
+- Orchestration logic extracted to `ouroboros/tools/parallel_review.py` (P5 Minimalism — relieves git.py size pressure).
 
 #### Triad diff review (enriched)
 
 - Three models review the staged diff against "Repo Commit Checklist" from CHECKLISTS.md.
 - **Full touched-file context**: reviewers see the complete current content of all changed
-  files (via `build_touched_file_pack`), not just the patch hunks. Omission notes when
-  files are too large or unreadable.
+  files (via `build_touched_file_pack`), not just the patch hunks. Sensitive files (`.env`,
+  `.pem`, `.key`, credentials files — case-insensitive) are omitted before reading. Binary
+  and oversized (>1MB) files also produce explicit omission notes.
 - **Goal section**: `build_goal_section` provides intended transformation context with
   precedence: goal > scope > commit_message > fallback. No raw task/chat text.
 - Enforcement configurable: `blocking` or `advisory`.
@@ -691,20 +875,32 @@ errors surface via the same observability path.
 #### Blocking scope review
 
 - **Module**: `tools/scope_review.py`. Single-model (configurable via `OUROBOROS_SCOPE_REVIEW_MODEL`, default `anthropic/claude-opus-4.6`). Reasoning effort via `OUROBOROS_EFFORT_SCOPE_REVIEW` (default `high`).
-- **Fail-closed**: timeout, parse error, API failure, or incomplete context all block.
-- **Role**: completeness, forgotten touchpoints, cross-surface consistency, incomplete
-  migrations, intent mismatch. NOT a duplicate of line-by-line diff review.
+- **Fail-closed**: timeout, parse error, API failure, or unreadable touched files all block. Exception: when the fully assembled scope-review prompt exceeds `_SCOPE_BUDGET_TOKEN_LIMIT` (800K tokens), scope review is **skipped with a non-blocking advisory warning** rather than blocking the commit. Touched-file omission always takes precedence over the budget gate.
+- **Role**: full-codebase reviewer with unique advantage — sees the ENTIRE repository,
+  not just the diff. Finds cross-module bugs, broken implicit contracts, hidden
+  regressions, and forgotten touchpoints that diff-only triad reviewers miss.
 - **Prompt includes**: "Intent / Scope Review Checklist" from CHECKLISTS.md, touched-file
-  pack, broader repo pack (all tracked files minus touched), goal/scope sections,
-  DEVELOPMENT.md, staged diff, review history.
+  pack, full repo pack (all tracked files minus touched — no char cap, binary/vendored/sensitive
+  filtered via `build_full_repo_pack`), goal/scope sections, DEVELOPMENT.md, staged diff, review history.
 - **Pre-change (HEAD) snapshots** (best-effort): `build_head_snapshot_section` in `review_helpers.py`
-  fetches the HEAD version of each touched file via `git show HEAD:<path>`. New files get a "File is new"
-  note; deleted files and renamed files show the old content from the old path; modified files show
-  the before-state. When a snapshot cannot be fetched (file too large, git timeout, git error), an
-  explicit omission note is included in the prompt. This enriches scope reviewer context but is not
-  a hard gate — scope review proceeds even when individual snapshots are unavailable.
-- **Broader repo pack**: best-effort, up to 500K chars. Excludes touched files.
-- Runs AFTER triad review, BEFORE `git commit`.
+  fetches the HEAD version of each touched file via `git show HEAD:<path>`. Sensitive files (`.env`,
+  `.pem`, `.key`, `credentials.json`, etc. — case-insensitive) are suppressed before the subprocess
+  call; their content never reaches review prompts or external models. Binary files (extension check +
+  NUL/control-char/UTF-8-decode sniffer on raw bytes) and oversized files (>1MB raw bytes) are also
+  omitted with explicit notes. New files get a "File is new" note; deleted/renamed files show old
+  content. When a snapshot cannot be fetched (git timeout, git error), an explicit omission note is
+  included. This enriches scope reviewer context but is not a hard gate — scope review proceeds even
+  when individual snapshots are unavailable.
+- **Full repo pack** (v4.13.0): `build_full_repo_pack` replaces the deprecated `build_broader_repo_pack`.
+  No hardcoded char cap. Excludes: binary/media files (`_FULL_REPO_BINARY_EXTENSIONS`), vendored/minified
+  (`.min.js`, `.min.css`, named vendored assets), sensitive files (`.env`, `.pem`, `.key`, etc.),
+  oversized (>1MB), and directory prefixes `.cursor/`, `.github/`, `.vscode/`, `.idea/`, `assets/`,
+  `webview/`. Explicit omission count appended when files are skipped.
+- Checklist items (v4.14.1): 8 items including `cross_module_bugs` (does the change break something in a different module through implicit coupling?) and `implicit_contracts` (are there constants, data format assumptions, or expected signatures relied upon by other modules that this change violates?).
+- **Budget gate**: after assembling the full scope-review prompt, token count is estimated. If the prompt exceeds `_SCOPE_BUDGET_TOKEN_LIMIT` (800K tokens), scope review is **skipped with a non-blocking warning** rather than crashing or sending an oversized request. The commit is not blocked in this case.
+- **`_TouchedContextStatus` dataclass** (v4.14.1): structured signal object used by `_build_scope_prompt()` to replace the old magic-string channel. `_compute_touched_status()` produces the touched-file statuses; `_build_scope_prompt()` creates `budget_exceeded` after estimating the assembled prompt. Fields: `status` ("empty"|"omitted"|"budget_exceeded"), `omitted_paths`, `token_count`. Success is represented by `context_status is None`, not a separate `"ok"` status. This prevents filename–sentinel collision (a real file named `__empty__` cannot be misclassified as a control sentinel).
+- **Repo-pack gathering helper**: `_gather_scope_packs()` now only returns the wider repo-pack text (or raises on git failure). It no longer returns status sentinels.
+- Runs **in parallel with** triad review (v4.14.0), BEFORE `git commit`. Also runs in `_repo_write_commit` (legacy path). Runs even when triad blocks — **except** when the budget gate skips it for an oversized assembled prompt.
 - Respects review enforcement setting (blocking/advisory).
 
 ### Deep self-review (deep_self_review.py)
@@ -712,8 +908,10 @@ errors surface via the same observability path.
 - Replaces the legacy `type="review"` task path with a dedicated deep review system.
 - **Separate task type** (`deep_self_review`): bypasses the tool loop entirely — one direct LLM call.
 - **Model**: `openai/gpt-5.4-pro` via OpenRouter (primary), or `openai::gpt-5.4-pro` via direct OpenAI (fallback). If neither key is configured, the review tool returns an availability error.
-- **Review pack**: all git-tracked files (via `git ls-files`) + a whitelist of core memory files (`identity.md`, `scratchpad.md`, `registry.md`, `WORLD.md`, `knowledge/index-full.md`, `knowledge/patterns.md`).
-- **No chunking, no silent truncation**. Files > 1MB are skipped with a note. If the total pack exceeds ~900K tokens, an explicit error is returned.
+- **Review pack**: all git-tracked files (read from the git index via `dulwich` — pure Python, no subprocess) + a whitelist of core memory files (`identity.md`, `scratchpad.md`, `registry.md`, `WORLD.md`, `knowledge/index-full.md`, `knowledge/patterns.md`). Does NOT include dialogue history, task reflections, or other operational logs — these would consume too much context without adding architectural insight.
+- **macOS fork-safety**: when the Ouroboros app bundle uses `fork()` to spawn the inner `server.py` process, worker children inherit a multithreaded parent state. The first httpx HTTP request in a forked child triggers `SCDynamicStoreCopyProxiesWithOptions()` / `CFPreferences`, which is not fork-safe and causes a SIGSEGV (exit code -11, confirmed via `"crashed on child side of fork pre-exec"` in macOS crash reports). Fix: `run_deep_self_review` calls `llm.chat(..., no_proxy=True)`. In `LLMClient._chat_remote()` this builds a one-shot `httpx.Client(trust_env=False, mounts={})`, closed in a `finally` block, that bypasses all env-var and OS-level proxy lookup. `_normalize_remote_response` is called with `skip_cost_fetch=True` to also suppress the `_fetch_generation_cost()` `requests.get()` call (which would re-introduce `SCDynamicStore` access on the OpenRouter path). Cost is estimated from token counts instead. This fix is localised to deep self-review only; regular task LLM calls use the shared cached client as before.
+- **Excluded from pack**: sensitive files (`.env`, `.pem`, `.key`, etc.); vendored/minified third-party assets (`.min.js`, `.min.css`, bundled libraries such as `chart.umd.min.js`); binary and media files by extension (`_BINARY_EXTENSIONS`: `.png`, `.jpg`, `.ico`, `.svg`, `.gif`, `.webp`, fonts, compiled blobs) plus a content-based sniffer (`_is_probably_binary()`: NUL-byte presence OR >30% ASCII control-char ratio OR UTF-8 incremental decode failure — safe for Cyrillic/CJK, catches unlisted extensions like `.wasm`, `.bin`, extensionless blobs); excluded directory prefixes (`_SKIP_DIR_PREFIXES`: `assets/` — README screenshots and app icons; `webview/` — legacy PyWebView JS helpers); and files > 1MB. All exclusions appear in the `## OMITTED FILES` section of the review pack. The rule: deep review is for agent logic and its own prompts/docs — not for libraries, images, or operational runtime logs.
+- **No chunking, no silent truncation**. All excluded files are listed in an `## OMITTED FILES` section appended to the review pack — visible to the model and the operator. If the total pack exceeds ~900K tokens, an explicit error is returned.
 - **System prompt**: Constitution-first review mandate (BIBLE.md as absolute reference).
 - **Invariants**: reasoning effort `high`, max_tokens `100000`, no tools, 1 round, 60-minute hard timeout.
 - **Output**: full report to chat + saved to `memory/deep_review.md`.
@@ -744,7 +942,7 @@ Settings file: `~/Ouroboros/data/settings.json`. File-locked for concurrent acce
 | OPENAI_COMPATIBLE_BASE_URL | "" | Optional. Dedicated OpenAI-compatible provider base URL |
 | CLOUDRU_FOUNDATION_MODELS_API_KEY | "" | Optional. Cloud.ru Foundation Models provider key |
 | CLOUDRU_FOUNDATION_MODELS_BASE_URL | `https://foundation-models.api.cloud.ru/v1` | Cloud.ru provider base URL |
-| ANTHROPIC_API_KEY | "" | Optional. Required for Claude Agent SDK (`claude_code_edit`, `advisory_pre_review`) |
+| ANTHROPIC_API_KEY | "" | Optional. Enables direct Anthropic runtime routing (`anthropic::...` model values) and Claude Agent SDK tools (`claude_code_edit`, `advisory_pre_review`) |
 | TELEGRAM_BOT_TOKEN | "" | Optional. Enables Telegram bridge polling/sending |
 | TELEGRAM_CHAT_ID | "" | Optional. Pin replies to a specific Telegram chat |
 | OUROBOROS_NETWORK_PASSWORD | "" | Optional. Enables the non-loopback auth gate when set; empty still allows open bind, but startup logs a warning |
@@ -752,7 +950,7 @@ Settings file: `~/Ouroboros/data/settings.json`. File-locked for concurrent acce
 | OUROBOROS_MODEL_CODE | anthropic/claude-opus-4.6 | Code editing model |
 | OUROBOROS_MODEL_LIGHT | anthropic/claude-sonnet-4.6 | Fast/cheap model (safety, consciousness) |
 | OUROBOROS_MODEL_FALLBACK | anthropic/claude-sonnet-4.6 | Fallback when primary fails |
-| CLAUDE_CODE_MODEL | opus | Anthropic model for Claude Agent SDK (sonnet, opus, or full name) |
+| CLAUDE_CODE_MODEL | opus | Anthropic model for Claude Agent SDK tools (`claude_code_edit`, `advisory_pre_review`; values: sonnet, opus, or full model name) |
 | OUROBOROS_MAX_WORKERS | 5 | Worker process pool size |
 | TOTAL_BUDGET | 10.0 | Total budget in USD |
 | OUROBOROS_PER_TASK_COST_USD | 20.0 | Per-task soft threshold in USD |

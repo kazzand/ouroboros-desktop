@@ -12,7 +12,7 @@ import json
 import asyncio
 import logging
 import pathlib
-from typing import List, Optional
+from typing import Any, List, Optional
 
 from ouroboros.llm import LLMClient
 from ouroboros.pricing import infer_api_key_type, infer_model_category
@@ -56,6 +56,7 @@ from ouroboros.tools.review_helpers import (
     load_checklist_section as _load_checklist_section_precise,
     build_touched_file_pack,
     build_goal_section,
+    CRITICAL_FINDING_CALIBRATION,
 )
 
 
@@ -343,6 +344,8 @@ _REVIEW_PROMPT_TEMPLATE = """\
 - For every FAIL, include a concrete how-to-fix suggestion so the developer knows exactly
   what change is needed.
 
+{critical_calibration}
+
 You must produce a JSON array. Each element has:
 - "item"
 - "verdict": "PASS" or "FAIL"
@@ -397,6 +400,25 @@ def _parse_review_json(raw: str) -> Optional[list]:
     return None
 
 
+def _git_show_staged(repo_dir, path: str) -> str:
+    """Return the staged (index) content of *path* via `git show :PATH`.
+
+    Returns empty string on any error (file not staged, git unavailable, etc.).
+    """
+    import subprocess
+    try:
+        result = subprocess.run(
+            ["git", "show", f":{path}"],
+            cwd=str(repo_dir),
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        return result.stdout if result.returncode == 0 else ""
+    except Exception:
+        return ""
+
+
 def _preflight_check(commit_message: str, staged_files: str,
                      repo_dir) -> Optional[str]:
     """Deterministic pre-review sanity check — catches common mismatches
@@ -407,6 +429,11 @@ def _preflight_check(commit_message: str, staged_files: str,
       2. Commit message references a version but VERSION file not staged
       3. Python code in ouroboros/ or supervisor/ changed but no tests/ files staged
       4. New files added in ouroboros/ or supervisor/ but ARCHITECTURE.md not staged
+      5. VERSION staged: all version carriers (pyproject.toml, README badge,
+         ARCHITECTURE.md header) in the staged index must match VERSION value
+      6. VERSION staged: staged README.md changelog must have a row for the new version
+      7. (reserved — not implemented)
+      8. conftest.py staged: block if it contains test_ functions (should be in test_*.py)
     """
     import re
 
@@ -517,6 +544,86 @@ def _preflight_check(commit_message: str, staged_files: str,
             f"  Currently staged: {', '.join(sorted(staged_set)) or '(none)'}"
         )
 
+    # Check 5: If VERSION is staged (non-deleted), verify that pyproject.toml,
+    # README.md badge, and ARCHITECTURE.md header in the staged index all carry
+    # the same version string. Uses `git show :PATH` to read staged content
+    # rather than the worktree, so partially staged changes are handled correctly.
+    if version_staged:
+        try:
+            version_str = _git_show_staged(repo_dir, "VERSION").strip()
+            if version_str and re.match(r'^\d+\.\d+\.\d+$', version_str):
+                desync = []
+                pyproject_text = _git_show_staged(repo_dir, "pyproject.toml")
+                if pyproject_text and f'version = "{version_str}"' not in pyproject_text:
+                    desync.append(f"pyproject.toml (expected version = \"{version_str}\")")
+                readme_text = _git_show_staged(repo_dir, "README.md")
+                if readme_text and f"version-{version_str}-" not in readme_text:
+                    desync.append(f"README.md badge (expected version-{version_str}-)")
+                arch_text = _git_show_staged(repo_dir, "docs/ARCHITECTURE.md")
+                if arch_text and f"# Ouroboros v{version_str}" not in arch_text:
+                    desync.append(f"docs/ARCHITECTURE.md header (expected # Ouroboros v{version_str})")
+                if desync:
+                    return (
+                        f"⚠️ PREFLIGHT_BLOCKED: VERSION file says {version_str} but "
+                        "the following staged files have a different version value:\n"
+                        + "".join(f"  - {d}\n" for d in desync)
+                        + "Update all version references to match VERSION before committing.\n"
+                        f"  Currently staged: {', '.join(sorted(staged_set)) or '(none)'}"
+                    )
+        except Exception:
+            pass  # Non-fatal: LLM reviewers handle version sync
+
+    # Check 6: If VERSION is staged, verify the staged README.md changelog
+    # contains a row for the new version (structural presence check only).
+    if version_staged:
+        try:
+            version_str = _git_show_staged(repo_dir, "VERSION").strip()
+            if version_str and re.match(r'^\d+\.\d+\.\d+$', version_str):
+                readme_text = _git_show_staged(repo_dir, "README.md")
+                if readme_text and not re.search(r'\|\s*' + re.escape(version_str) + r'\s*\|', readme_text):
+                    return (
+                        f"⚠️ PREFLIGHT_BLOCKED: VERSION is {version_str} but README.md "
+                        "changelog has no table row for this version.\n"
+                        "  Add a changelog entry in the Version History table in README.md.\n"
+                        f"  Currently staged: {', '.join(sorted(staged_set)) or '(none)'}"
+                    )
+        except Exception:
+            pass  # Non-fatal
+
+    # Check 7 (not implemented — advisory check reserved for future use)
+
+    # Check 8: if any conftest.py in active_staged contains collectable test functions,
+    # block with an explicit message to move them to test_*.py files.
+    # Reads staged content via git show to validate what will actually be committed.
+    conftest_files = [f for f in active_staged if pathlib.Path(f).name == "conftest.py"]
+    if conftest_files:
+        import ast as _ast
+        for cf in conftest_files:
+            try:
+                cf_text = _git_show_staged(repo_dir, cf)
+                if not cf_text:
+                    continue
+                tree = _ast.parse(cf_text, filename=cf)
+                # Only scan module-level functions — nested helpers inside fixtures
+                # are not collected by pytest and must not trigger this check.
+                test_fns = [
+                    node.name for node in tree.body
+                    if isinstance(node, (_ast.FunctionDef, _ast.AsyncFunctionDef))
+                    and node.name.startswith("test_")
+                ]
+                if test_fns:
+                    shown = test_fns[:5]
+                    omission = f" (⚠️ showing first 5 of {len(test_fns)})" if len(test_fns) > 5 else ""
+                    return (
+                        f"⚠️ PREFLIGHT_BLOCKED: {cf} contains test functions: "
+                        f"{shown}{omission}.\n"
+                        "  conftest.py is for fixtures/hooks only. Move test_ functions "
+                        "to a test_*.py file so pytest can discover them properly.\n"
+                        f"  Currently staged: {', '.join(sorted(staged_set)) or '(none)'}"
+                    )
+            except Exception:
+                pass  # Non-fatal: AST parse failure or git error, skip this file
+
     return None
 
 
@@ -548,8 +655,49 @@ def _single_line(text: str) -> str:
     return " ".join(str(text or "").split())
 
 
-def _append_review_warning(ctx: ToolContext, text: str) -> None:
-    warning = _single_line(text)
+def _review_entry(
+    *,
+    severity: str,
+    item: str,
+    reason: str,
+    model: str = "",
+    tag: str = "triad",
+    verdict: str = "FAIL",
+) -> dict:
+    entry = {
+        "severity": severity,
+        "item": item,
+        "reason": reason,
+        "tag": tag,
+        "verdict": verdict,
+    }
+    if model:
+        entry["model"] = model
+    return entry
+
+
+def _format_review_entry(entry: Any, *, default_severity: str = "advisory") -> str:
+    if isinstance(entry, dict):
+        severity = str(entry.get("severity", default_severity) or default_severity).upper()
+        tags = []
+        if entry.get("tag"):
+            tags.append(str(entry.get("tag")))
+        if entry.get("model"):
+            tags.append(f"model={entry.get('model')}")
+        if entry.get("obligation_id"):
+            tags.append(f"obligation={entry.get('obligation_id')}")
+        label = str(entry.get("item") or entry.get("reason") or "?")
+        reason = _single_line(str(entry.get("reason", "") or ""))
+        tag_prefix = " ".join(f"[{tag}]" for tag in tags)
+        return f"[{severity}] {tag_prefix} {label}: {reason}".strip()
+    return _single_line(str(entry))
+
+
+def _append_review_warning(ctx: ToolContext, text: Any) -> None:
+    if isinstance(text, dict):
+        ctx._review_advisory.append(text)
+        return
+    warning = _single_line(str(text))
     if warning:
         ctx._review_advisory.append(warning)
 
@@ -595,6 +743,9 @@ def _collect_review_findings(ctx: ToolContext, model_results: list) -> tuple[lis
     critical_fails: List[str] = []
     advisory_warns: List[str] = []
     errored_models: List[str] = []
+    # Structured critical findings for obligation tracking (list of dicts)
+    structured_critical: List[dict] = []
+    structured_advisory: List[dict] = []
 
     for mr in model_results:
         model_name = mr.get("model", "?")
@@ -606,6 +757,12 @@ def _collect_review_findings(ctx: ToolContext, model_results: list) -> tuple[lis
             advisory_warns.append(
                 f"[{model_name}] Model unavailable this round: {raw_text[:200]}"
             )
+            structured_advisory.append(_review_entry(
+                severity="advisory",
+                item="review_model_unavailable",
+                reason=f"Model unavailable this round: {raw_text[:200]}",
+                model=model_name,
+            ))
             try:
                 append_jsonl(ctx.drive_logs() / "events.jsonl", {
                     "ts": utc_now_iso(), "type": "review_model_error",
@@ -635,8 +792,24 @@ def _collect_review_findings(ctx: ToolContext, model_results: list) -> tuple[lis
             desc = f"[{model_name}] {item_name}: {reason}"
             if severity == "critical":
                 critical_fails.append(desc)
+                structured_critical.append(_review_entry(
+                    severity="critical",
+                    item=str(item_name),
+                    reason=str(reason),
+                    model=model_name,
+                ))
             else:
                 advisory_warns.append(desc)
+                structured_advisory.append(_review_entry(
+                    severity="advisory",
+                    item=str(item_name),
+                    reason=str(reason),
+                    model=model_name,
+                ))
+
+    # Store structured findings on ctx for obligation tracking
+    ctx._last_review_critical_findings = structured_critical
+    ctx._last_review_advisory_findings = structured_advisory
 
     return critical_fails, advisory_warns, errored_models
 
@@ -650,12 +823,34 @@ def _build_critical_block_message(
 ) -> str:
     ctx._review_history.append({
         "attempt": ctx._review_iteration_count,
-        "commit_message": commit_message[:200],
+        "commit_message": commit_message,  # full — no [:200] truncation
         "critical": list(critical_fails),
         "advisory": list(advisory_warns),
     })
 
     iteration_note = f" (attempt {ctx._review_iteration_count})"
+
+    # Structured self-verification template — appears from attempt 2 onwards.
+    # Forces the agent to explicitly map each finding to evidence before retrying.
+    self_verify_hint = ""
+    if ctx._review_iteration_count >= 2:
+        all_findings = list(getattr(ctx, '_last_review_critical_findings', []) or []) or list(critical_fails)
+        finding_lines = "\n".join(
+            f"  - Finding: {f.get('item', '?') if isinstance(f, dict) else f}"
+            for f in all_findings
+        )
+        if not finding_lines:
+            finding_lines = "  (no findings captured — check review output above)"
+        self_verify_hint = (
+            "\n\n⚠️ Self-verification required before next repo_commit:\n"
+            "For EACH finding listed above, explicitly state:\n"
+            "  Finding: [item name]\n"
+            "  Status: addressed / rebutted / pending\n"
+            "  Evidence: [file:line or symbol or test name]\n"
+            "  Note: [one sentence]\n\n"
+            "Do NOT call repo_commit until this table is filled in your response.\n"
+            f"Open findings:\n{finding_lines}"
+        )
 
     soft_hint = ""
     if ctx._review_iteration_count >= 5:
@@ -665,19 +860,24 @@ def _build_critical_block_message(
             "- If the same critical repeats: implement what the reviewer asks, or split the change, or report the blockage to the user instead of retrying"
         )
 
+    critical_entries = list(getattr(ctx, "_last_review_critical_findings", []) or critical_fails)
+    advisory_entries = list(getattr(ctx, "_last_review_advisory_findings", []) or advisory_warns)
+
     return (
         f"⚠️ REVIEW_BLOCKED{iteration_note}: Critical issues found by reviewers.\n"
         "Commit has NOT been created. Fix the issues and try again. Use review_rebuttal\n"
         "ONLY if a finding is factually incorrect — not to argue against requested tests\n"
         "or artifacts. If the same finding repeats after a rebuttal, implement the fix\n"
         "instead of re-arguing.\n\n"
-        + "\n".join(f"  CRITICAL: {f}" for f in critical_fails)
+        + "Critical findings:\n"
+        + "\n".join(f"  - {_format_review_entry(f, default_severity='critical')}" for f in critical_entries)
         + (
             "\n\nAdvisory warnings:\n"
-            + "\n".join(f"  WARN: {w}" for w in advisory_warns)
-            if advisory_warns else ""
+            + "\n".join(f"  - {_format_review_entry(w)}" for w in advisory_entries)
+            if advisory_entries else ""
         )
         + errored_note
+        + self_verify_hint
         + soft_hint
     )
 
@@ -695,6 +895,7 @@ def _run_unified_review(ctx: ToolContext, commit_message: str,
     target_repo = repo_dir or ctx.repo_dir
     ctx._review_iteration_count += 1
     ctx._last_review_block_reason = ""  # reset per attempt
+    ctx._last_review_critical_findings = []  # reset to avoid stale findings from previous attempts
     review_enforcement = _cfg.get_review_enforcement()
     blocking_review = review_enforcement == "blocking"
 
@@ -808,6 +1009,7 @@ def _run_unified_review(ctx: ToolContext, commit_message: str,
 
     prompt = _REVIEW_PROMPT_TEMPLATE.format(
         preamble=_REVIEW_PREAMBLE,
+        critical_calibration=CRITICAL_FINDING_CALIBRATION,
         checklist_section=checklist_section,
         goal_section=goal_section,
         dev_guide_text=dev_guide_text or "(DEVELOPMENT.md not found)",
@@ -908,10 +1110,10 @@ def _run_unified_review(ctx: ToolContext, commit_message: str,
             ctx,
             "Review enforcement=Advisory: critical review findings did not block commit.",
         )
-        for finding in critical_fails:
-            _append_review_warning(ctx, f"CRITICAL (advisory mode): {finding}")
-        for warning in advisory_warns:
-            _append_review_warning(ctx, f"WARN: {warning}")
+        for finding in getattr(ctx, "_last_review_critical_findings", []) or []:
+            _append_review_warning(ctx, finding)
+        for warning in getattr(ctx, "_last_review_advisory_findings", []) or []:
+            _append_review_warning(ctx, warning)
         if errored_note:
             _append_review_warning(ctx, errored_note)
 
@@ -921,6 +1123,8 @@ def _run_unified_review(ctx: ToolContext, commit_message: str,
 
     if errored_note:
         advisory_warns.append(errored_note.strip())
-    if advisory_warns:
-        ctx._review_advisory = advisory_warns
+    if advisory_warns or getattr(ctx, "_last_review_advisory_findings", None):
+        ctx._review_advisory = list(getattr(ctx, "_last_review_advisory_findings", []) or [])
+        if errored_note:
+            ctx._review_advisory.append(errored_note.strip())
     return None

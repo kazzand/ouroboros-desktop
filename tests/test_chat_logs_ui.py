@@ -42,7 +42,6 @@ def test_chat_progress_updates_route_into_live_card():
     assert "if (record.finished && !isTerminalTaskPhase(nextPhase)) {" in source
     assert "const taskId = msg.task_id || '';" in source
     assert "const taskState = getTaskUiState(taskId, true);" in source
-    assert "if (taskState.completed) continue;" in source
     assert "const wasFinished = record.finished;" in source
     assert "const justFinished = record.finished && !wasFinished;" in source
     assert "if (justFinished) {" in source
@@ -230,15 +229,19 @@ def test_task_summary_live_card_uses_last_headline_not_finished_task():
 
 
 def test_chat_input_has_glassmorphism():
-    """#chat-input should use backdrop-filter and crimson border — not flat bg-secondary."""
+    """#chat-input textarea should have frosted-glass styling (blur + semi-transparent bg + white border)."""
     css = _read("web/style.css")
-    # Must have glassmorphism applied
-    assert "backdrop-filter: blur(8px)" in css
-    # Border should be crimson-tinted, not plain --divider
-    assert "rgba(201, 53, 69, 0.12)" in css
-    # Flat bg-secondary should not be on chat-input any longer
-    # (verify the old pattern is gone from chat-input block)
-    chat_input_block = css[css.index("#chat-input {"):css.index("#chat-input:focus")]
+    # Extract the #chat-input block (between selector and :focus)
+    start = css.index("#chat-input {")
+    end = css.index("#chat-input:focus")
+    chat_input_block = css[start:end]
+    # Must have high-quality backdrop blur on the textarea itself
+    assert "backdrop-filter: blur(16px)" in chat_input_block
+    # Background should be semi-transparent (frosted glass, opacity 0.62)
+    assert "rgba(26, 21, 32, 0.62)" in chat_input_block
+    # Border should be a white tint (design system for frosted glass surfaces)
+    assert "rgba(255, 255, 255, 0.09)" in chat_input_block
+    # Must not use opaque background
     assert "var(--bg-secondary)" not in chat_input_block
 
 
@@ -428,3 +431,168 @@ def test_evolution_runtime_card_uses_crimson_border():
     assert "201, 53, 69" in rule_body, "evo-runtime-card should use crimson accent border"
     # Must NOT use the old neutral white border
     assert "255, 255, 255, 0.08" not in rule_body, "evo-runtime-card should not use neutral white border"
+
+
+def test_live_card_timeline_no_hardcoded_item_cap():
+    """Live card timeline must not drop items — no 20-item shift() cap."""
+    source = _read("web/modules/chat.js")
+
+    # The old hard cap must be gone
+    assert "record.items.length > 20" not in source, "20-item cap must be removed from record.items"
+    assert "bufferedLiveUpdates.length > 20" not in source, "20-item cap must be removed from bufferedLiveUpdates"
+
+    # Incremental rendering helpers must be present
+    assert "function buildTimelineItemHtml(item, record)" in source
+    assert "function appendTimelineItem(item, record)" in source
+    assert "function patchLastTimelineItem(item, record)" in source
+
+    # timelineUpdate flag drives incremental vs full-rebuild path
+    assert "timelineUpdate = 'append'" in source
+    assert "timelineUpdate = 'patch-last'" in source
+    assert "appendTimelineItem(lastItem, record)" in source
+    assert "patchLastTimelineItem(lastItem, record)" in source
+
+    # TIMELINE_MAX_HEIGHT constant must be defined
+    assert "const TIMELINE_MAX_HEIGHT = 420;" in source
+    # syncLiveCardLayout must clamp to it
+    assert "Math.min(" in source and "TIMELINE_MAX_HEIGHT" in source
+
+    # Memory release must only free completed cards (guards rec.finished)
+    assert "rec.root?.remove()" in source
+    assert "rec && rec.finished" in source
+    # Retired set prevents syncHistory from recreating cleaned tasks
+    assert "const retiredTaskIds = new Set();" in source
+    assert "retiredTaskIds.add(taskState.taskId);" in source
+    assert "if (retiredTaskIds.has(taskId)) continue;" in source
+    # Reusable ids (bg-consciousness, active) reset on new cycle, not retired
+    assert "const REUSABLE_TASK_IDS = new Set(" in source
+    assert "REUSABLE_TASK_IDS.has(resolvedTaskId)" in source
+    assert "taskState.completed = false;" in source
+
+
+def test_chat_input_overlay_buttons_css():
+    """Regression: paperclip and Send buttons must be absolute overlays inside the textarea."""
+    css = _read("web/style.css")
+
+    # .chat-attach-btn: absolute, inside input wrap on the left
+    attach_match = re.search(
+        r'\.chat-attach-btn\s*\{(.+?)\}',
+        css,
+        re.DOTALL,
+    )
+    assert attach_match, ".chat-attach-btn CSS rule not found"
+    attach_body = attach_match.group(1)
+    assert "position: absolute" in attach_body, ".chat-attach-btn must be position: absolute"
+    assert "left:" in attach_body, ".chat-attach-btn must have a left: offset"
+
+    # .chat-send-inline: absolute, inside input wrap on the right
+    send_match = re.search(
+        r'\.chat-send-inline\s*\{(.+?)\}',
+        css,
+        re.DOTALL,
+    )
+    assert send_match, ".chat-send-inline CSS rule not found"
+    send_body = send_match.group(1)
+    assert "position: absolute" in send_body, ".chat-send-inline must be position: absolute"
+    assert "right:" in send_body, ".chat-send-inline must have a right: offset"
+
+    # #chat-input: must have both left and right padding to avoid text overlap
+    input_match = re.search(
+        r'#chat-input\s*\{(.+?)\}',
+        css,
+        re.DOTALL,
+    )
+    assert input_match, "#chat-input CSS rule not found"
+    input_body = input_match.group(1)
+    assert "padding" in input_body, "#chat-input must have padding defined"
+    # padding: 10px 52px 10px 42px — right 52px, left 42px
+    # We check that the padding value is not the symmetric default
+    assert "42px" in input_body, "#chat-input must have 42px left padding for attach overlay"
+    assert "52px" in input_body, "#chat-input must have 52px right padding for send overlay"
+
+
+def test_sync_history_two_pass_progress_before_finalize():
+    """syncHistory must use two-pass processing: progress/summary first, then regular messages.
+
+    This guarantees that progress bubbles are not discarded when taskState.completed=true
+    is set by a prior assistant reply during the same sync iteration.
+    """
+    source = _read("web/modules/chat.js")
+
+    # Two-pass comment markers must be present
+    assert "Two-pass processing" in source, \
+        "syncHistory must use two-pass processing"
+    assert "Pass 1: progress messages and task summaries" in source, \
+        "syncHistory must have an explicit Pass 1 comment"
+    assert "Pass 2: regular messages" in source, \
+        "syncHistory must have an explicit Pass 2 comment"
+
+    # Pass 2 must skip progress and task_summary (already handled)
+    assert "if (msg.is_progress) continue;" in source, \
+        "Pass 2 must skip is_progress messages"
+    assert "if (msg.system_type === 'task_summary') continue;" in source, \
+        "Pass 2 must skip task_summary messages"
+
+    # Pass 1 must NOT check taskState.completed before calling updateLiveCardFromProgressMessage
+    # (the old guard that caused bubbles to be lost)
+    func_start = source.index("async function syncHistory(")
+    func_end = source.index("\n    async function ", func_start + 1) if "\n    async function " in source[func_start + 1:] else len(source)
+    sync_body = source[func_start:func_end]
+
+    # The two-pass structure means the old pattern is gone
+    # Verify there is no guard between Pass-1 start and updateLiveCardFromProgressMessage
+    pass1_start = sync_body.index("Pass 1: progress messages")
+    pass2_start = sync_body.index("Pass 2: regular messages")
+    pass1_body = sync_body[pass1_start:pass2_start]
+
+    assert "if (taskState.completed) continue;" not in pass1_body, \
+        "Pass 1 must not skip progress messages due to taskState.completed"
+
+
+def test_sync_history_shows_typing_for_ongoing_tasks():
+    """syncHistory must call showTyping() after first load if a live card is still active."""
+    source = _read("web/modules/chat.js")
+
+    # The post-load typing check must be present
+    assert "After first load" in source, \
+        "syncHistory must have a post-load typing indicator check"
+    assert "const hasOngoingTask = Array.from(liveCardRecords.values()).some(" in source, \
+        "Must check for active live cards after history load"
+    assert "if (hasOngoingTask) showTyping();" in source, \
+        "Must call showTyping() when an ongoing task is detected"
+    # Guard: only on first load (!historyLoaded)
+    assert "if (!historyLoaded) {" in source, \
+        "Typing restore must only happen on first page load"
+
+
+def test_update_live_card_no_forcecard_for_completed():
+    """updateLiveCardFromProgressMessage must not force-open cards for completed tasks."""
+    source = _read("web/modules/chat.js")
+
+    func_start = source.index("function updateLiveCardFromProgressMessage(")
+    func_end = source.index("\n    function ", func_start + 1)
+    func_body = source[func_start:func_end]
+
+    # Must have the guard !taskState.completed before setting forceCard
+    assert "if (taskState && !taskState.completed) taskState.forceCard = true;" in func_body, \
+        "updateLiveCardFromProgressMessage must not force-open cards for already-completed tasks"
+
+
+def test_live_card_timeline_css_scrollable():
+    """Expanded chat live timeline must be scrollable with a max-height."""
+    import re
+    css = _read("web/style.css")
+
+    # Find the expanded timeline rule
+    rule_match = re.search(
+        r'\.chat-live-card\[data-expanded="1"\]\s*\.chat-live-timeline\s*\{(.+?)\}',
+        css,
+        re.DOTALL,
+    )
+    assert rule_match, ".chat-live-card[data-expanded='1'] .chat-live-timeline rule not found"
+    rule_body = rule_match.group(1)
+
+    assert "max-height" in rule_body, "timeline must have max-height when expanded"
+    assert "420px" in rule_body, "timeline max-height must be 420px"
+    assert "overflow-y" in rule_body, "timeline must have overflow-y for scrolling"
+    assert "auto" in rule_body, "overflow-y must be auto"

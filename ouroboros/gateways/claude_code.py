@@ -13,6 +13,14 @@ Safety model:
      PreToolUse hooks for path guards
   2. Post-edit revert (registry.py) remains as defense-in-depth
 
+Runtime model:
+  The app owns the Claude runtime (bundled SDK + bundled CLI). The
+  SDK's own bundled-CLI-first resolution is preserved — this gateway
+  never overrides CLI path selection. Auth is ANTHROPIC_API_KEY only.
+
+  Full raw stderr from the CLI subprocess is captured via the SDK's
+  ``stderr`` callback and surfaced in ClaudeCodeResult.error on failure.
+
 The claude-agent-sdk package is a required dependency. If it is absent,
 callers receive an ImportError-derived error result with an install hint;
 there is no CLI subprocess fallback path.
@@ -21,10 +29,12 @@ there is no CLI subprocess fallback path.
 from __future__ import annotations
 
 import asyncio
+import collections
 import json
 import logging
 import os
 import pathlib
+import threading
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
@@ -35,6 +45,39 @@ from claude_agent_sdk import (  # noqa: E402
     ClaudeAgentOptions, ClaudeSDKClient, HookMatcher,
     AssistantMessage, ResultMessage, query,
 )
+
+# ---------------------------------------------------------------------------
+# Stderr capture ring buffer (thread-safe, shared across invocations)
+# ---------------------------------------------------------------------------
+_STDERR_MAX_LINES = 200
+_stderr_lock = threading.Lock()
+_stderr_buffer: collections.deque[str] = collections.deque(maxlen=_STDERR_MAX_LINES)
+DEFAULT_CLAUDE_CODE_MAX_TURNS = 30
+
+
+def _stderr_callback(line: str) -> None:
+    """SDK stderr callback — logs and stores raw CLI output."""
+    log.warning("claude-cli stderr: %s", line)
+    with _stderr_lock:
+        _stderr_buffer.append(line)
+
+
+def get_last_stderr(max_chars: int = 4000) -> str:
+    """Return the most recent stderr output from the CLI subprocess."""
+    with _stderr_lock:
+        lines = list(_stderr_buffer)
+    if not lines:
+        return ""
+    text = "\n".join(lines)
+    if len(text) > max_chars:
+        text = text[-max_chars:]
+    return text
+
+
+def clear_stderr_buffer() -> None:
+    """Clear the stderr ring buffer (e.g. after a successful run)."""
+    with _stderr_lock:
+        _stderr_buffer.clear()
 
 # Safety-critical files (mirrors registry.py SAFETY_CRITICAL_PATHS)
 SAFETY_CRITICAL = frozenset([
@@ -59,6 +102,7 @@ class ClaudeCodeResult:
     cost_usd: float = 0.0
     usage: Dict[str, int] = field(default_factory=dict)
     error: str = ""
+    stderr_tail: str = ""
     # Populated by callers after invocation, not by the gateway
     changed_files: List[str] = field(default_factory=list)
     diff_stat: str = ""
@@ -82,6 +126,8 @@ class ClaudeCodeResult:
             out["diff_stat"] = self.diff_stat
         if self.error:
             out["error"] = self.error
+        if self.stderr_tail:
+            out["stderr_tail"] = self.stderr_tail
         if self.validation_summary:
             out["validation"] = self.validation_summary
         return json.dumps(out, ensure_ascii=False, indent=2)
@@ -177,7 +223,7 @@ async def _run_edit_async(
     prompt: str,
     cwd: str,
     model: str = "opus",
-    max_turns: int = 12,
+    max_turns: int = DEFAULT_CLAUDE_CODE_MAX_TURNS,
     budget: Optional[float] = None,
     system_prompt: Optional[str] = None,
 ) -> ClaudeCodeResult:
@@ -186,6 +232,7 @@ async def _run_edit_async(
     Uses ClaudeSDKClient because hooks require the client interface.
     """
     path_guard = make_path_guard(cwd)
+    clear_stderr_buffer()
 
     options = ClaudeAgentOptions(
         cwd=cwd,
@@ -196,6 +243,7 @@ async def _run_edit_async(
         max_turns=max_turns,
         max_budget_usd=budget,
         system_prompt=system_prompt,
+        stderr=_stderr_callback,
         hooks={
             "PreToolUse": [
                 HookMatcher(matcher="Edit|Write|MultiEdit", hooks=[path_guard]),
@@ -224,10 +272,14 @@ async def _run_edit_async(
                     if subtype and subtype != "success":
                         result.success = False
                         result.error = f"Agent ended with subtype: {subtype}"
+                    # Stop iterating after ResultMessage — CLI subprocess exits here.
+                    break
     except Exception as e:
         result.success = False
         result.error = f"{type(e).__name__}: {e}"
 
+    if not result.success:
+        result.stderr_tail = get_last_stderr()
     result.result_text = "\n".join(text_parts) if text_parts else "(no output)"
     return result
 
@@ -236,7 +288,7 @@ async def _run_readonly_async(
     prompt: str,
     cwd: str,
     model: str = "opus",
-    max_turns: int = 8,
+    max_turns: int = DEFAULT_CLAUDE_CODE_MAX_TURNS,
     effort: Optional[str] = "high",
 ) -> ClaudeCodeResult:
     """Run a read-only SDK query for advisory review.
@@ -247,6 +299,7 @@ async def _run_readonly_async(
     effort: "low" | "medium" | "high" | "max" — controls reasoning depth.
     Default "high" so advisory reviewer thinks as deeply as blocking reviewers.
     """
+    clear_stderr_buffer()
     options_kwargs: Dict[str, Any] = dict(
         cwd=cwd,
         model=model,
@@ -254,6 +307,7 @@ async def _run_readonly_async(
         allowed_tools=["Read", "Grep", "Glob"],
         disallowed_tools=["Bash", "Edit", "Write", "MultiEdit"],
         max_turns=max_turns,
+        stderr=_stderr_callback,
     )
     if effort is not None:
         # Guard against older SDK versions that may not support the 'effort' kwarg.
@@ -297,10 +351,17 @@ async def _run_readonly_async(
                 if subtype and subtype != "success":
                     result.success = False
                     result.error = f"Agent ended with subtype: {subtype}"
+                # Stop iterating — the CLI subprocess exits after ResultMessage.
+                # Continuing the loop causes "Command failed with exit code 1" in
+                # SDK's message reader when it tries to read from the already-closed
+                # subprocess stdout. Break here to avoid the spurious error.
+                break
     except Exception as e:
         result.success = False
         result.error = f"{type(e).__name__}: {e}"
 
+    if not result.success:
+        result.stderr_tail = get_last_stderr()
     result.result_text = "\n".join(text_parts) if text_parts else "(no output)"
     return result
 
@@ -334,7 +395,7 @@ def run_edit(
     prompt: str,
     cwd: str,
     model: str = "opus",
-    max_turns: int = 12,
+    max_turns: int = DEFAULT_CLAUDE_CODE_MAX_TURNS,
     budget: Optional[float] = None,
     system_prompt: Optional[str] = None,
 ) -> ClaudeCodeResult:
@@ -353,11 +414,25 @@ def run_edit(
     ))
 
 
+def resolve_claude_code_model(default: str = "opus") -> str:
+    """Return the configured Claude Code model from env/settings.
+
+    Single source of truth — used by both edit path and advisory path
+    to avoid model drift.  Value comes from ``CLAUDE_CODE_MODEL`` env var
+    (set by config.apply_settings_to_env).  Falls back to *default* which
+    is ``"opus"`` unless the caller overrides it.
+
+    Callers that need the raw string (e.g. to pass to the SDK) should use
+    this function rather than reading the env var directly.
+    """
+    return os.environ.get("CLAUDE_CODE_MODEL", default).strip() or default
+
+
 def run_readonly(
     prompt: str,
     cwd: str,
     model: str = "opus",
-    max_turns: int = 8,
+    max_turns: int = DEFAULT_CLAUDE_CODE_MAX_TURNS,
     effort: Optional[str] = "high",
 ) -> ClaudeCodeResult:
     """Synchronous entry point for read-only advisory review.

@@ -68,7 +68,12 @@ export function initChat({ ws, state, updateUnreadBadge }) {
         </div>
         <div id="chat-messages"></div>
         <div id="chat-input-area">
+            <div id="chat-attachment-preview" class="chat-attachment-preview"></div>
             <div class="chat-input-wrap">
+                <button class="chat-attach-btn" id="chat-attach" type="button" title="Attach file">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
+                </button>
+                <input type="file" id="chat-file-input" class="chat-file-input-hidden" accept="*/*">
                 <textarea id="chat-input" placeholder="Message Ouroboros..." rows="1"></textarea>
                 <button class="chat-send-inline" id="chat-send" title="Send message">Send</button>
             </div>
@@ -81,6 +86,36 @@ export function initChat({ ws, state, updateUnreadBadge }) {
     const sendBtn = document.getElementById('chat-send');
     const statusBadge = document.getElementById('chat-status');
     const headerActions = document.getElementById('chat-header-actions');
+    const attachBtn = document.getElementById('chat-attach');
+    const fileInput = document.getElementById('chat-file-input');
+    const attachmentPreview = document.getElementById('chat-attachment-preview');
+    let pendingAttachment = null;
+
+    attachBtn.addEventListener('click', () => fileInput.click());
+
+    // Stage the selected File object locally — no server upload until sendMessage().
+    // This avoids orphan files, race conditions with fast-send, and network usage for unsent files.
+    fileInput.addEventListener('change', () => {
+        const file = fileInput.files[0];
+        if (!file) return;
+        fileInput.value = '';
+        pendingAttachment = { file, display_name: file.name };
+        attachmentPreview.classList.add('visible');
+        attachmentPreview.innerHTML = `
+            <span class="attach-badge">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><polyline points="13 2 13 9 20 9"/></svg>
+                <span class="attach-name">${escapeHtml(file.name)}</span>
+                <button class="attach-remove" type="button" title="Remove">×</button>
+            </span>
+        `;
+        requestAnimationFrame(() => updateMessagesPadding());
+        attachmentPreview.querySelector('.attach-remove').addEventListener('click', () => {
+            pendingAttachment = null;
+            attachmentPreview.classList.remove('visible');
+            attachmentPreview.innerHTML = '';
+            requestAnimationFrame(() => updateMessagesPadding());
+        });
+    });
 
     const persistedHistory = [];
     const seenMessageKeys = new Set();
@@ -94,6 +129,9 @@ export function initChat({ ws, state, updateUnreadBadge }) {
     let welcomeShown = false;
     const liveCardRecords = new Map();
     const taskUiStates = new Map();
+    // Task ids that have been fully cleaned up (DOM removed, state freed).
+    // Checked in syncHistory to prevent retired tasks from being recreated.
+    const retiredTaskIds = new Set();
     let activeLiveGroupId = '';
     let historySyncTimer = null;
     let pendingReconnectBannerText = readPendingReconnectBanner();
@@ -291,6 +329,24 @@ export function initChat({ ws, state, updateUnreadBadge }) {
         if (taskState.cleanupTimer) clearTimeout(taskState.cleanupTimer);
         taskState.cleanupTimer = setTimeout(() => {
             taskUiStates.delete(taskState.taskId);
+            // After the cleanup delay, history sync has already materialized
+            // the durable transcript.  Remove the live card DOM node (if it
+            // is still a finished card in the chat, it has been superseded by
+            // the regular assistant/summary bubbles added by syncHistory) and
+            // free the backing JS arrays to prevent unbounded memory growth.
+            const rec = liveCardRecords.get(taskState.taskId);
+            if (rec && rec.finished) {
+                rec.root?.remove();
+                rec.items = [];
+                rec.expandedLineKeys.clear();
+                liveCardRecords.delete(taskState.taskId);
+            }
+            // Mark as retired so syncHistory() never recreates the live card.
+            // Exempt reusable logical ids (see REUSABLE_TASK_IDS) because they
+            // can represent multiple independent cycles.
+            if (!REUSABLE_TASK_IDS.has(taskState.taskId) && taskState.taskId !== '') {
+                retiredTaskIds.add(taskState.taskId);
+            }
         }, delayMs);
     }
 
@@ -301,9 +357,7 @@ export function initChat({ ws, state, updateUnreadBadge }) {
             ts,
             dedupeKey: dedupeKey || summary.dedupeKey || '',
         });
-        if (taskState.bufferedLiveUpdates.length > 20) {
-            taskState.bufferedLiveUpdates.shift();
-        }
+
     }
 
     function revealBufferedCardIfNeeded(taskState) {
@@ -367,13 +421,34 @@ export function initChat({ ws, state, updateUnreadBadge }) {
         if (phase) taskState.completedPhase = phase;
     }
 
+    // Task ids that represent reusable logical slots (multiple independent cycles).
+    const REUSABLE_TASK_IDS = new Set(['bg-consciousness', 'active']);
+
     function queueTaskLiveUpdate(summary, taskId, ts, dedupeKey = '') {
         const resolvedTaskId = taskId || activeLiveGroupId || '';
         if (!resolvedTaskId) return;
         const taskState = getTaskUiState(resolvedTaskId, true);
         if (!taskState) return;
         if (taskState.completed && !isTerminalTaskPhase(summary.phase || '')) {
-            return;
+            // For reusable logical ids, a new non-terminal event means a new cycle
+            // has started.  Reset UI state rather than dropping the event silently.
+            if (REUSABLE_TASK_IDS.has(resolvedTaskId)) {
+                if (taskState.cleanupTimer) clearTimeout(taskState.cleanupTimer);
+                taskState.completed = false;
+                taskState.completedPhase = '';
+                taskState.cardVisible = false;
+                taskState.bufferedLiveUpdates = [];
+                taskState.toolCalls = 0;
+                taskState.forceCard = false;
+                const oldRec = liveCardRecords.get(resolvedTaskId);
+                if (oldRec) {
+                    oldRec.root?.remove();
+                    liveCardRecords.delete(resolvedTaskId);
+                }
+                retiredTaskIds.delete(resolvedTaskId);
+            } else {
+                return;
+            }
         }
         if (summary.phase === 'error' || summary.phase === 'timeout') {
             taskState.forceCard = true;
@@ -514,52 +589,81 @@ export function initChat({ ws, state, updateUnreadBadge }) {
         record.toggleEl.textContent = record.root.dataset.expanded === '1' ? 'Hide details' : 'Show details';
     }
 
+    const TIMELINE_MAX_HEIGHT = 420;
+
     function syncLiveCardLayout(record) {
         if (!record?.root || !record.summaryButtonEl) return;
         const summaryHeight = Math.ceil(record.summaryButtonEl.getBoundingClientRect().height || 0);
         const expanded = record.root.dataset.expanded === '1';
         const timelineHeight = expanded
-            ? Math.ceil(record.timelineEl?.scrollHeight || 0)
+            ? Math.min(Math.ceil(record.timelineEl?.scrollHeight || 0), TIMELINE_MAX_HEIGHT)
             : 0;
         record.root.style.minHeight = `${Math.max(summaryHeight + timelineHeight, 0)}px`;
     }
 
-    function renderLiveCardTimeline(record) {
-        record.timelineEl.innerHTML = record.items.map((item) => {
-            const expandable = isLiveLineExpandable(item);
-            const expanded = expandable && record.expandedLineKeys.has(item.lineKey);
-            const displayHeadline = expanded && item.fullHeadline ? item.fullHeadline : item.headline;
-            const displayBody = expanded && item.fullBody ? item.fullBody : item.body;
-            const isProgressLine = item.phase === 'working' || item.phase === 'thinking';
-            const headContent = `
-                <span class="chat-live-line-title">${isProgressLine ? renderMarkdown(displayHeadline) : escapeHtml(displayHeadline)}</span>
-                <span class="chat-live-line-repeat" ${item.count > 1 ? '' : 'hidden'}>${item.count > 1 ? `${item.count}x` : ''}</span>
-                ${item.ts ? `<span class="chat-live-line-time">${escapeHtml(item.ts)}</span>` : ''}
-            `;
-            const headHtml = expandable
-                ? `
-                    <button
-                        type="button"
-                        class="chat-live-line-toggle"
-                        data-live-line-toggle="${escapeHtml(item.lineKey)}"
-                        aria-expanded="${expanded ? 'true' : 'false'}"
-                    >
-                        <span class="chat-live-line-head">${headContent}</span>
-                        <span class="chat-live-line-expand-label">${expanded ? 'Collapse' : 'Expand'}</span>
-                    </button>
-                `
-                : `<div class="chat-live-line-head">${headContent}</div>`;
-            return `
-                <div
-                    class="chat-live-line ${item.phase || 'working'}${expandable ? ' expandable' : ''}"
-                    data-live-line-key="${escapeHtml(item.lineKey || '')}"
-                    data-expanded="${expanded ? '1' : '0'}"
+    function buildTimelineItemHtml(item, record) {
+        const expandable = isLiveLineExpandable(item);
+        const expanded = expandable && record.expandedLineKeys.has(item.lineKey);
+        const displayHeadline = expanded && item.fullHeadline ? item.fullHeadline : item.headline;
+        const displayBody = expanded && item.fullBody ? item.fullBody : item.body;
+        const isProgressLine = item.phase === 'working' || item.phase === 'thinking';
+        const headContent = `
+            <span class="chat-live-line-title">${isProgressLine ? renderMarkdown(displayHeadline) : escapeHtml(displayHeadline)}</span>
+            <span class="chat-live-line-repeat" ${item.count > 1 ? '' : 'hidden'}>${item.count > 1 ? `${item.count}x` : ''}</span>
+            ${item.ts ? `<span class="chat-live-line-time">${escapeHtml(item.ts)}</span>` : ''}
+        `;
+        const headHtml = expandable
+            ? `
+                <button
+                    type="button"
+                    class="chat-live-line-toggle"
+                    data-live-line-toggle="${escapeHtml(item.lineKey)}"
+                    aria-expanded="${expanded ? 'true' : 'false'}"
                 >
-                    ${headHtml}
-                    ${displayBody ? `<div class="chat-live-line-body">${renderMarkdown(displayBody)}</div>` : ''}
-                </div>
-            `;
-        }).join('');
+                    <span class="chat-live-line-head">${headContent}</span>
+                    <span class="chat-live-line-expand-label">${expanded ? 'Collapse' : 'Expand'}</span>
+                </button>
+            `
+            : `<div class="chat-live-line-head">${headContent}</div>`;
+        return `
+            <div
+                class="chat-live-line ${item.phase || 'working'}${expandable ? ' expandable' : ''}"
+                data-live-line-key="${escapeHtml(item.lineKey || '')}"
+                data-expanded="${expanded ? '1' : '0'}"
+            >
+                ${headHtml}
+                ${displayBody ? `<div class="chat-live-line-body">${renderMarkdown(displayBody)}</div>` : ''}
+            </div>
+        `;
+    }
+
+    // Full rebuild — used for expand/collapse toggles and initial render.
+    function renderLiveCardTimeline(record) {
+        record.timelineEl.innerHTML = record.items.map((item) => buildTimelineItemHtml(item, record)).join('');
+    }
+
+    // Incremental: append a new item without touching existing DOM nodes.
+    function appendTimelineItem(item, record) {
+        const wrapper = document.createElement('div');
+        wrapper.innerHTML = buildTimelineItemHtml(item, record).trim();
+        const node = wrapper.firstElementChild;
+        if (node) {
+            record.timelineEl.appendChild(node);
+            // Auto-scroll to latest item when expanded.
+            if (record.root.dataset.expanded === '1') {
+                record.timelineEl.scrollTop = record.timelineEl.scrollHeight;
+            }
+        }
+    }
+
+    // Patch the last DOM node when an existing item is updated (dedup / count bump).
+    function patchLastTimelineItem(item, record) {
+        const lastEl = record.timelineEl.lastElementChild;
+        if (!lastEl) return renderLiveCardTimeline(record);
+        const wrapper = document.createElement('div');
+        wrapper.innerHTML = buildTimelineItemHtml(item, record).trim();
+        const newNode = wrapper.firstElementChild;
+        if (newNode) record.timelineEl.replaceChild(newNode, lastEl);
     }
 
     function scheduleHistorySync() {
@@ -607,6 +711,8 @@ export function initChat({ ws, state, updateUnreadBadge }) {
 
         const syntheticKey = summary.dedupeKey || dedupeKey || `${summary.phase || 'working'}|${headline}|${summary.body || ''}`;
         const shouldRenderLine = summary.visible !== false && Boolean(headline || summary.body);
+        // Track how the timeline should be updated: 'none' | 'patch-last' | 'append'
+        let timelineUpdate = 'none';
         if (shouldRenderLine) {
             const last = record.items[record.items.length - 1];
             if (last && last.dedupeKey === syntheticKey) {
@@ -614,6 +720,7 @@ export function initChat({ ws, state, updateUnreadBadge }) {
                 last.ts = ts || last.ts;
                 last.fullHeadline = summary.fullHeadline || last.fullHeadline || last.headline;
                 last.fullBody = summary.fullBody || last.fullBody || last.body;
+                timelineUpdate = 'patch-last';
             } else {
                 const lineKey = `line-${Date.now()}-${Math.random().toString(16).slice(2)}`;
                 record.items.push({
@@ -627,10 +734,7 @@ export function initChat({ ws, state, updateUnreadBadge }) {
                     dedupeKey: syntheticKey,
                     lineKey,
                 });
-                if (record.items.length > 20) {
-                    const removed = record.items.shift();
-                    if (removed?.lineKey) record.expandedLineKeys.delete(removed.lineKey);
-                }
+                timelineUpdate = 'append';
             }
         }
         record.countEl.hidden = record.items.length < 2;
@@ -639,7 +743,14 @@ export function initChat({ ws, state, updateUnreadBadge }) {
             nextGroupId === 'bg-consciousness' ? 'Background thinking' : '',
             ts ? `Latest ${ts}` : '',
         ].filter(Boolean).map((item) => `<span class="chat-live-meta-text">${escapeHtml(item)}</span>`).join('');
-        renderLiveCardTimeline(record);
+        // Incremental DOM update: append new items or patch the last one.
+        // Full rebuild is reserved for expand/collapse toggles.
+        const lastItem = record.items[record.items.length - 1];
+        if (timelineUpdate === 'append' && lastItem) {
+            appendTimelineItem(lastItem, record);
+        } else if (timelineUpdate === 'patch-last' && lastItem) {
+            patchLastTimelineItem(lastItem, record);
+        }
         insertMessageNode(record.root);
         syncLiveCardLayout(record);
         hideTypingIndicatorOnly();
@@ -725,8 +836,9 @@ export function initChat({ ws, state, updateUnreadBadge }) {
         if (!taskId) return;
         // Progress messages are user-facing status updates (e.g. "🔍 Searching...")
         // that should always be visible — force the live card open immediately.
+        // Do not force-open cards for already-completed tasks (history replay).
         const taskState = getTaskUiState(taskId, true);
-        if (taskState) taskState.forceCard = true;
+        if (taskState && !taskState.completed) taskState.forceCard = true;
         const summary = summarizeChatLiveEvent({
             type: 'send_message',
             is_progress: true,
@@ -854,31 +966,41 @@ export function initChat({ ws, state, updateUnreadBadge }) {
                 if (!resp.ok) return false;
                 const data = await resp.json();
                 const messages = Array.isArray(data.messages) ? data.messages : [];
+
+                // Two-pass processing: progress/summary first, then regular messages.
+                // This guarantees live cards are built before finishLiveCard() is called,
+                // so progress bubbles are never discarded due to taskState.completed=true.
+
+                // Pass 1: progress messages and task summaries (build card timelines).
                 for (const msg of messages) {
                     const taskId = msg.task_id || '';
-                    if (!includeUser && msg.role === 'user') continue;
+                    if (!taskId) continue;
+                    if (retiredTaskIds.has(taskId)) continue;
                     if (msg.is_progress) {
-                        if (!taskId) continue;
-                        const taskState = getTaskUiState(taskId, true);
-                        if (taskState.completed) continue;
                         updateLiveCardFromProgressMessage(msg);
                         continue;
                     }
                     if (msg.system_type === 'task_summary') {
-                        if (!taskId) continue;
-                        const taskState = getTaskUiState(taskId, true);
-                        if (taskState.completed) continue;
                         // Force the card visible for historical tasks only when the task
                         // was non-trivial (had tool calls or multiple rounds).  Trivial
                         // tasks (simple replies) should not show a card at all.
                         const hadToolCalls = (msg.tool_calls || 0) > 0;
                         const hadMultipleRounds = (msg.rounds || 0) > 1;
                         if (hadToolCalls || hadMultipleRounds) {
-                            taskState.forceCard = true;
+                            const taskState = getTaskUiState(taskId, true);
+                            if (taskState) taskState.forceCard = true;
                         }
                         appendTaskSummaryToLiveCard(msg);
-                        continue;
                     }
+                }
+
+                // Pass 2: regular messages (assistant replies, user messages, system bubbles).
+                // finishLiveCard() is called here, after the card timeline is already populated.
+                for (const msg of messages) {
+                    const taskId = msg.task_id || '';
+                    if (!includeUser && msg.role === 'user') continue;
+                    if (msg.is_progress) continue;
+                    if (msg.system_type === 'task_summary') continue;
                     if (taskId && (msg.role === 'assistant' || msg.role === 'system')) {
                         finishLiveCard(taskId);
                     }
@@ -891,6 +1013,17 @@ export function initChat({ ws, state, updateUnreadBadge }) {
                         taskId,
                     });
                 }
+
+                // After first load: if there is an active in-progress task with a visible
+                // live card but no assistant reply yet, show the typing indicator so the
+                // user knows work is ongoing (e.g. page reload mid-task).
+                if (!historyLoaded) {
+                    const hasOngoingTask = Array.from(liveCardRecords.values()).some(
+                        (record) => record?.root?.isConnected && !record.finished
+                    );
+                    if (hasOngoingTask) showTyping();
+                }
+
                 const wasFirstLoad = !historyLoaded;
                 historyLoaded = true;
                 // On first load (page open / restart), scroll to the latest
@@ -957,16 +1090,54 @@ export function initChat({ ws, state, updateUnreadBadge }) {
         }
         input.style.height = 'auto';
         input.style.height = Math.min(input.scrollHeight, 120) + 'px';
+        updateMessagesPadding();
         const cursor = input.value.length;
         input.setSelectionRange(cursor, cursor);
     }
 
-    function sendMessage() {
-        const text = input.value.trim();
+    async function sendMessage() {
+        if (sendBtn.disabled) return;  // guard against Enter re-entry during async upload
+        let text = input.value.trim();
+        if (!text && !pendingAttachment) return;
+        if (pendingAttachment) {
+            // Upload the staged file now, right before sending the chat message.
+            // Requires live WebSocket; if offline, upload is rejected to avoid
+            // the unsolvable race between queued message delivery and orphan cleanup.
+            if (ws.ws?.readyState !== WebSocket.OPEN) {
+                alert('Cannot attach file while offline. Reconnect and try again.');
+                return;
+            }
+            const staged = pendingAttachment;
+            sendBtn.disabled = true;
+            try {
+                const formData = new FormData();
+                formData.append('file', staged.file);
+                const resp = await fetch('/api/chat/upload', { method: 'POST', body: formData });
+                const data = await resp.json();
+                if (!resp.ok || !data.ok) {
+                    alert('Upload failed: ' + (data.error || resp.statusText));
+                    sendBtn.disabled = false;
+                    return;  // pendingAttachment and preview remain — user can retry
+                }
+                // Upload succeeded — clear the staged attachment now that it's on the server
+                pendingAttachment = null;
+                attachmentPreview.classList.remove('visible');
+                attachmentPreview.innerHTML = '';
+                requestAnimationFrame(() => updateMessagesPadding());
+                text += (text ? '\n\n' : '') + `[Attached file: ${data.display_name || staged.display_name} saved to ${data.path}]`;
+            } catch (e) {
+                alert('Upload error: ' + e.message);
+                sendBtn.disabled = false;
+                return;  // pendingAttachment and preview remain — user can retry
+            } finally {
+                sendBtn.disabled = false;
+            }
+        }
         if (!text) return;
         rememberInput(text);
         input.value = '';
         input.style.height = 'auto';
+        updateMessagesPadding();
         const result = ws.send({
             type: 'chat',
             content: text,
@@ -993,10 +1164,20 @@ export function initChat({ ws, state, updateUnreadBadge }) {
             restoreInputHistory(1);
         }
     });
+    // Dynamically adjust #chat-messages padding-bottom to match the real height of
+    // the absolute-positioned #chat-input-area overlay, so the last bubble is always
+    // fully visible with a small buffer — no more excessive gap or hidden content.
+    const inputArea = document.getElementById('chat-input-area');
+    function updateMessagesPadding() {
+        const h = inputArea ? inputArea.offsetHeight : 84;
+        messagesDiv.style.paddingBottom = (h + 16) + 'px';
+    }
+
     input.addEventListener('input', () => {
         input.style.height = 'auto';
         input.style.height = Math.min(input.scrollHeight, 120) + 'px';
         if (inputHistoryIndex === inputHistory.length) inputDraft = input.value;
+        updateMessagesPadding();
     });
 
     headerActions?.addEventListener('click', (event) => {
@@ -1159,6 +1340,7 @@ export function initChat({ ws, state, updateUnreadBadge }) {
         const shouldClearReconnectParams = Boolean(pendingReconnectBannerText);
         pendingReconnectBannerText = '';
         wsHasConnectedOnce = true;
+        updateMessagesPadding();
         syncHistory({ includeUser: !historyLoaded })
             .then((hasMessages) => {
                 if (!hasMessages) ensureWelcomeMessage();

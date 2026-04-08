@@ -12,6 +12,7 @@ import asyncio
 import collections
 import json
 import logging
+
 import os
 import pathlib
 import sys
@@ -161,35 +162,49 @@ def _restart_current_process(host: str, port: int) -> None:
 
 
 def _claude_code_status_payload() -> Dict[str, Any]:
-    """Return Claude Agent SDK availability and version details."""
-    import sys
-    sdk_version = ""
-    installed = False
+    """Return Claude runtime status using the app-managed runtime contract.
+
+    Replaces the old SDK-only installed/missing check with a richer
+    payload that reports: runtime source, interpreter path, SDK version,
+    CLI path/version, app-managed vs legacy state, API key readiness,
+    and the most recent stderr output on failure.
+    """
+    from ouroboros.compat import resolve_claude_runtime
+
+    rt = resolve_claude_runtime()
+    label = rt.status_label()
+
+    stderr_tail = ""
     try:
-        import importlib.metadata
-        sdk_version = importlib.metadata.version("claude-agent-sdk")
-        installed = bool(sdk_version)
+        from ouroboros.gateways.claude_code import get_last_stderr as gw_stderr
+        stderr_tail = gw_stderr(max_chars=2000)
     except Exception:
         pass
 
-    if installed:
-        return {
-            "status": "installed",
-            "installed": True,
-            "busy": False,
-            "version": sdk_version,
-            "path": sys.executable,
-            "message": f"Claude Agent SDK installed: {sdk_version}",
-            "error": "",
-        }
+    message_map = {
+        "ready": f"Claude runtime ready (SDK {rt.sdk_version}, CLI {rt.cli_version})",
+        "no_api_key": f"Claude runtime available (SDK {rt.sdk_version}) but ANTHROPIC_API_KEY is not set. Add it in Settings.",
+        "error": f"Claude runtime error: {rt.error}",
+        "degraded": f"Claude runtime degraded (SDK {rt.sdk_version}, CLI {'found' if rt.cli_path else 'missing'}). Try Repair.",
+        "missing": "Claude runtime not available. Use Repair in Settings or reinstall the app.",
+    }
+
     return {
-        "status": "missing",
-        "installed": False,
+        "status": label,
+        "installed": bool(rt.sdk_version),
+        "ready": rt.ready,
         "busy": False,
-        "version": "",
-        "path": "",
-        "message": "Claude Agent SDK not installed. Install: pip install 'ouroboros[claude-sdk]'",
-        "error": "",
+        "version": rt.sdk_version,
+        "cli_version": rt.cli_version,
+        "cli_path": rt.cli_path,
+        "interpreter_path": rt.interpreter_path,
+        "app_managed": rt.app_managed,
+        "legacy_detected": rt.legacy_detected,
+        "legacy_sdk_version": rt.legacy_sdk_version,
+        "api_key_set": rt.api_key_set,
+        "message": message_map.get(label, f"Claude runtime: {label}"),
+        "error": rt.error,
+        "stderr_tail": stderr_tail,
     }
 
 
@@ -768,37 +783,51 @@ async def api_claude_code_status(request: Request) -> JSONResponse:
 
 
 async def api_claude_code_install(request: Request) -> JSONResponse:
-    """Install Claude Agent SDK via pip if not already installed."""
-    payload = await asyncio.to_thread(_claude_code_status_payload)
-    if payload.get("installed"):
-        return JSONResponse(payload)
+    """Repair/update the app-managed Claude runtime.
 
+    Replaces the old "pip install SDK" endpoint. Now operates on the
+    app-managed interpreter (prefers embedded python-standalone) and
+    always reinstalls/upgrades to the pinned baseline version.
+    """
     try:
         import subprocess as _sp
         import sys as _sys
+
+        interpreter = _sys.executable
+        try:
+            from ouroboros.compat import resolve_claude_runtime
+            rt = resolve_claude_runtime()
+            if rt.interpreter_path:
+                interpreter = rt.interpreter_path
+        except Exception:
+            pass
+
         result = await asyncio.to_thread(
             lambda: _sp.run(
-                [_sys.executable, "-m", "pip", "install", "claude-agent-sdk>=0.1.50"],
+                [interpreter, "-m", "pip", "install", "--upgrade",
+                 "claude-agent-sdk>=0.1.50"],
                 capture_output=True, text=True, timeout=120,
             )
         )
         if result.returncode == 0:
             payload = await asyncio.to_thread(_claude_code_status_payload)
-            payload["freshly_installed"] = True
+            payload["repaired"] = True
             return JSONResponse(payload)
         return JSONResponse({
             "status": "error",
             "installed": False,
+            "ready": False,
             "busy": False,
-            "message": "claude-agent-sdk installation failed.",
+            "message": "Claude runtime repair failed.",
             "error": (result.stderr or result.stdout or "")[:500],
         }, status_code=500)
     except Exception as e:
         return JSONResponse({
             "status": "error",
             "installed": False,
+            "ready": False,
             "busy": False,
-            "message": "claude-agent-sdk installation failed.",
+            "message": "Claude runtime repair failed.",
             "error": f"{type(e).__name__}: {e}",
         }, status_code=500)
 
@@ -854,7 +883,7 @@ async def api_reset(request: Request) -> JSONResponse:
     import shutil
     try:
         deleted = []
-        for subdir in ("state", "memory", "logs", "archive", "locks", "task_results"):
+        for subdir in ("state", "memory", "logs", "archive", "locks", "task_results", "uploads"):
             p = DATA_DIR / subdir
             if p.exists():
                 shutil.rmtree(p, ignore_errors=True)
@@ -961,6 +990,8 @@ from ouroboros.local_model_api import (
     api_local_model_start, api_local_model_stop,
     api_local_model_status, api_local_model_test,
 )
+from ouroboros.chat_upload_api import api_chat_upload, api_chat_upload_delete
+
 
 # ---------------------------------------------------------------------------
 # App setup
@@ -988,6 +1019,8 @@ routes = [
     Route("/api/cost-breakdown", endpoint=api_cost_breakdown),
     Route("/api/evolution-data", endpoint=api_evolution_data),
     Route("/api/chat/history", endpoint=api_chat_history),
+    Route("/api/chat/upload", endpoint=api_chat_upload, methods=["POST"]),
+    Route("/api/chat/upload", endpoint=api_chat_upload_delete, methods=["DELETE"]),
     Route("/api/local-model/start", endpoint=api_local_model_start, methods=["POST"]),
     Route("/api/local-model/stop", endpoint=api_local_model_stop, methods=["POST"]),
     Route("/api/local-model/status", endpoint=api_local_model_status),

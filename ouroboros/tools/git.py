@@ -1,14 +1,15 @@
 """Git tools: repo_write, repo_write_commit, repo_commit, git_status, git_diff,
 pull_from_remote, restore_to_head, revert_commit.
 
-Includes unified pre-commit review per Bible P8: three models review the staged
-diff in parallel using a structured JSON checklist. Review always runs before
-commit; enforcement is configurable between blocking and advisory.
+Pre-commit review pipeline (Bible P8): advisory pre-review runs first, then
+triad diff review and scope review execute concurrently via parallel_review.py.
+All review stages run before commit; enforcement is configurable.
 """
 
 from __future__ import annotations
 
 import json
+import hashlib
 import logging
 import os
 import pathlib
@@ -18,7 +19,14 @@ import time
 from typing import Any, Dict, List, Optional
 
 from ouroboros.tools.registry import ToolContext, ToolEntry, SAFETY_CRITICAL_PATHS
-from ouroboros.utils import utc_now_iso, write_text, safe_relpath, run_cmd
+from ouroboros.tools.commit_gate import (
+    _check_advisory_freshness,
+    _check_overlapping_review_attempt,
+    _invalidate_advisory,
+    _record_commit_attempt,
+)
+from ouroboros.utils import append_jsonl, utc_now_iso, write_text, safe_relpath, run_cmd
+from ouroboros.tools.parallel_review import run_parallel_review as _run_parallel_review, aggregate_review_verdict as _aggregate_review_verdict
 _CONTENT_OMITTED_PREFIX = "<<CONTENT_OMITTED"
 log = logging.getLogger(__name__)
 
@@ -27,22 +35,143 @@ def _sanitize_git_error(msg: str) -> str:
     return re.sub(r"(https?://)([^@\s]+@)", r"\1<redacted>@", msg)
 
 
-def _record_commit_attempt(ctx: ToolContext, commit_message: str, status: str,
-                           block_reason: str = "", block_details: str = "",
-                           duration_sec: float = 0.0, snapshot_hash: str = "") -> None:
-    """Record a commit attempt in the durable review state."""
+def _fingerprint_staged_diff(repo_dir: pathlib.Path) -> Dict[str, Any]:
+    """Return a deterministic fingerprint of the staged diff being reviewed."""
     try:
-        from ouroboros.review_state import CommitAttemptRecord, load_state, save_state, _utc_now
-        state = load_state(pathlib.Path(ctx.drive_root))
-        state.last_commit_attempt = CommitAttemptRecord(
-            ts=_utc_now(), commit_message=commit_message[:200], status=status,
-            snapshot_hash=snapshot_hash, block_reason=block_reason,
-            block_details=block_details[:2000], duration_sec=duration_sec,
-            task_id=str(getattr(ctx, "task_id", "") or ""),
+        diff_text = run_cmd(
+            ["git", "diff", "--cached", "--binary", "--no-ext-diff"],
+            cwd=repo_dir,
         )
-        save_state(pathlib.Path(ctx.drive_root), state)
+    except Exception as exc:
+        return {
+            "ok": False,
+            "fingerprint": "",
+            "status": "unavailable",
+            "reason": f"git diff --cached failed: {_sanitize_git_error(str(exc))}",
+        }
+
+    digest = hashlib.sha256(diff_text.encode("utf-8", errors="replace")).hexdigest()[:32]
+    return {
+        "ok": True,
+        "fingerprint": digest,
+        "status": "ok",
+        "reason": "",
+        "chars": len(diff_text),
+    }
+
+
+def _emit_review_state_event(ctx: ToolContext, event_type: str, **payload: Any) -> None:
+    try:
+        append_jsonl(ctx.drive_logs() / "events.jsonl", {
+            "ts": utc_now_iso(),
+            "type": event_type,
+            "task_id": str(getattr(ctx, "task_id", "") or ""),
+            **payload,
+        })
+    except Exception:
+        log.debug("Failed to append review-state event %s", event_type, exc_info=True)
+
+
+def _build_revalidation_failure(
+    *,
+    kind: str,
+    before: Dict[str, Any],
+    after: Optional[Dict[str, Any]] = None,
+) -> str:
+    if kind == "revalidation_failed":
+        return (
+            "⚠️ REVIEW_REVALIDATION_FAILED: the staged diff changed after review. "
+            f"before={before.get('fingerprint', '')[:12]}, "
+            f"after={str((after or {}).get('fingerprint', ''))[:12]}. "
+            "The reviewed findings were invalidated and were NOT carried forward. "
+            "Re-run advisory_pre_review and repo_commit on the final staged diff."
+        )
+    detail = before.get("reason") or (after or {}).get("reason") or "fingerprint unavailable"
+    return (
+        "⚠️ REVIEW_REVALIDATION_FAILED: could not fingerprint the staged diff "
+        f"for reviewed-commit revalidation ({detail}). "
+        "The attempt was recorded as degraded and reviewed findings were NOT carried forward. "
+        "Fix the git diff issue, then re-run advisory_pre_review and repo_commit."
+    )
+
+
+def _handle_revalidation_failure(
+    ctx: ToolContext,
+    commit_message: str,
+    commit_start: float,
+    *,
+    pre_fingerprint: Dict[str, Any],
+    post_fingerprint: Optional[Dict[str, Any]] = None,
+    kind: str,
+) -> str:
+    msg = _build_revalidation_failure(kind=kind, before=pre_fingerprint, after=post_fingerprint)
+    fingerprint_status = "mismatch" if kind == "revalidation_failed" else "unavailable"
+    degraded_reason = (
+        pre_fingerprint.get("reason")
+        or (post_fingerprint or {}).get("reason")
+        or msg
+    )
+    _emit_review_state_event(
+        ctx,
+        "reviewed_attempt_revalidation_failed",
+        kind=kind,
+        tool=str(getattr(ctx, "_current_review_tool_name", "") or ""),
+        pre_review_fingerprint=pre_fingerprint.get("fingerprint", ""),
+        post_review_fingerprint=(post_fingerprint or {}).get("fingerprint", ""),
+        detail=degraded_reason,
+    )
+    ctx._review_advisory = []
+    _record_commit_attempt(
+        ctx,
+        commit_message,
+        "blocked",
+        block_reason="revalidation_failed" if kind == "revalidation_failed" else "fingerprint_unavailable",
+        block_details=msg,
+        duration_sec=time.time() - commit_start,
+        critical_findings=[],
+        advisory_findings=[],
+        readiness_warnings=["Reviewed findings invalidated; commit must be re-reviewed."],
+        phase="revalidation",
+        pre_review_fingerprint=pre_fingerprint.get("fingerprint", ""),
+        post_review_fingerprint=(post_fingerprint or {}).get("fingerprint", ""),
+        fingerprint_status=fingerprint_status,
+        degraded_reasons=[degraded_reason],
+    )
+    return msg
+
+
+def _finalize_blocked_review(
+    ctx: ToolContext,
+    commit_message: str,
+    commit_start: float,
+    *,
+    combined_msg: str,
+    block_reason: str,
+    combined_findings: List[Dict[str, Any]],
+    pre_fingerprint: Dict[str, Any],
+    post_fingerprint: Dict[str, Any],
+) -> str:
+    """Persist a genuine blocked review result, then unstage the reviewed diff."""
+    _record_commit_attempt(
+        ctx,
+        commit_message,
+        "blocked",
+        block_reason=block_reason,
+        block_details=combined_msg,
+        duration_sec=time.time() - commit_start,
+        critical_findings=combined_findings,
+        phase="blocking_review",
+        pre_review_fingerprint=pre_fingerprint.get("fingerprint", ""),
+        post_review_fingerprint=post_fingerprint.get("fingerprint", ""),
+        fingerprint_status="matched",
+    )
+    try:
+        run_cmd(["git", "reset", "HEAD"], cwd=ctx.repo_dir)
     except Exception as e:
-        log.warning("Failed to record commit attempt: %s", e)
+        warning = f"⚠️ GIT_WARNING (reset): {_sanitize_git_error(str(e))}"
+        return f"{combined_msg}\n\n---\n{warning}"
+    return combined_msg
+
 
 def _auto_tag_on_version_bump(repo_dir: pathlib.Path, commit_message: str) -> str:
     try:
@@ -90,7 +219,6 @@ def _ensure_gitignore(repo_dir) -> None:
     if not gi.exists():
         gi.write_text("__pycache__/\n*.pyc\n*.pyo\n*.so\n*.dylib\n*.dll\n"
                        "*.dist-info/\nbase_library.zip\n.DS_Store\n", encoding="utf-8")
-
 def _unstage_binaries(repo_dir) -> List[str]:
     try:
         staged = run_cmd(["git", "diff", "--cached", "--name-only"], cwd=repo_dir)
@@ -107,8 +235,6 @@ def _unstage_binaries(repo_dir) -> List[str]:
                 pass
     return removed
 
-
-# --- Git lock ---
 
 def _acquire_git_lock(ctx: ToolContext, timeout_sec: int = 120) -> pathlib.Path:
     lock_dir = ctx.drive_path("locks")
@@ -152,7 +278,7 @@ def _log_test_failure(ctx: ToolContext, commit_message: str, test_output: str) -
     try:
         append_jsonl(ctx.drive_path("logs") / "events.jsonl", {
             "ts": utc_now_iso(), "type": "commit_test_failure",
-            "commit_message": commit_message[:200],
+            "commit_message": commit_message,  # full — no [:200] truncation
             "test_output": test_output[:2000],
             "consecutive_failures": _consecutive_test_failures,
         })
@@ -202,7 +328,7 @@ def _git_commit_with_tests(ctx: ToolContext) -> Optional[str]:
     return None
 
 
-# Unified pre-commit review lives in review.py.
+# Triad review helpers (used by parallel_review.py and legacy paths).
 from ouroboros.tools.review import (  # noqa: F401
     _run_unified_review,
     _load_checklist_section,
@@ -210,8 +336,6 @@ from ouroboros.tools.review import (  # noqa: F401
     _parse_review_json,
 )
 
-
-# --- Post-commit helpers ---
 
 def _post_commit_result(ctx, commit_message, skip_tests, tw_ref):
     global _consecutive_test_failures
@@ -227,16 +351,33 @@ def _post_commit_result(ctx, commit_message, skip_tests, tw_ref):
         _consecutive_test_failures = 0
 
 
+def _format_review_advisory_entry(entry: Any) -> str:
+    if isinstance(entry, dict):
+        severity = str(entry.get("severity", "advisory") or "advisory").upper()
+        tags = []
+        if entry.get("tag"):
+            tags.append(str(entry.get("tag")))
+        if entry.get("model"):
+            tags.append(f"model={entry.get('model')}")
+        if entry.get("obligation_id"):
+            tags.append(f"obligation={entry.get('obligation_id')}")
+        label = str(entry.get("item") or entry.get("reason") or "?")
+        reason = str(entry.get("reason", "") or "").replace("\n", " ")
+        tag_prefix = " ".join(f"[{tag}]" for tag in tags)
+        return f"[{severity}] {tag_prefix} {label}: {reason}".strip()
+    return str(entry)
+
+
 def _format_commit_result(ctx, commit_message, push_status, test_warning):
     result = f"OK: committed to {ctx.branch_dev}: {commit_message}{push_status}"
     if test_warning:
         result += test_warning
     if ctx._review_advisory:
-        result += "\n\n⚠️ Advisory warnings:\n" + "\n".join(f"  - {w}" for w in ctx._review_advisory)
+        result += "\n\n⚠️ Advisory warnings:\n" + "\n".join(
+            f"  - {_format_review_advisory_entry(w)}" for w in ctx._review_advisory
+        )
     return result
 
-
-# --- Tool implementations ---
 
 def _check_shrink_guard(ctx: ToolContext, file_path: str, new_content: str, force: bool = False) -> Optional[str]:
     """Return a warning string if writing new_content would shrink a tracked file by >30%. None if OK."""
@@ -271,10 +412,7 @@ def _check_shrink_guard(ctx: ToolContext, file_path: str, new_content: str, forc
 def _repo_write(ctx: ToolContext, path: str = "", content: str = "",
                 files: Optional[List[Dict[str, str]]] = None,
                 force: bool = False) -> str:
-    """Write file(s) to the repo working directory without committing.
-
-    Use repo_commit afterwards to stage, review, and commit all changes together.
-    """
+    """Write file(s) to the repo working directory without committing."""
     write_list: List[Dict[str, str]] = []
     if files:
         for entry in files:
@@ -307,35 +445,54 @@ def _repo_write(ctx: ToolContext, path: str = "", content: str = "",
             )
 
     written = []
+    written_paths: List[str] = []
     for e in write_list:
         shrink_warning = _check_shrink_guard(ctx, e["path"], e["content"], force=force)
         if shrink_warning:
+            if written:
+                _invalidate_advisory(
+                    ctx,
+                    changed_paths=written_paths,
+                    mutation_root=pathlib.Path(ctx.repo_dir),
+                    source_tool="repo_write",
+                )
             return shrink_warning
         try:
             target = ctx.repo_path(e["path"])
             target.parent.mkdir(parents=True, exist_ok=True)
             write_text(target, e["content"])
             written.append(f"{e['path']} ({len(e['content'])} chars)")
+            written_paths.append(e["path"])
         except Exception as exc:
+            if written:
+                _invalidate_advisory(
+                    ctx,
+                    changed_paths=written_paths,
+                    mutation_root=pathlib.Path(ctx.repo_dir),
+                    source_tool="repo_write",
+                )
             already = ", ".join(written) if written else "(none)"
             return (
                 f"⚠️ FILE_WRITE_ERROR on '{e['path']}': {exc}\n"
                 f"Successfully written before error: {already}"
             )
 
+    _invalidate_advisory(
+        ctx,
+        changed_paths=written_paths,
+        mutation_root=pathlib.Path(ctx.repo_dir),
+        source_tool="repo_write",
+    )
     summary = ", ".join(written)
     return (
         f"✅ Written {len(written)} file(s): {summary}\n"
-        "Files are on disk but NOT committed. Run repo_commit when ready."
+        "Files are on disk but NOT committed. Run repo_commit when ready.\n"
+        "⚠️ Advisory pre-review is now stale — run advisory_pre_review before repo_commit."
     )
 
 
 def _str_replace_editor(ctx: ToolContext, path: str, old_str: str, new_str: str) -> str:
-    """Replace exactly one occurrence of old_str with new_str in a file.
-
-    Safer than repo_write for existing files: reads the file, verifies old_str
-    appears exactly once, performs the replacement, and writes back.
-    """
+    """Replace exactly one occurrence of old_str with new_str in a file."""
     if not path or not path.strip():
         return "⚠️ STR_REPLACE_ERROR: path is required."
     if not old_str:
@@ -395,86 +552,17 @@ def _str_replace_editor(ctx: ToolContext, path: str, old_str: str, new_str: str)
         f"{context_start + i + 1:>4}| {line}" for i, line in enumerate(context_lines)
     )
 
+    _invalidate_advisory(
+        ctx,
+        changed_paths=[path],
+        mutation_root=pathlib.Path(ctx.repo_dir),
+        source_tool="str_replace_editor",
+    )
     return (
         f"✅ Replaced in {path} (line {replacement_line}).\n"
         f"Context:\n{context_preview}\n\n"
-        "File is on disk but NOT committed. Run repo_commit when ready."
-    )
-
-
-def _check_advisory_freshness(
-    ctx: ToolContext,
-    commit_message: str,
-    skip_advisory_pre_review: bool = False,
-    paths: Optional[List[str]] = None,
-) -> Optional[str]:
-    """Return a blocking error string if no fresh advisory run matches the current snapshot.
-
-    Returns None if the gate passes (fresh run exists, or advisory is skipped).
-    """
-    import pathlib as _pl
-    from ouroboros.review_state import compute_snapshot_hash, load_state, save_state, _utc_now, AdvisoryRunRecord
-    from ouroboros.utils import append_jsonl
-
-    drive_root = _pl.Path(ctx.drive_root)
-    repo_dir = _pl.Path(ctx.repo_dir)
-
-    snapshot_hash = compute_snapshot_hash(repo_dir, commit_message, paths=paths)
-    state = load_state(drive_root)
-
-    if state.is_fresh(snapshot_hash):
-        return None  # gate passes
-
-    if skip_advisory_pre_review:
-        # Explicit bypass: audit it and pass
-        task_id = str(getattr(ctx, "task_id", "") or "")
-        reason = "skip_advisory_pre_review=True passed to repo_commit"
-        try:
-            append_jsonl(ctx.drive_logs() / "events.jsonl", {
-                "ts": _utc_now(),
-                "type": "advisory_pre_review_bypassed",
-                "snapshot_hash": snapshot_hash,
-                "commit_message": commit_message[:200],
-                "bypass_reason": reason,
-                "task_id": task_id,
-            })
-        except Exception:
-            pass
-        bypass_run = AdvisoryRunRecord(
-            snapshot_hash=snapshot_hash,
-            commit_message=commit_message,
-            status="bypassed",
-            ts=_utc_now(),
-            bypass_reason=reason,
-            bypassed_by_task=task_id,
-        )
-        state.add_run(bypass_run)
-        save_state(drive_root, state)
-        return None  # gate passes (audited bypass)
-
-    # Gate blocks: no fresh advisory run for this snapshot
-    latest = state.latest()
-    if latest:
-        latest_info = (
-            f"Latest advisory run: status={latest.status}, "
-            f"hash={latest.snapshot_hash[:12]}, ts={latest.ts[:16]}. "
-            "The snapshot has changed since then (files or commit message differ)."
-        )
-    else:
-        latest_info = "No advisory runs have been recorded yet."
-
-    return (
-        f"⚠️ ADVISORY_PRE_REVIEW_REQUIRED: No fresh advisory run found for this snapshot "
-        f"(hash={snapshot_hash[:12]}).\n"
-        f"{latest_info}\n\n"
-        "Required workflow:\n"
-        "  1. advisory_pre_review(commit_message='your message')\n"
-        "  2. Fix any critical findings\n"
-        "  3. repo_commit(commit_message='your message')\n\n"
-        "To bypass (will be durably audited):\n"
-        "  advisory_pre_review(commit_message='...', skip_advisory_pre_review=True)\n"
-        "  repo_commit(commit_message='...')\n\n"
-        "Or pass skip_advisory_pre_review=True directly to repo_commit (also audited)."
+        "File is on disk but NOT committed. Run repo_commit when ready.\n"
+        "⚠️ Advisory pre-review is now stale — run advisory_pre_review before repo_commit."
     )
 
 
@@ -485,6 +573,7 @@ def _repo_write_commit(ctx: ToolContext, path: str, content: str,
     global _consecutive_test_failures
     ctx.last_push_succeeded = False
     ctx._review_advisory = []
+    ctx._current_review_tool_name = "repo_write_commit"
     if not commit_message.strip():
         return "⚠️ ERROR: commit_message must be non-empty."
     if isinstance(content, str) and content.strip().startswith(_CONTENT_OMITTED_PREFIX):
@@ -496,6 +585,19 @@ def _repo_write_commit(ctx: ToolContext, path: str, content: str,
     if shrink_warning:
         return shrink_warning
     _commit_start = time.time()
+    ctx._current_review_commit_message = commit_message
+    overlap_err = _check_overlapping_review_attempt(ctx)
+    if overlap_err:
+        _record_commit_attempt(
+            ctx,
+            commit_message,
+            "blocked",
+            block_reason="overlap_guard",
+            block_details=overlap_err,
+            duration_sec=0.0,
+            phase="preflight",
+        )
+        return overlap_err
     _record_commit_attempt(ctx, commit_message, "reviewing")
     try:
         lock = _acquire_git_lock(ctx)
@@ -518,6 +620,12 @@ def _repo_write_commit(ctx: ToolContext, path: str, content: str,
             write_text(ctx.repo_path(path), content)
         except Exception as e:
             return _fail(f"⚠️ FILE_WRITE_ERROR: {e}")
+        _invalidate_advisory(
+            ctx,
+            changed_paths=[path],
+            mutation_root=pathlib.Path(ctx.repo_dir),
+            source_tool="repo_write_commit",
+        )
         advisory_err = _check_advisory_freshness(ctx, commit_message)
         if advisory_err:
             _record_commit_attempt(ctx, commit_message, "blocked",
@@ -544,14 +652,65 @@ def _repo_write_commit(ctx: ToolContext, path: str, content: str,
                 except Exception:
                     pass
 
-        review_err = _run_unified_review(ctx, commit_message)
-        if review_err:
-            run_cmd(["git", "reset", "HEAD"], cwd=ctx.repo_dir)
-            block_reason = getattr(ctx, "_last_review_block_reason", "critical_findings")
-            _record_commit_attempt(ctx, commit_message, "blocked",
-                                   block_reason=block_reason, block_details=review_err,
-                                   duration_sec=time.time() - _commit_start)
-            return review_err
+        pre_fingerprint = _fingerprint_staged_diff(pathlib.Path(ctx.repo_dir))
+        if not pre_fingerprint.get("ok"):
+            return _handle_revalidation_failure(
+                ctx,
+                commit_message,
+                _commit_start,
+                pre_fingerprint=pre_fingerprint,
+                kind="fingerprint_unavailable",
+            )
+        _record_commit_attempt(
+            ctx,
+            commit_message,
+            "reviewing",
+            duration_sec=time.time() - _commit_start,
+            phase="review",
+            pre_review_fingerprint=pre_fingerprint.get("fingerprint", ""),
+            fingerprint_status="pending",
+        )
+
+        review_err, scope_result, triad_block_reason, triad_advisory = _run_parallel_review(ctx, commit_message)
+        blocked, combined_msg, block_reason, _combined_findings, _scope_advisory = _aggregate_review_verdict(
+            review_err, scope_result, triad_block_reason, triad_advisory, ctx, commit_message,
+            _commit_start, ctx.repo_dir,
+        )
+        # Surface scope advisory findings on both blocked and non-blocked paths (contract from parallel_review.py)
+        if _scope_advisory:
+            _adv_list = getattr(ctx, '_review_advisory', None)
+            if isinstance(_adv_list, list):
+                _adv_list.extend(_scope_advisory)
+        post_fingerprint = _fingerprint_staged_diff(pathlib.Path(ctx.repo_dir))
+        if not post_fingerprint.get("ok"):
+            return _handle_revalidation_failure(
+                ctx,
+                commit_message,
+                _commit_start,
+                pre_fingerprint=pre_fingerprint,
+                post_fingerprint=post_fingerprint,
+                kind="fingerprint_unavailable",
+            )
+        if post_fingerprint.get("fingerprint") != pre_fingerprint.get("fingerprint"):
+            return _handle_revalidation_failure(
+                ctx,
+                commit_message,
+                _commit_start,
+                pre_fingerprint=pre_fingerprint,
+                post_fingerprint=post_fingerprint,
+                kind="revalidation_failed",
+            )
+        if blocked:
+            return _finalize_blocked_review(
+                ctx,
+                commit_message,
+                _commit_start,
+                combined_msg=combined_msg,
+                block_reason=block_reason,
+                combined_findings=_combined_findings,
+                pre_fingerprint=pre_fingerprint,
+                post_fingerprint=post_fingerprint,
+            )
 
         try:
             run_cmd(["git", "commit", "-m", commit_message], cwd=ctx.repo_dir)
@@ -562,7 +721,12 @@ def _repo_write_commit(ctx: ToolContext, path: str, content: str,
                                    duration_sec=time.time() - _commit_start)
             return err_msg
         _record_commit_attempt(ctx, commit_message, "succeeded",
-                               duration_sec=time.time() - _commit_start)
+                               duration_sec=time.time() - _commit_start,
+                               phase="commit",
+                               pre_review_fingerprint=pre_fingerprint.get("fingerprint", ""),
+                               post_review_fingerprint=post_fingerprint.get("fingerprint", ""),
+                               fingerprint_status="matched")
+        ctx._scope_review_history = {}  # Clear on success — next commit starts fresh
         _post_commit_result(ctx, commit_message, skip_tests, test_warning_ref)
         tag_info = _auto_tag_on_version_bump(ctx.repo_dir, commit_message)
     finally:
@@ -582,9 +746,23 @@ def _repo_commit_push(ctx: ToolContext, commit_message: str,
     """Stage, review, and commit files with unified pre-commit review."""
     ctx.last_push_succeeded = False
     ctx._review_advisory = []
+    ctx._current_review_tool_name = "repo_commit"
     _commit_start = time.time()
     if not commit_message.strip():
         return "⚠️ ERROR: commit_message must be non-empty."
+    ctx._current_review_commit_message = commit_message
+    overlap_err = _check_overlapping_review_attempt(ctx)
+    if overlap_err:
+        _record_commit_attempt(
+            ctx,
+            commit_message,
+            "blocked",
+            block_reason="overlap_guard",
+            block_details=overlap_err,
+            duration_sec=0.0,
+            phase="preflight",
+        )
+        return overlap_err
     _record_commit_attempt(ctx, commit_message, "reviewing")
     try:
         lock = _acquire_git_lock(ctx)
@@ -637,44 +815,66 @@ def _repo_commit_push(ctx: ToolContext, commit_message: str,
                                    duration_sec=time.time() - _commit_start)
             return advisory_err
 
-        review_err = _run_unified_review(ctx, commit_message, review_rebuttal=review_rebuttal,
-                                          goal=goal, scope=scope)
-        if review_err:
-            run_cmd(["git", "reset", "HEAD"], cwd=ctx.repo_dir)
-            block_reason = getattr(ctx, "_last_review_block_reason", "critical_findings")
-            _record_commit_attempt(ctx, commit_message, "blocked",
-                                   block_reason=block_reason, block_details=review_err,
-                                   duration_sec=time.time() - _commit_start)
-            return review_err
+        pre_fingerprint = _fingerprint_staged_diff(pathlib.Path(ctx.repo_dir))
+        if not pre_fingerprint.get("ok"):
+            return _handle_revalidation_failure(
+                ctx,
+                commit_message,
+                _commit_start,
+                pre_fingerprint=pre_fingerprint,
+                kind="fingerprint_unavailable",
+            )
+        _record_commit_attempt(
+            ctx,
+            commit_message,
+            "reviewing",
+            duration_sec=time.time() - _commit_start,
+            phase="review",
+            pre_review_fingerprint=pre_fingerprint.get("fingerprint", ""),
+            fingerprint_status="pending",
+        )
 
-        # Scope review (blocking, fail-closed) — runs AFTER triad review
-        try:
-            from ouroboros.tools.scope_review import run_scope_review
-            scope_err = run_scope_review(
-                ctx, commit_message, goal=goal, scope=scope,
-                review_rebuttal=review_rebuttal,
-                review_history=getattr(ctx, '_review_history', []),
+        review_err, scope_result, triad_block_reason, triad_advisory = _run_parallel_review(
+            ctx, commit_message, goal=goal, scope=scope, review_rebuttal=review_rebuttal)
+        blocked, combined_msg, block_reason, _combined_findings, _scope_advisory = _aggregate_review_verdict(
+            review_err, scope_result, triad_block_reason, triad_advisory, ctx, commit_message,
+            _commit_start, ctx.repo_dir,
+        )
+        # Surface scope advisory findings on both blocked and non-blocked paths (contract from parallel_review.py)
+        if _scope_advisory:
+            _adv_list = getattr(ctx, '_review_advisory', None)
+            if isinstance(_adv_list, list):
+                _adv_list.extend(_scope_advisory)
+        post_fingerprint = _fingerprint_staged_diff(pathlib.Path(ctx.repo_dir))
+        if not post_fingerprint.get("ok"):
+            return _handle_revalidation_failure(
+                ctx,
+                commit_message,
+                _commit_start,
+                pre_fingerprint=pre_fingerprint,
+                post_fingerprint=post_fingerprint,
+                kind="fingerprint_unavailable",
             )
-            if scope_err:
-                run_cmd(["git", "reset", "HEAD"], cwd=ctx.repo_dir)
-                _record_commit_attempt(ctx, commit_message, "blocked",
-                                       block_reason="scope_blocked", block_details=scope_err,
-                                       duration_sec=time.time() - _commit_start)
-                return scope_err
-        except ImportError:
-            log.debug("scope_review module not available — skipping scope gate")
-        except Exception as e:
-            # Scope review is fail-closed: any error blocks
-            run_cmd(["git", "reset", "HEAD"], cwd=ctx.repo_dir)
-            err_msg = (
-                f"⚠️ SCOPE_REVIEW_BLOCKED: Scope review failed with error — commit blocked.\n"
-                f"Error: {e}\n"
-                "Fix the issue and retry."
+        if post_fingerprint.get("fingerprint") != pre_fingerprint.get("fingerprint"):
+            return _handle_revalidation_failure(
+                ctx,
+                commit_message,
+                _commit_start,
+                pre_fingerprint=pre_fingerprint,
+                post_fingerprint=post_fingerprint,
+                kind="revalidation_failed",
             )
-            _record_commit_attempt(ctx, commit_message, "blocked",
-                                   block_reason="scope_blocked", block_details=err_msg,
-                                   duration_sec=time.time() - _commit_start)
-            return err_msg
+        if blocked:
+            return _finalize_blocked_review(
+                ctx,
+                commit_message,
+                _commit_start,
+                combined_msg=combined_msg,
+                block_reason=block_reason,
+                combined_findings=_combined_findings,
+                pre_fingerprint=pre_fingerprint,
+                post_fingerprint=post_fingerprint,
+            )
 
         try:
             run_cmd(["git", "commit", "-m", commit_message], cwd=ctx.repo_dir)
@@ -685,7 +885,12 @@ def _repo_commit_push(ctx: ToolContext, commit_message: str,
                                    duration_sec=time.time() - _commit_start)
             return err_msg
         _record_commit_attempt(ctx, commit_message, "succeeded",
-                               duration_sec=time.time() - _commit_start)
+                               duration_sec=time.time() - _commit_start,
+                               phase="commit",
+                               pre_review_fingerprint=pre_fingerprint.get("fingerprint", ""),
+                               post_review_fingerprint=post_fingerprint.get("fingerprint", ""),
+                               fingerprint_status="matched")
+        ctx._scope_review_history = {}  # Clear on success — next commit starts fresh
         _post_commit_result(ctx, commit_message, skip_tests, test_warning_ref)
         tag_info = _auto_tag_on_version_bump(ctx.repo_dir, commit_message)
     finally:
@@ -720,10 +925,6 @@ def _git_diff(ctx: ToolContext, staged: bool = False) -> str:
     except Exception as e:
         return f"⚠️ GIT_ERROR: {_sanitize_git_error(str(e))}"
 
-
-# ---------------------------------------------------------------------------
-# pull_from_remote — FF-only pull (fetch + merge)
-# ---------------------------------------------------------------------------
 
 def _ff_pull(repo_dir: pathlib.Path) -> str:
     try:
@@ -780,10 +981,6 @@ def _ff_pull(repo_dir: pathlib.Path) -> str:
 def _pull_from_remote(ctx: ToolContext) -> str:
     return _ff_pull(pathlib.Path(ctx.repo_dir))
 
-
-# ---------------------------------------------------------------------------
-# restore_to_head — discard uncommitted changes (safe: returns to HEAD)
-# ---------------------------------------------------------------------------
 
 def _restore_to_head(ctx: ToolContext, confirm: bool = False,
                      paths: Optional[List[str]] = None) -> str:
@@ -858,10 +1055,6 @@ def _restore_to_head(ctx: ToolContext, confirm: bool = False,
             pass
         return "All uncommitted changes discarded. Working directory matches HEAD."
 
-
-# ---------------------------------------------------------------------------
-# revert_commit — create a new commit undoing a previous one (no history rewrite)
-# ---------------------------------------------------------------------------
 
 def _revert_commit(ctx: ToolContext, sha: str, confirm: bool = False) -> str:
     repo_dir = pathlib.Path(ctx.repo_dir)

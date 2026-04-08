@@ -6,7 +6,7 @@
 [![macOS 12+](https://img.shields.io/badge/macOS-12%2B-black.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
 [![Linux](https://img.shields.io/badge/Linux-x86__64-orange.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
 [![Windows](https://img.shields.io/badge/Windows-x64-blue.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
-[![Version 4.11.8](https://img.shields.io/badge/version-4.11.8-green.svg)](VERSION)
+[![Version 4.17.8](https://img.shields.io/badge/version-4.17.8-green.svg)](VERSION)
 
 A self-modifying AI agent that writes its own code, rewrites its own mind, and evolves autonomously. Born February 16, 2026.
 
@@ -114,7 +114,7 @@ Settings now exposes tabbed provider cards for:
 - **OpenAI** — official OpenAI API (use model values like `openai::gpt-5.4`)
 - **OpenAI Compatible** — any custom OpenAI-style endpoint (use `openai-compatible::...`)
 - **Cloud.ru Foundation Models** — Cloud.ru OpenAI-compatible runtime (use `cloudru::...`)
-- **Anthropic** — kept for the existing Claude CLI flow, not a separate remote runtime
+- **Anthropic** — direct runtime routing (`anthropic::claude-opus-4.6`, etc.) plus Claude Agent SDK tools
 
 If OpenRouter is not configured and only official OpenAI is present, untouched default model values are auto-remapped to `openai::gpt-5.4` / `openai::gpt-5.4-mini` so the first-run path does not strand the app on OpenRouter-only defaults.
 
@@ -196,17 +196,19 @@ docker run --rm -p 8765:8765 \
 
 ```bash
 bash scripts/download_python_standalone.sh
-bash build.sh
+OUROBOROS_SIGN=0 bash build.sh
 ```
 
-Output: `dist/Ouroboros-<VERSION>-macos.dmg`
+Output: `dist/Ouroboros-<VERSION>.dmg`
 
-`build.sh` signs, notarizes, staples, and packages the macOS app and DMG using
-the configured local keychain identity/profile.
+`build.sh` packages the macOS app and DMG. By default it signs with the
+configured local Developer ID identity; set `OUROBOROS_SIGN=0` for an unsigned
+local release. Unsigned builds require right-click → **Open** on first launch.
 
 ### Linux (.tar.gz)
 
 ```bash
+bash scripts/download_python_standalone.sh
 bash build_linux.sh
 ```
 
@@ -215,7 +217,8 @@ Output: `dist/Ouroboros-linux-x86_64.tar.gz`
 ### Windows (.zip)
 
 ```powershell
-.\build_windows.ps1
+powershell -ExecutionPolicy Bypass -File scripts/download_python_standalone.ps1
+powershell -ExecutionPolicy Bypass -File build_windows.ps1
 ```
 
 Output: `dist\Ouroboros-windows-x64.zip`
@@ -250,6 +253,7 @@ Ouroboros
 │   ├── review.py           — Code review pipeline and repo inspection
 │   ├── reflection.py       — Execution reflection and pattern capture
 │   ├── tool_capabilities.py — SSOT for tool sets (core, parallel, truncation)
+│   ├── chat_upload_api.py  — Chat file attachment upload/delete endpoints
 │   ├── gateways/           — External API adapters
 │   │   └── claude_code.py  — Claude Agent SDK gateway (edit + read-only)
 │   ├── consciousness.py    — Background thinking loop
@@ -274,6 +278,7 @@ Created on first launch:
 | `data/state/` | Runtime state, budget tracking |
 | `data/memory/` | Identity, working memory, system profile, knowledge base, memory registry |
 | `data/logs/` | Chat history, events, tool calls |
+| `data/uploads/` | Chat file attachments (uploaded via paperclip button) |
 
 ---
 
@@ -287,7 +292,7 @@ Created on first launch:
 | OpenAI API Key | No | [platform.openai.com/api-keys](https://platform.openai.com/api-keys) — official OpenAI runtime and web search |
 | OpenAI Compatible API Key / Base URL | No | Any OpenAI-style endpoint (proxy, self-hosted gateway, third-party compatible API) |
 | Cloud.ru Foundation Models API Key | No | Cloud.ru Foundation Models provider |
-| Anthropic API Key | No | [console.anthropic.com](https://console.anthropic.com/settings/keys) — enables Claude Code CLI |
+| Anthropic API Key | No | [console.anthropic.com](https://console.anthropic.com/settings/keys) — direct Anthropic runtime + Claude Agent SDK |
 | Telegram Bot Token | No | [@BotFather](https://t.me/BotFather) — enables the Telegram bridge |
 | GitHub Token | No | [github.com/settings/tokens](https://github.com/settings/tokens) — enables remote sync |
 
@@ -301,13 +306,13 @@ All keys are configured through the **Settings** page in the UI or during the fi
 | Code | `anthropic/claude-opus-4.6` | Code editing |
 | Light | `anthropic/claude-sonnet-4.6` | Safety checks, consciousness, fast tasks |
 | Fallback | `anthropic/claude-sonnet-4.6` | When primary model fails |
-| Claude Code CLI | `opus` | Anthropic model for Claude Code CLI tools |
-| Scope Review | `anthropic/claude-opus-4.6` | Blocking scope reviewer (single-model, after triad review) |
+| Claude Agent SDK | `opus` | Anthropic model for Claude Agent SDK tools (`claude_code_edit`, `advisory_pre_review`) |
+| Scope Review | `anthropic/claude-opus-4.6` | Blocking scope reviewer (single-model, runs in parallel with triad review) |
 | Web Search | `gpt-5.2` | OpenAI Responses API for web search |
 
 Task/chat reasoning defaults to `medium`. Scope review reasoning defaults to `high`.
 
-Models are configurable in the Settings page. Runtime model slots can target OpenRouter, official OpenAI, OpenAI-compatible endpoints, or Cloud.ru. Anthropic remains scoped to the existing Claude Code CLI flow. When only official OpenAI is configured and the shipped default model values are still untouched, Ouroboros auto-remaps them to official OpenAI defaults. In that same OpenAI-only mode, review-model lists are normalized automatically and fall back to running the main model three times if no valid multi-model remote quorum is configured.
+Models are configurable in the Settings page. Runtime model slots can target OpenRouter, official OpenAI, OpenAI-compatible endpoints, Cloud.ru, or direct Anthropic. When only official OpenAI is configured and the shipped default model values are still untouched, Ouroboros auto-remaps them to official OpenAI defaults. In that same OpenAI-only mode, review-model lists are normalized automatically and fall back to running the main model three times if no valid multi-model remote quorum is configured.
 
 ### File Browser Start Directory
 
@@ -345,7 +350,7 @@ Available in the chat interface:
 | `/restart` | Soft restart. Saves state, kills workers, re-launches. |
 | `/status` | Shows active workers, task queue, and budget breakdown. |
 | `/evolve` | Toggle autonomous evolution mode (on/off). |
-| `/review` | Queue a deep self-review: sends all code + memory to a 1M-context model for Constitution-grounded analysis. |
+| `/review` | Queue a deep self-review: sends all agent code, prompts, docs, and core memory artifacts (identity, scratchpad, registry, patterns) to a 1M-context model for Constitution-grounded analysis. Excludes vendored libraries and operational logs. |
 | `/bg` | Toggle background consciousness loop (start/stop/status). |
 
 The same runtime actions are also exposed as compact buttons in the Chat header. All other messages are sent directly to the LLM.
@@ -374,6 +379,38 @@ Full text: [BIBLE.md](BIBLE.md)
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 4.17.8 | 2026-04-09 | Stable main-promotion cut: public `4.12`-`4.17` review-stack hardening lands in `main`, including advisory/commit continuity and obligation tracking fixes, the `plan_task` design-review tool, review fidelity/evidence/status improvements, Cloud.ru onboarding, chat upload + vision/runtime polish, and restored tracked Linux/Windows packaging entrypoints alongside the unsigned macOS DMG path. |
+| 4.17.7 | 2026-04-08 | Obligation fingerprint keying: `_update_obligations_from_attempt` now keys by `sha256(f"{item}:{reason}")[:12]` — full reason, no truncation — so different findings with same item produce separate obligations instead of collapsing into one moving-target. `_resolve_matching_obligations` item-name fallback is now restricted to cases where exactly one open obligation exists for that item (prevents same-item PASS from clearing unrelated findings). Same finding repeated = merged (deduped). Worktree version-sync helper extracted to `review_helpers.py::check_worktree_version_sync`; advisory path retains `_check_worktree_version_sync` alias. ARCHITECTURE.md updated. Tests updated to match new per-finding semantics. |
+| 4.17.6 | 2026-04-08 | Review pipeline calibration overhaul: (P1) 3 new deterministic preflight checks in `repo_commit` — `version_values_match` (staged index via `git show :PATH`), `readme_changelog_row` (staged changelog row), `conftest_no_tests` (top-level AST scan, basename match only — `myconftest.py` not affected); advisory path gets `_check_worktree_version_sync` (non-blocking early warning before expensive SDK call); (P2) structured self-verification template in blocked messages from attempt ≥ 2 — all findings listed, no cap; (P3) obligation grouping with per-segment dedup — same-item findings joined, `A | A | B` inflation prevented; (P4) shared `CRITICAL_FINDING_CALIBRATION` constant injected into triad, scope, and advisory reviewer prompts — concrete artifact required before CRITICAL, hypothetical concerns → advisory. 36 new tests in `test_review_calibration.py`. |
+| 4.17.5 | 2026-04-08 | Fix asyncio event loop contamination across test suite: `asyncio.run()` in `test_advisory_observability.py` closed the global event loop, causing `test_claude_code_gateway.py` to fail when both ran together. Fix: shared `pytest_runtest_call` hookwrapper in `tests/conftest.py` installs a fresh per-test loop before the test body and clears it after; companion `pytest_runtest_teardown` hookwrapper installs a temporary loop during fixture finalizers so they can call `asyncio.get_event_loop()` safely. Added `tests/test_event_loop_isolation.py` with regression tests including a fixture-finalizer test. Full test suite now passes clean. |
+| 4.17.4 | 2026-04-08 | Fix 2 pre-existing test failures: `test_onboarding_wizard.py::test_launcher_uses_shared_onboarding_and_claude_cli_bridge` skips when launcher.py lacks all 5 onboarding-bridge markers (checked atomically); `test_packaging_assets.py::test_launcher_does_not_exclude_assets_on_bootstrap` skips when launcher.py lacks the `launcher_bootstrap` import (both guards are content-aware, not just file-presence checks). Add `plan_task` rule to `prompts/SYSTEM.md` Code Editing Strategy: call before first edit on tasks >2 files or >50 lines. |
+| 4.17.3 | 2026-04-08 | Add web_search guidance for knowledge cutoff: proactive `web_search` triggers in "Web Search Tips" (non-obvious errors, new APIs, API changes risk); "could this be a knowledge cutoff issue?" checkpoint in Methodology Check; "either" → "any" red-flag quantifier fix. |
+| 4.17.2 | 2026-04-08 | Remove square blur artifact from chat input: `#chat-input-area` no longer has `backdrop-filter` (was creating a sharp-edged blur rectangle across full viewport width). Frosted glass moved to `#chat-input` textarea itself (`blur(16px)`, opacity 0.62, white border tint). `#chat-input-area` now uses a soft gradient fade only. Updated DEVELOPMENT.md design system ranges (`blur(8–16px)`, opacity `0.62–0.88`) and ARCHITECTURE.md §3.1 description. |
+| 4.17.1 | 2026-04-08 | Fix excessive gap between last chat message and input overlay: `padding-bottom` on `#chat-messages` is now set dynamically via `updateMessagesPadding()` in chat.js (real overlay height + 16px buffer). CSS default `84px` covers min-height state; JS adjusts to ~160px when textarea is fully expanded. Called on connect, textarea resize, and attachment preview toggle. Eliminates the 80–90px dead zone visible in the default (single-line textarea) state. |
+| 4.17.0 | 2026-04-08 | New `plan_task` tool: pre-implementation design review via 3 parallel full-codebase reviewers. Uses the same 3 models from `OUROBOROS_REVIEW_MODELS` (commit triad) but sends them the full repo pack (same as scope review, no char cap). Call before writing code on non-trivial tasks to surface forgotten touchpoints, implicit contract violations, and simpler alternatives. Each reviewer returns structured PASS/RISK/FAIL verdicts with detailed explanations, concrete fixes, and alternative approaches. New "Plan Review Checklist" section in CHECKLISTS.md (8 items). Budget gate at 800K tokens. Non-blocking advisory output. |
+| 4.16.5 | 2026-04-08 | Fix thinking bubbles disappearing after task completion or page reload: `syncHistory` now uses two-pass processing — progress/summary messages are replayed first (building live card timelines), then assistant replies finalize the cards. `updateLiveCardFromProgressMessage` no longer force-opens cards for completed tasks during history replay. After first load, typing indicator is restored if a task is still ongoing. 3 new regression tests. |
+| 4.16.4 | 2026-04-08 | Chat input layout: move paperclip (attach) and Send buttons inside the textarea as absolute-positioned overlays (paperclip left, Send text right). No borders; transparent background normally with subtle crimson tint on hover/active. Update ARCHITECTURE.md. |
+| 4.16.3 | 2026-04-08 | Restyle chat Send button: SVG paper-plane icon with crimson glassmorphism accent, matching the attachment button. Update ARCHITECTURE.md description. |
+| 4.16.2 | 2026-04-08 | vlm_query: add `file_path` parameter (reads local image from disk, avoids passing large base64 in tool arguments — use for files in `data/uploads/`). Auto-detects MIME type from magic bytes. Fix chat Send button layout: changed from `position:absolute` overlay to flex item so it no longer overlaps textarea text. |
+| 4.16.1 | 2026-04-08 | Review pipeline fidelity: remove all `[:N]` list-count caps and field-level silent truncation across the full review carry-over path. Display layer (`format_status_section`): removed `[:3]` on critical/advisory/warnings, `[:6]` on obligations, `[-3:]` on advisory runs and attempts, `ts[:16]`/`commit_message[:60]` field slicing for run and attempt records, `ob.source_attempt_msg[:60]`/`ob.source_attempt_ts[:16]`/`last_stale_from_edit_ts[:16]` field slicing in the open-obligations block. Serialization layer (`build_blocking_findings_json_section`): removed `[:6]` per attempt, `history_limit=4`, `text[:500]`/`text[:200]` in `_sanitize_text`, and early-return `if not open_obligations` that silently dropped `recent_blocking_attempts` when the obligation list was empty. Persistence layer: removed `commit_message[:200]` truncation in `_record_commit_attempt`, `_update_obligations_from_attempt`, bypass audit log entries, `_review_history` dict in `review.py`, and test-failure event log in `git.py`. Commit gate warning text: removed `[:5]`. All findings, obligations, history entries, timestamps, and commit messages now flow through without silent truncation at any pipeline stage — including `_handle_review_status` JSON output (`runs_data.ts[:16]`, `runs_data.commit_message[:80]`, `attempts_data.ts[:16]`, `commit_attempt_data.ts[:16]`, `commit_attempt_data.commit_message[:80]`), `_check_advisory_freshness` error messages (`matching_run.ts[:16]`, `latest.ts[:16]`, `last_stale_from_edit_ts[:16]`), and `stale_from_edit_ts` in review_status output. 26 regression tests added in `tests/test_review_fidelity.py`. |
+| 4.16.0 | 2026-04-07 | Chat attachment: paperclip button selects a file (staged locally, no server upload until Send/Enter), shows removable preview badge, uploads to `data/uploads/` with UUID-unique name. Upload is blocked when WebSocket is offline — no upload happens when disconnected, preventing orphan files. If the WebSocket drops after upload completes but before message delivery, the queued message references a durable server-side file that persists until explicitly deleted. |
+| 4.15.5 | 2026-04-07 | Chat layout fix: `#chat-messages` `padding-bottom` set to `150px` to ensure the last bubble stays reachable above the floating input overlay at maximum textarea height (~144px). Syncs `docs/ARCHITECTURE.md` description. |
+| 4.15.4 | 2026-04-07 | Review-loop repair: blocked `repo_commit` / `repo_write_commit` paths now preserve real triad and scope findings instead of self-triggering `REVIEW_REVALIDATION_FAILED`; Claude Code advisory/edit paths now share one 30-turn default; advisory diagnostics, obligations, review continuity, and review evidence now stay repo-scoped and honest; changed-path parsing now uses one structured git-status helper that handles renames and literal ` -> ` filenames. Focused regression coverage added across commit, advisory, scope, context, continuation, and observability tests. |
+| 4.15.3 | 2026-04-07 | Review flow repair: fix ghost `reviewing` attempts caused by the ledger allocating a new attempt number on every `status="reviewing"` write instead of reusing the current logical attempt. TTL boundary now expires at the exact threshold instead of lingering one tick past it. Regression tests assert against the full `attempts[]` ledger. |
+| 4.15.2 | 2026-04-07 | Cloud.ru Foundation Models onboarding: first-run wizard now accepts a Cloud.ru API key with built-in `https://foundation-models.api.cloud.ru/v1` endpoint and prefills `cloudru::GigaChat/GigaChat-2-Max` across all four model lanes. Cherry-picked from PR #14. |
+| 4.15.1 | 2026-04-06 | Review-stack durability and honesty pass: advisory budget gate raised to ~1.6M chars and `ARCHITECTURE.md` restored to advisory context; Claude SDK readonly/edit paths now stop after `ResultMessage` to avoid the spurious closed-pipe failure; durable review state moved to a typed ledger with lock-backed updates, diff revalidation, late-result/stale-attempt handling, centralized advisory invalidation, safe advisory context packing, per-task review continuations, and structured `review_evidence` flowing into task results, summaries, reflections, runtime context, and user-facing review reporting. Follow-up fixes keep continuations isolated per task and keep task-scoped review evidence from falling back to another task's history. |
+| 4.15.0 | 2026-04-06 | advisory_pre_review: fix model drift (hardcoded `opus` → `resolve_claude_code_model()` shared with edit path); add rich observability on SDK/CLI failure (stderr_tail, sdk_version, cli_version, cli_path, python, session_id, prompt_chars, prompt_tokens, touched_paths all surfaced in error output and logs); add advisory budget gate — skip advisory non-blocking when prompt exceeds ~400K chars (mirrors scope review, prevents silent CLI timeouts on wide snapshots); stop inlining `ARCHITECTURE.md` into the advisory prompt at this stage (too large, caused timeouts — point the reviewer at it via Read-tool hint instead); extract `get_advisory_runtime_diagnostics` + `format_advisory_sdk_error` to `review_helpers.py` (DRY, relieves size pressure on the advisory module and keeps it closer to the P5 context-window target); new `⚠️ ADVISORY_SKIPPED:` sentinel for budget-gate skips, propagated as `status="skipped"` to commit gate. 13 new tests in `tests/test_advisory_observability.py`. |
+| 4.14.2 | 2026-04-06 | Chat input area glassmorphism: `#chat-input-area` changed to `position: absolute; bottom: 0` frosted-glass overlay so message bubbles scroll underneath it instead of being clipped. `backdrop-filter: blur(12px)` + gradient background added. `#chat-messages` bottom padding set to 160px (covers max textarea height 120px + padding) so the last bubble is always fully reachable. |
+| 4.14.1 | 2026-04-06 | Review pipeline (Block 3): scope reviewer role expanded from "supplemental" to "full-codebase fourth reviewer". New prompt emphasises cross-module bugs, broken implicit contracts, hidden regressions. Two new CHECKLISTS.md items: `cross_module_bugs` and `implicit_contracts`. Budget gate added: if the full scope-review prompt exceeds 800K tokens, scope review is skipped with a non-blocking warning. Scope reviewer docstring and architecture docs were synchronized to the new `_TouchedContextStatus` / assembled-prompt flow. Safety path hardened so only explicit `python -m pytest` interpreter invocations bypass the remote safety LLM for normal test runs, with spoofed paths still blocked. Includes 30 new Block 3 tests plus targeted safety/compatibility regression updates. |
+| 4.14.0 | 2026-04-06 | Review pipeline (Block 2): triad and scope review now run in **parallel** via `ThreadPoolExecutor`. Scope always runs even when triad blocks — agent sees all findings in one round. Aggregated verdict combines both blocker sets. `_scope_review_history` tracks scope findings across retries (snapshot-keyed, cleared on success). Triad advisory findings included in blocked message when scope blocks. Orchestration extracted to `parallel_review.py` (P5 — keeps git.py under 1000 lines). 5 new + 7 updated tests. |
+| 4.13.0 | 2026-04-06 | Review pipeline honesty (Block 1): `build_full_repo_pack()` added to review_helpers, scope review uses it with no hardcoded char cap; filtering constants and `_is_probably_binary()` shared between review_helpers and deep_self_review (DRY); `_FILE_SIZE_LIMIT` raised 100KB→1MB; `_is_probably_binary` uses NUL-byte + ASCII-control-char ratio + UTF-8 incremental-decode checks (safe for Cyrillic/CJK — no false positives on multi-byte chars at sample boundary); HEAD snapshots fetched as raw bytes and full sniffer applied before decoding (single subprocess call); advisory diffs >500KB hard-fail before SDK call; `_repo_write_commit` legacy path now runs scope review; `clip_text` removed from consciousness context (knowledge, patterns, drive state). `_get_staged_diff`/`_get_changed_file_list` fail-closed on non-zero git returncode; `_handle_advisory_pre_review` aborts on changed-file error; `_run_claude_advisory` fetches diff/changed-files once and passes resolved paths into `_build_advisory_prompt` to eliminate double git-status calls; `build_touched_file_pack` path-traversal guard (cross-platform `Path.relative_to()`) + git-status returncode check; `scope_review.run_scope_review` wraps `_build_scope_prompt` in try/except; consciousness `_think()` returns bool with explicit `context_overflow`/`llm_error` status and exponential backoff on failure. 38 new + 3 updated tests. Sensitive-file guard and explicit binary omission notes in touched-file and HEAD-snapshot packs (case-insensitive); advisory diff and changed-file list scoped to `paths` when provided; build_full_repo_pack fail-closed on git failure; consciousness overflow guard — fail-fast at 1.2M chars (P1 compliant, no silent artifact dropping). |
+| 4.12.0 | 2026-04-05 | Review workflow overhaul: `repo_write`/`str_replace_editor` auto-invalidate advisory after any worktree write (partial-write edge cases covered); triad-review blocking attempts accumulate as structured `ObligationItem` list in durable state; scope-review blocks now also produce structured findings; advisory bypasses `already_fresh` fast-path when open obligations exist; `_check_advisory_freshness` gates on both snapshot freshness and empty obligations; advisory prompt injects unresolved obligations with explicit per-obligation verdict requirement; `review_status` shows staleness, open obligations, and concrete next-step guidance; `CHECKLISTS.md` corrected to match real implementation (auto-stale wired for `repo_write`/`str_replace_editor`, `claude_code_edit` noted as not-yet-wired); `review_state.py` extended with `blocking_history` (last 10), `open_obligations`, `last_stale_from_edit_ts`; `commit_gate.py` extracted from `git.py` to maintain module size limit; 32 new tests. |
+| 4.11.14 | 2026-04-05 | Docs & packaging: I5 Anthropic documented as direct runtime provider (not CLI-only) with `anthropic::` prefix; A3 add `providers/*.png` and `providers/*.ico` to pyproject.toml package-data; A4 add missing modules (`provider_models`, `server_auth`, `server_control`, `server_entrypoint`, `server_web`, `task_results`, `launcher_bootstrap`) to ARCHITECTURE.md module tree. |
+| 4.11.13 | 2026-04-05 | deep_self_review: fix SIGSEGV crash (macOS fork-safety, confirmed via crashlog). Root cause: first httpx HTTP request in a forked child process calls `SCDynamicStoreCopyProxiesWithOptions()` / `CFPreferences` which is not fork-safe — confirmed by `"crashed on child side of fork pre-exec"` in `asi` field of macOS crash report. Fix: `run_deep_self_review` passes `no_proxy=True` to `llm.chat()`; `LLMClient._chat_remote()` builds a one-shot `httpx.Client(trust_env=False, mounts={})` closed in `finally`; `_normalize_remote_response` called with `skip_cost_fetch=True` to also suppress the `requests.get()` generation-cost call (same proxy path). All proxy/OS-lookup code skipped; cost estimated from token counts. Localised to deep_self_review only; regular LLM calls unaffected. v4.11.12 dulwich fix remains. 6 new regression tests. |
+| 4.11.12 | 2026-04-04 | deep_self_review: replace `subprocess.run(["git", "ls-files"])` with `dulwich.repo.Repo(path).open_index()` — pure Python git index reader, no subprocess. Tests updated: all 30 `test_deep_self_review.py` tests now mock dulwich instead of subprocess. |
+| 4.11.11 | 2026-04-04 | deep_self_review: fix review pack too large (1.54M tokens → ~580K). Root cause: PNG/JPG/ICO/SVG and other binary files read via `errors=replace` produced hundreds of thousands of garbage chars. Fix: add `_BINARY_EXTENSIONS` suffix filter + `_is_probably_binary()` content sniffer (NUL-byte detection or >30% non-text bytes, where non-text = bytes ≥127 and ASCII control chars; reads only first 8KB via `open().read()` — no full-file buffer); size guard moved before sniffer; add `_SKIP_DIR_PREFIXES` (`assets/` — README screenshots; `webview/` — legacy PyWebView JS helpers). OMITTED FILES legend updated. 16 new tests. |
+| 4.11.10 | 2026-04-04 | Chat live task card: remove artificial 20-step cap on timeline items — all steps are now preserved and visible. Timeline becomes scrollable (CSS `max-height: 420px`, `overflow-y: auto`) when expanded so long tasks don't push content off-screen. `syncLiveCardLayout` capped at `TIMELINE_MAX_HEIGHT` to match. `bufferedLiveUpdates` cap also removed. |
+| 4.11.9 | 2026-04-04 | deep_self_review: exclude vendored/minified files from review pack (`_VENDORED_SUFFIXES` + `_VENDORED_NAMES` constants, suffix matching in build loop); update ARCHITECTURE.md — clarify review pack scope (no dialogue/logs, explicit exclusion rules); update README `/review` command description. |
 | 4.11.8 | 2026-04-04 | Design system consistency: Evolution Versions sub-tab inline styles replaced with CSS classes (`.evo-versions-*`); evo-runtime-card and evo-chart-wrap border changed to crimson tint matching app accent; evo-subtab inactive state aligned to crimson palette; chart tooltip background/border use palette colors; `btn-xs` utility class added; `loadVersions()` error handling now resets all three UI surfaces (commits, tags, branch header) on failure and guards against non-2xx HTTP responses; 4 new regression tests. |
 | 4.11.7 | 2026-04-04 | Fix PyWebView page reload after restart: force reload on reconnect when _lastSha is unknown (JS memory lost across server restart) or SHA changed. Ensures new CSS/JS is always loaded after restart in the desktop app. |
 | 4.11.6 | 2026-04-04 | UI design system consistency: chat input gets glassmorphism (backdrop-filter + crimson border tint), log working-phase badges unified to crimson (matching chat live card), About and Costs inline styles replaced with CSS classes, Design System section added to DEVELOPMENT.md. |

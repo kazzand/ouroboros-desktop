@@ -89,8 +89,11 @@ Not every layer is required for every operation. Simple cases (e.g., `repo_read`
 
 Derived from P5 (Minimalism): entire codebase fits in one context window.
 
-- Module: ~1000 lines max.
-- Method: <150 lines.
+- Module target: ~1000 lines. Crossing that line is P5 pressure and should trigger extraction or an explicit justification.
+- Module hard gate: 1250 lines for non-grandfathered modules in `tests/test_smoke.py`.
+- Method target: <150 lines. Crossing that line is a decomposition signal, not an automatic failure by itself.
+- Method hard gate: 250 lines in `tests/test_smoke.py`.
+- Codebase-wide function-count hard gate: 1100 Python functions/methods in `tests/test_smoke.py`.
 - Function parameters: <8.
 - Net complexity growth per cycle approaches zero.
 - If a feature is not used in the current cycle — it is premature.
@@ -99,15 +102,30 @@ Derived from P5 (Minimalism): entire codebase fits in one context window.
 
 ## Review & Commit Protocol
 
-Every commit through `repo_commit` or `repo_write_commit` passes a **unified
-pre-commit review** — three models review the staged diff against
-`docs/CHECKLISTS.md` before commit. Review enforcement is configurable:
-`Blocking` preserves the current hard gate, while `Advisory` still runs the
-same review but downgrades findings and review-phase failures to warnings.
-See `ouroboros/tools/review.py` for implementation.
+Reviewed commits now have an explicit **two-step gate**:
+
+1. **Advisory freshness gate**: finish all edits, then run `advisory_pre_review`.
+   `repo_commit` / `repo_write_commit` require a fresh matching advisory run (or an
+   explicit audited bypass) and no open obligations from earlier blocked rounds.
+   Any edit after advisory makes it stale and requires a re-run.
+2. **Unified pre-commit review**: once advisory is fresh, the reviewed commit path
+   runs two reviewers in parallel on the exact staged snapshot:
+   - **Triad review** (`ouroboros/tools/review.py`): three models review the staged
+     diff against `docs/CHECKLISTS.md`.
+   - **Scope review** (`ouroboros/tools/scope_review.py`): one model reviews
+     completeness and cross-module consistency with full-repo context
+     (`build_full_repo_pack`).
+
+Both blocking reviewers always run concurrently via `concurrent.futures.ThreadPoolExecutor`
+(orchestrated in `ouroboros/tools/parallel_review.py`). The caller receives one
+combined verdict with all findings in a single round. Scope review still runs even
+when triad blocks, **except** when the fully assembled scope-review prompt exceeds
+the model context budget (`_SCOPE_BUDGET_TOKEN_LIMIT`), in which case scope review
+is skipped with a non-blocking advisory warning. `docs/CHECKLISTS.md` remains the
+single source of truth for review items; do not duplicate or fork checklist policy here.
 
 Preferred workflow for multi-file changes: `repo_write` all files first, then
-`repo_commit` to stage, review, and commit everything in one diff.
+`advisory_pre_review`, then `repo_commit` immediately on the final diff.
 
 The full pre-commit review checklists live in **`docs/CHECKLISTS.md`** —
 the single source of truth (Bible P5: DRY).
@@ -130,8 +148,9 @@ Before every commit, verify the following:
 - [ ] **Tool** (`{verb}_{noun}`): thin LLM-callable wrapper. Validates input, formats output.
 
 #### Module Size & Complexity
-- [ ] Module fits in one context window (~1000 lines max)
-- [ ] No method exceeds 150 lines
+- [ ] Module stays near one context window (~1000 lines target; 1250 hard gate unless explicitly grandfathered debt)
+- [ ] No method exceeds the practical target (150 lines) or the hard gate (250 lines)
+- [ ] Total Python function count stays under the current smoke hard gate (1100)
 - [ ] No function has more than 8 parameters
 - [ ] No gratuitous abstract layers (Bible P5)
 
@@ -157,8 +176,8 @@ Before every commit, verify the following:
 Ouroboros uses **glassmorphism** as its visual language. All interactive surfaces follow this pattern:
 
 ```css
-background: rgba(26, 21, 32, 0.75–0.88);
-backdrop-filter: blur(8–12px);
+background: rgba(26, 21, 32, 0.62–0.88);
+backdrop-filter: blur(8–16px);
 border: 1px solid rgba(255, 255, 255, 0.06–0.12);
 ```
 

@@ -143,7 +143,7 @@ class ToolContext:
     is_direct_chat: bool = False
 
     # Pre-commit review state (reset per-commit, carried across review rounds)
-    _review_advisory: List[str] = field(default_factory=list)
+    _review_advisory: List[Any] = field(default_factory=list)
     _review_iteration_count: int = 0
     _review_history: list = field(default_factory=list)
 

@@ -405,6 +405,17 @@ def _execute_with_timeout(
                 if is_reviewed_mutative:
                     # Reviewed mutative tools must not end with an ambiguous
                     # timeout — emit a progress event and keep waiting.
+                    try:
+                        from ouroboros.tools.commit_gate import _mark_review_attempt_late
+                        ctx = getattr(tools, "_ctx", None)
+                        if ctx is not None:
+                            _mark_review_attempt_late(
+                                ctx,
+                                soft_timeout_sec=timeout_sec,
+                                duration_sec=round(time.perf_counter() - started_at, 1),
+                            )
+                    except Exception:
+                        log.debug("Failed to mark reviewed attempt as late_result_pending", exc_info=True)
                     _emit_live_log(tools, {
                         "type": "tool_call_late",
                         "task_id": task_id,
@@ -441,19 +452,28 @@ def _execute_with_timeout(
                         # git.py _record_commit_attempt call will overwrite this state with
                         # the actual outcome (succeeded/blocked/failed) — which is correct.
                         try:
-                            from ouroboros.review_state import (
-                                CommitAttemptRecord, load_state, save_state, _utc_now,
-                            )
-                            st = load_state(drive_logs.parent)
-                            if st.last_commit_attempt and st.last_commit_attempt.status == "reviewing":
-                                st.last_commit_attempt.status = "failed"
-                                st.last_commit_attempt.block_reason = "infra_failure"
-                                st.last_commit_attempt.block_details = (
-                                    f"Hard ceiling timeout ({_REVIEWED_MUTATIVE_HARD_CEILING}s). "
-                                    "If the operation completes later, state will be updated.")
-                                st.last_commit_attempt.duration_sec = round(
-                                    time.perf_counter() - started_at, 1)
-                                save_state(drive_logs.parent, st)
+                            from ouroboros.tools.commit_gate import _record_commit_attempt
+                            ctx = getattr(tools, "_ctx", None)
+                            if ctx is not None:
+                                _record_commit_attempt(
+                                    ctx,
+                                    commit_message=str(getattr(ctx, "_current_review_commit_message", "") or ""),
+                                    status="failed",
+                                    block_reason="infra_failure",
+                                    block_details=(
+                                        f"Hard ceiling timeout ({_REVIEWED_MUTATIVE_HARD_CEILING}s). "
+                                        "The underlying operation may still complete later."
+                                    ),
+                                    duration_sec=round(time.perf_counter() - started_at, 1),
+                                    late_result_pending=True,
+                                    phase="late_hard_ceiling",
+                                    readiness_warnings=[
+                                        "Reviewed mutative tool exceeded the hard ceiling; late result may still arrive."
+                                    ],
+                                    degraded_reasons=[
+                                        f"hard_ceiling_timeout:{_REVIEWED_MUTATIVE_HARD_CEILING}"
+                                    ],
+                                )
                         except Exception:
                             pass
                         timeout_result = _make_timeout_result(

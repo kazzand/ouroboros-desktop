@@ -56,7 +56,7 @@
         claudeCliInstalled: false,
         claudeCliBusy: false,
         claudeCliStatus: '',
-        claudeCliStatusText: 'Claude Agent SDK is not installed.',
+        claudeCliStatusText: 'Checking Claude runtime...',
         claudeCliTone: 'muted',
         claudeCliError: '',
         claudeCliDismissed: false,
@@ -102,10 +102,12 @@
     function detectProviderProfile() {
         const hasOpenrouter = trim(state.openrouterKey).length >= 10;
         const hasOpenai = trim(state.openaiKey).length >= 10;
+        const hasCloudru = trim(state.cloudruKey).length >= 10;
         const hasAnthropic = trim(state.anthropicKey).length >= 10;
         if (hasOpenrouter) return 'openrouter';
-        if (hasOpenai && hasAnthropic) return 'direct-multi';
+        if ([hasOpenai, hasCloudru, hasAnthropic].filter(Boolean).length > 1) return 'direct-multi';
         if (hasOpenai) return 'openai';
+        if (hasCloudru) return 'cloudru';
         if (hasAnthropic) return 'anthropic';
         if (hasLocalModel()) return 'local';
         return 'openrouter';
@@ -119,8 +121,9 @@
 
     function profileLabel(profile) {
         if (profile === 'openai') return 'OpenAI';
+        if (profile === 'cloudru') return 'Cloud.ru Foundation Models';
         if (profile === 'anthropic') return 'Anthropic';
-        if (profile === 'direct-multi') return 'OpenAI + Anthropic';
+        if (profile === 'direct-multi') return 'Direct multi-provider';
         if (profile === 'local') return 'Local-first';
         return 'OpenRouter';
     }
@@ -191,16 +194,18 @@
     function validateProvidersStep() {
         const openrouterKey = trim(state.openrouterKey);
         const openaiKey = trim(state.openaiKey);
+        const cloudruKey = trim(state.cloudruKey);
         const anthropicKey = trim(state.anthropicKey);
         const localSource = trim(state.localSource);
         const localFilename = trim(state.localFilename);
         if (openrouterKey && openrouterKey.length < 10) return 'OpenRouter API key looks too short.';
         if (openaiKey && openaiKey.length < 10) return 'OpenAI API key looks too short.';
+        if (cloudruKey && cloudruKey.length < 10) return 'Cloud.ru Foundation Models API key looks too short.';
         if (anthropicKey && anthropicKey.length < 10) return 'Anthropic API key looks too short.';
-        if (!openrouterKey && !openaiKey && !anthropicKey && !localSource) {
+        if (!openrouterKey && !openaiKey && !cloudruKey && !anthropicKey && !localSource) {
             return 'Enter at least one remote key or a local model source before continuing.';
         }
-        if (localSource && !openrouterKey && !openaiKey && !anthropicKey && trim(state.localRoutingMode) === 'cloud') {
+        if (localSource && !openrouterKey && !openaiKey && !cloudruKey && !anthropicKey && trim(state.localRoutingMode) === 'cloud') {
             return 'Local-only setups must route at least one model to the local runtime.';
         }
         if (localSource && localSource.includes('/') && !isLocalFilesystemSource(localSource) && !localFilename) {
@@ -282,16 +287,17 @@
     }
 
     function applyClaudeCliStatus(payload = {}) {
+        const ready = Boolean(payload.ready);
         const installed = Boolean(payload.installed);
         const busy = Boolean(payload.busy);
         const errorText = trim(payload.error);
         const message = trim(payload.message)
-            || (installed ? 'Claude Agent SDK is installed.' : 'Claude Agent SDK is not installed.');
-        state.claudeCliInstalled = installed;
+            || (ready ? 'Claude runtime ready.' : (installed ? 'Claude runtime available but not ready.' : 'Claude runtime not available.'));
+        state.claudeCliInstalled = installed || ready;
         state.claudeCliBusy = busy;
-        state.claudeCliStatus = trim(payload.status) || (installed ? 'installed' : 'missing');
+        state.claudeCliStatus = trim(payload.status) || (ready ? 'ready' : (installed ? 'installed' : 'missing'));
         state.claudeCliError = errorText;
-        state.claudeCliTone = installed ? 'ok' : (errorText ? 'error' : 'muted');
+        state.claudeCliTone = ready ? 'ok' : (errorText ? 'error' : (installed ? 'muted' : 'error'));
         state.claudeCliStatusText = message;
         renderClaudeCliStatus();
     }
@@ -326,7 +332,7 @@
             state.claudeCliStatus = 'error';
             state.claudeCliError = String(error?.message || error || '');
             state.claudeCliTone = 'error';
-            state.claudeCliStatusText = `Claude Agent SDK status failed: ${state.claudeCliError}`;
+            state.claudeCliStatusText = `Claude runtime status failed: ${state.claudeCliError}`;
             renderClaudeCliStatus();
         }
     }
@@ -353,14 +359,14 @@
         const skipButton = document.getElementById('wizard-claude-skip');
         if (card) card.style.display = shouldShowClaudeCliCta() ? '' : 'none';
         if (statusEl) {
-            statusEl.textContent = state.claudeCliStatusText || 'Claude Agent SDK is not installed.';
+            statusEl.textContent = state.claudeCliStatusText || 'Checking Claude runtime...';
             statusEl.dataset.tone = state.claudeCliTone || 'muted';
         }
         if (installButton) {
-            installButton.disabled = state.claudeCliBusy || state.claudeCliInstalled;
+            installButton.disabled = state.claudeCliBusy;
             installButton.textContent = state.claudeCliBusy
-                ? 'Installing...'
-                : (state.claudeCliInstalled ? 'Installed' : 'Install Claude Agent SDK');
+                ? 'Repairing...'
+                : (state.claudeCliInstalled ? 'Runtime OK' : 'Repair Runtime');
         }
         if (skipButton) {
             skipButton.hidden = state.claudeCliBusy || state.claudeCliInstalled;
@@ -446,14 +452,14 @@
     function renderClaudeCliControls() {
         return `
             <div class="panel-card" id="wizard-claude-card" style="${shouldShowClaudeCliCta() ? '' : 'display:none;'}">
-                <h3>Claude Agent SDK</h3>
-                <p>Optional. Installs the <code>claude-agent-sdk</code> Python package for delegated code editing and advisory review.</p>
+                <h3>Claude Runtime</h3>
+                <p>Claude runtime powers delegated code editing and advisory review. It is managed automatically by the app.</p>
                 <div class="wizard-runtime-strip">
                     <button type="button" class="btn ghost" id="wizard-claude-install" ${state.claudeCliBusy || state.claudeCliInstalled ? 'disabled' : ''}>
-                        ${escapeHtml(state.claudeCliBusy ? 'Installing...' : (state.claudeCliInstalled ? 'Installed' : 'Install Claude Agent SDK'))}
+                        ${escapeHtml(state.claudeCliBusy ? 'Repairing...' : (state.claudeCliInstalled ? 'Runtime OK' : 'Repair Runtime'))}
                     </button>
                     <button type="button" class="btn secondary" id="wizard-claude-skip" ${state.claudeCliBusy || state.claudeCliInstalled ? 'hidden' : ''}>Skip for now</button>
-                    <span id="wizard-claude-status" class="wizard-runtime-status" data-tone="${escapeHtml(state.claudeCliTone || 'muted')}">${escapeHtml(state.claudeCliStatusText || 'Claude Agent SDK is not installed.')}</span>
+                    <span id="wizard-claude-status" class="wizard-runtime-status" data-tone="${escapeHtml(state.claudeCliTone || 'muted')}">${escapeHtml(state.claudeCliStatusText || 'Checking Claude runtime...')}</span>
                 </div>
             </div>
         `;
@@ -472,6 +478,7 @@
         ];
         if (trim(state.openrouterKey)) rows.splice(1, 0, ['OpenRouter', 'configured']);
         if (trim(state.openaiKey)) rows.splice(1, 0, ['OpenAI', 'configured']);
+        if (trim(state.cloudruKey)) rows.splice(1, 0, ['Cloud.ru', 'configured']);
         if (trim(state.anthropicKey)) rows.splice(1, 0, ['Anthropic', 'configured']);
         if (hasLocalModel()) {
             rows.splice(
@@ -501,9 +508,11 @@
                     trim(state.openrouterKey)
                         ? 'OpenRouter is present, so the next step keeps router-style defaults while still saving any extra direct keys you paste here.'
                         : selectedProfile === 'direct-multi'
-                            ? 'OpenAI and Anthropic are both present, so the next step keeps both direct-provider options visible.'
+                            ? 'Multiple direct providers are present, so the next step keeps your model values editable without forcing one provider family.'
                             : selectedProfile === 'openai'
                                 ? 'OpenAI is present, so the next step prefills direct openai:: model values.'
+                                : selectedProfile === 'cloudru'
+                                    ? 'Cloud.ru is present, so the next step prefills direct cloudru:: model values.'
                                 : selectedProfile === 'anthropic'
                                     ? 'Anthropic is present, so the next step prefills direct anthropic:: model values.'
                                     : 'No remote key is present yet, so local-only setup remains available below.'
@@ -525,6 +534,14 @@
                     </div>
                     <input id="openai-key" type="password" placeholder="sk-..." value="${escapeHtml(state.openaiKey)}">
                     <div class="field-note">Optional. If this is the only remote key, the next step prefills direct <code>openai::...</code> models.</div>
+                </div>
+                <div class="field">
+                    <div class="field-label-row">
+                        <label for="cloudru-key">Cloud.ru Foundation Models API Key</label>
+                        <button class="field-clear" data-clear="cloudru-key" type="button">Clear</button>
+                    </div>
+                    <input id="cloudru-key" type="password" placeholder="Cloud.ru API key" value="${escapeHtml(state.cloudruKey)}">
+                    <div class="field-note">Optional. If this is the only remote key, the next step prefills direct <code>cloudru::...</code> models.</div>
                 </div>
                 <div class="field">
                     <div class="field-label-row">
@@ -620,10 +637,12 @@
                 <p>${escapeHtml(
                     activeProviderProfile() === 'openai'
                         ? 'OpenAI-only setup detected. These defaults are explicit and official.'
+                        : activeProviderProfile() === 'cloudru'
+                            ? 'Cloud.ru-only setup detected. These defaults use explicit cloudru:: model IDs.'
                         : activeProviderProfile() === 'anthropic'
                             ? 'Anthropic-only setup detected. These defaults are explicit and official.'
-                            : activeProviderProfile() === 'direct-multi'
-                                ? 'OpenAI and Anthropic are both configured. Start here, then split models across direct providers if you want.'
+                        : activeProviderProfile() === 'direct-multi'
+                                ? 'Multiple direct providers are configured. Start here, then split model slots across them if you want.'
                                 : activeProviderProfile() === 'local'
                                     ? 'Local-only setup detected. Review the model values and local routing before launch.'
                                     : 'OpenRouter-style routing remains active. Unprefixed provider IDs like openai/gpt-5.4 or anthropic/claude-sonnet-4.6 continue to route through OpenRouter.'
@@ -651,7 +670,7 @@
                     <div class="field-note">Fallback and resilience path.</div>
                 </div>
             </div>
-            <div class="wizard-inline-note">Direct providers use <code>openai::gpt-5.4</code> and <code>anthropic::claude-sonnet-4-6</code>. Plain <code>openai/...</code> or <code>anthropic/...</code> stays router-style by design.</div>
+            <div class="wizard-inline-note">Direct providers use <code>openai::gpt-5.4</code>, <code>cloudru::GigaChat/GigaChat-2-Max</code>, and <code>anthropic::claude-sonnet-4-6</code>. Plain <code>openai/...</code> or <code>anthropic/...</code> stays router-style by design.</div>
             <datalist id="model-suggestions">${suggestionOptions}</datalist>
         `;
     }
@@ -789,6 +808,7 @@
                 const target = button.getAttribute('data-clear');
                 if (target === 'openrouter-key') state.openrouterKey = '';
                 if (target === 'openai-key') state.openaiKey = '';
+                if (target === 'cloudru-key') state.cloudruKey = '';
                 if (target === 'anthropic-key') state.anthropicKey = '';
                 if (target === 'local-preset') {
                     state.localPreset = '';
@@ -815,6 +835,7 @@
         }
         const openrouterInput = document.getElementById('openrouter-key');
         const openaiInput = document.getElementById('openai-key');
+        const cloudruInput = document.getElementById('cloudru-key');
         const anthropicInput = document.getElementById('anthropic-key');
         const localPreset = document.getElementById('local-preset');
         const localSource = document.getElementById('local-source');
@@ -825,6 +846,7 @@
 
         if (openrouterInput) openrouterInput.addEventListener('input', () => { state.openrouterKey = openrouterInput.value; state.error = ''; syncCurrentStepActionState(); });
         if (openaiInput) openaiInput.addEventListener('input', () => { state.openaiKey = openaiInput.value; state.error = ''; syncCurrentStepActionState(); });
+        if (cloudruInput) cloudruInput.addEventListener('input', () => { state.cloudruKey = cloudruInput.value; state.error = ''; syncCurrentStepActionState(); });
         if (anthropicInput) anthropicInput.addEventListener('input', () => {
             const wasConfigured = hasAnthropicKeyConfigured();
             state.anthropicKey = anthropicInput.value;
@@ -905,7 +927,7 @@
         document.getElementById('wizard-claude-install')?.addEventListener('click', async () => {
             state.claudeCliBusy = true;
             state.claudeCliTone = 'muted';
-            state.claudeCliStatusText = 'Starting Claude Agent SDK installation...';
+            state.claudeCliStatusText = 'Repairing Claude runtime...';
             renderClaudeCliStatus();
             try {
                 applyClaudeCliStatus(await claudeCliStartInstall());
@@ -915,7 +937,7 @@
                 state.claudeCliStatus = 'error';
                 state.claudeCliError = String(error?.message || error || '');
                 state.claudeCliTone = 'error';
-                state.claudeCliStatusText = `Claude Agent SDK install failed: ${state.claudeCliError}`;
+                state.claudeCliStatusText = `Claude runtime repair failed: ${state.claudeCliError}`;
                 renderClaudeCliStatus();
             }
         });
@@ -1008,6 +1030,7 @@
         const payload = {
             OPENROUTER_API_KEY: trim(state.openrouterKey),
             OPENAI_API_KEY: trim(state.openaiKey),
+            CLOUDRU_FOUNDATION_MODELS_API_KEY: trim(state.cloudruKey),
             ANTHROPIC_API_KEY: trim(state.anthropicKey),
             TOTAL_BUDGET: Number(state.totalBudget || 0),
             OUROBOROS_PER_TASK_COST_USD: Number(state.perTaskCostUsd || 0),

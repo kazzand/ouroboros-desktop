@@ -16,10 +16,40 @@ Verifies (Phase 5):
 """
 import importlib
 import inspect
+import json
 import os
 import sys
+import types
 
 import pytest
+
+
+def _ensure_sdk_mock():
+    """Install a lightweight mock of claude_agent_sdk only when the package is truly absent.
+
+    Uses importlib.util.find_spec to check real availability, not sys.modules presence,
+    so an installed but not-yet-imported SDK is never masked.
+    Required so gateway tests can run without the SDK installed.
+    """
+    import importlib.util as _ilu
+    try:
+        spec = _ilu.find_spec("claude_agent_sdk")
+        sdk_available = spec is not None
+    except (ValueError, ModuleNotFoundError):
+        # find_spec raises ValueError when an already-injected mock module has __spec__=None
+        sdk_available = "claude_agent_sdk" in sys.modules
+    if not sdk_available:
+        mock_sdk = types.ModuleType("claude_agent_sdk")
+        mock_sdk.ClaudeAgentOptions = type("ClaudeAgentOptions", (), {})
+        mock_sdk.ClaudeSDKClient = type("ClaudeSDKClient", (), {})
+        mock_sdk.HookMatcher = type("HookMatcher", (), {"__init__": lambda self, **kw: None})
+        mock_sdk.AssistantMessage = type("AssistantMessage", (), {})
+        mock_sdk.ResultMessage = type("ResultMessage", (), {})
+        mock_sdk.query = lambda **kw: None
+        sys.modules["claude_agent_sdk"] = mock_sdk
+
+
+_ensure_sdk_mock()
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -335,16 +365,19 @@ def test_advisory_freshness_check_exists_in_git():
 
 
 def test_advisory_gate_in_repo_commit_push():
-    """_repo_commit_push must call _check_advisory_freshness before unified review."""
+    """_repo_commit_push must call _check_advisory_freshness before _run_parallel_review."""
     git_mod = _get_git_module()
     source = inspect.getsource(git_mod._repo_commit_push)
     assert "_check_advisory_freshness" in source
-    # Advisory gate must come before unified review
+    # Advisory gate must come before parallel review (which contains unified review)
     advisory_pos = source.find("_check_advisory_freshness")
-    review_pos = source.find("_run_unified_review")
+    review_pos = source.find("_run_parallel_review")
     assert advisory_pos != -1, "_check_advisory_freshness not found in _repo_commit_push"
-    assert review_pos != -1, "_run_unified_review not found in _repo_commit_push"
-    assert advisory_pos < review_pos, "Advisory gate must precede unified review"
+    assert review_pos != -1, "_run_parallel_review not found in _repo_commit_push"
+    assert advisory_pos < review_pos, "Advisory gate must precede parallel review"
+    # Verify _run_parallel_review contains _run_unified_review
+    parallel_source = inspect.getsource(git_mod._run_parallel_review)
+    assert "_run_unified_review" in parallel_source
 
 
 def test_advisory_gate_in_repo_write_commit():
@@ -422,6 +455,103 @@ def test_advisory_freshness_passes_with_fresh_run(tmp_path):
     # Hash is stable — drive_root is outside repo_dir, no git status pollution
     result = git_mod._check_advisory_freshness(ctx, commit_message)
     assert result is None, f"Expected gate to pass but got: {result}"
+
+
+def test_advisory_freshness_is_repo_scoped(tmp_path):
+    """A fresh run for repo A must not satisfy repo B when hashes coincide."""
+    import subprocess
+    git_mod = _get_git_module()
+    rs_mod = _get_review_state_module()
+
+    repo_a = tmp_path / "repo-a"
+    repo_b = tmp_path / "repo-b"
+    repo_a.mkdir()
+    repo_b.mkdir()
+    drive_root = tmp_path / "drive"
+    drive_root.mkdir()
+    (drive_root / "state").mkdir()
+    (drive_root / "logs").mkdir()
+    subprocess.run(["git", "init"], cwd=str(repo_a), capture_output=True)
+    subprocess.run(["git", "init"], cwd=str(repo_b), capture_output=True)
+
+    commit_message = "same commit message"
+    snapshot_hash = rs_mod.compute_snapshot_hash(repo_a, commit_message)
+    state = rs_mod.AdvisoryReviewState()
+    state.add_run(rs_mod.AdvisoryRunRecord(
+        snapshot_hash=snapshot_hash,
+        commit_message=commit_message,
+        status="fresh",
+        ts="2026-01-01T00:00:00",
+        repo_key=rs_mod.make_repo_key(repo_a),
+    ))
+    rs_mod.save_state(drive_root, state)
+
+    class FakeCtx:
+        pass
+
+    ctx = FakeCtx()
+    ctx.repo_dir = repo_b
+    ctx.drive_root = drive_root
+    ctx.task_id = "repo-b-task"
+    ctx.drive_logs = lambda: drive_root / "logs"
+
+    result = git_mod._check_advisory_freshness(ctx, commit_message)
+    assert result is not None
+    assert "ADVISORY_PRE_REVIEW_REQUIRED" in result
+
+
+def test_open_obligations_are_repo_scoped(tmp_path):
+    """Open obligations in repo A must not block a fresh advisory in repo B."""
+    import subprocess
+    git_mod = _get_git_module()
+    rs_mod = _get_review_state_module()
+
+    repo_a = tmp_path / "repo-a"
+    repo_b = tmp_path / "repo-b"
+    repo_a.mkdir()
+    repo_b.mkdir()
+    drive_root = tmp_path / "drive"
+    drive_root.mkdir()
+    (drive_root / "state").mkdir()
+    (drive_root / "logs").mkdir()
+    subprocess.run(["git", "init"], cwd=str(repo_a), capture_output=True)
+    subprocess.run(["git", "init"], cwd=str(repo_b), capture_output=True)
+
+    commit_message = "shared message"
+    state = rs_mod.AdvisoryReviewState()
+    state.add_run(rs_mod.AdvisoryRunRecord(
+        snapshot_hash=rs_mod.compute_snapshot_hash(repo_b, commit_message),
+        commit_message=commit_message,
+        status="fresh",
+        ts="2026-01-01T00:00:00",
+        repo_key=rs_mod.make_repo_key(repo_b),
+    ))
+    state.add_blocking_attempt(rs_mod.CommitAttemptRecord(
+        ts="2026-01-01T00:05:00",
+        commit_message="repo a blocked",
+        status="blocked",
+        repo_key=rs_mod.make_repo_key(repo_a),
+        block_reason="critical_findings",
+        critical_findings=[{
+            "item": "tests_affected",
+            "verdict": "FAIL",
+            "severity": "critical",
+            "reason": "missing tests in repo a",
+        }],
+    ))
+    rs_mod.save_state(drive_root, state)
+
+    class FakeCtx:
+        pass
+
+    ctx = FakeCtx()
+    ctx.repo_dir = repo_b
+    ctx.drive_root = drive_root
+    ctx.task_id = "repo-b-task"
+    ctx.drive_logs = lambda: drive_root / "logs"
+
+    result = git_mod._check_advisory_freshness(ctx, commit_message)
+    assert result is None, f"Repo-scoped obligations should not block repo B: {result}"
 
 
 def test_snapshot_hash_stable_on_message_change(tmp_path):
@@ -549,9 +679,9 @@ def test_advisory_prompt_contains_blocking_history_when_blocked(tmp_path):
     (drive_root / "state").mkdir()
     subprocess.run(["git", "init"], cwd=str(repo_dir), capture_output=True)
 
-    # Create a blocked commit attempt with critical findings
+    # Create a blocked commit attempt with structured critical findings
     state = rs_mod.AdvisoryReviewState()
-    state.last_commit_attempt = rs_mod.CommitAttemptRecord(
+    attempt = rs_mod.CommitAttemptRecord(
         ts="2026-04-02T22:00:00",
         commit_message="test blocked commit",
         status="blocked",
@@ -562,7 +692,14 @@ def test_advisory_prompt_contains_blocking_history_when_blocked(tmp_path):
             "  CRITICAL: [gpt-5.4] tests_affected: No tests for new function\n"
             "  WARN: [opus] self_consistency: Minor doc drift"
         ),
+        critical_findings=[
+            {"verdict": "FAIL", "severity": "critical",
+             "item": "bible_compliance", "reason": "Missing BIBLE.md update", "model": "m"},
+            {"verdict": "FAIL", "severity": "critical",
+             "item": "tests_affected", "reason": "No tests for new function", "model": "m"},
+        ],
     )
+    state.add_blocking_attempt(attempt)
     rs_mod.save_state(drive_root, state)
 
     # Build the advisory prompt with drive_root
@@ -570,11 +707,11 @@ def test_advisory_prompt_contains_blocking_history_when_blocked(tmp_path):
         repo_dir, "test commit", drive_root=drive_root
     )
 
-    # Must contain blocking history section
-    assert "Previous blocking review findings" in prompt
+    # Must contain obligations section (new format)
+    assert "Unresolved obligations" in prompt
     assert "bible_compliance" in prompt
     assert "tests_affected" in prompt
-    assert "MUST catch these same issues" in prompt
+    assert "should explicitly address" in prompt
 
 
 def test_advisory_prompt_no_blocking_history_when_succeeded(tmp_path):
@@ -602,7 +739,7 @@ def test_advisory_prompt_no_blocking_history_when_succeeded(tmp_path):
         repo_dir, "test commit", drive_root=drive_root
     )
 
-    assert "Previous blocking review findings" not in prompt
+    assert "Unresolved obligations from previous blocking rounds" not in prompt
 
 
 def test_advisory_prompt_no_blocking_history_without_drive_root(tmp_path):
@@ -615,7 +752,7 @@ def test_advisory_prompt_no_blocking_history_without_drive_root(tmp_path):
     subprocess.run(["git", "init"], cwd=str(repo_dir), capture_output=True)
 
     prompt = adv_mod._build_advisory_prompt(repo_dir, "test commit")
-    assert "Previous blocking review findings" not in prompt
+    assert "Unresolved obligations from previous blocking rounds" not in prompt
 
 
 def test_advisory_prompt_strictness_formulations():
@@ -642,8 +779,13 @@ def test_advisory_prompt_strictness_formulations():
         assert "findings do not directly block" not in prompt.lower()
 
 
-def test_advisory_prompt_includes_architecture_doc():
-    """Advisory prompt must include ARCHITECTURE.md for self_consistency cross-checking."""
+def test_advisory_prompt_references_architecture_doc_via_read_tool():
+    """Advisory prompt must inline ARCHITECTURE.md content when available.
+
+    The v4.15.1 prompt restores ARCHITECTURE.md directly into the advisory context so
+    the reviewer always sees version-sync and module-structure facts without an extra
+    read step. The touched-file pack must avoid duplicating it separately.
+    """
     import subprocess
     adv_mod = _get_advisory_module()
 
@@ -660,9 +802,11 @@ def test_advisory_prompt_includes_architecture_doc():
 
         prompt = adv_mod._build_advisory_prompt(repo_dir, "test commit")
 
-        # ARCHITECTURE.md must be present
-        assert "ARCHITECTURE.md" in prompt
-        assert "Ouroboros v99.0.0" in prompt
+        assert "ARCHITECTURE.md" in prompt, "Prompt must include an ARCHITECTURE.md section"
+        assert "## ARCHITECTURE.md" in prompt, "Prompt should expose ARCHITECTURE.md as a first-class section"
+        assert "Ouroboros v99.0.0" in prompt, (
+            "ARCHITECTURE.md content should now be inlined for advisory review"
+        )
 
 
 def test_advisory_prompt_strictness_concrete_fix_requirement():
@@ -693,7 +837,7 @@ def test_blocking_history_section_with_scope_blocked(tmp_path):
     (drive_root / "state").mkdir(parents=True)
 
     state = rs_mod.AdvisoryReviewState()
-    state.last_commit_attempt = rs_mod.CommitAttemptRecord(
+    attempt = rs_mod.CommitAttemptRecord(
         ts="2026-04-02T22:00:00",
         commit_message="scope blocked commit",
         status="blocked",
@@ -702,11 +846,16 @@ def test_blocking_history_section_with_scope_blocked(tmp_path):
             "⚠️ SCOPE_REVIEW_BLOCKED: Missing touchpoint.\n"
             "CRITICAL: [opus] forgotten_touchpoints: ARCHITECTURE.md not updated"
         ),
+        critical_findings=[
+            {"verdict": "FAIL", "severity": "critical",
+             "item": "forgotten_touchpoints", "reason": "ARCHITECTURE.md not updated", "model": "opus"},
+        ],
     )
+    state.add_blocking_attempt(attempt)
     rs_mod.save_state(drive_root, state)
 
     section = adv_mod._build_blocking_history_section(drive_root)
-    assert "Previous blocking review findings" in section
+    assert "Unresolved obligations" in section
     assert "scope_blocked" in section
     assert "ARCHITECTURE.md" in section
 
@@ -817,3 +966,34 @@ def test_triad_review_reasoning_effort_is_medium_not_low():
     assert 'reasoning_effort="medium"' in source or 'reasoning_effort="high"' in source, (
         "_query_model must use reasoning_effort='medium' or 'high'"
     )
+
+
+def test_advisory_prompt_contains_obligation_targeting_instructions(tmp_path):
+    """_build_advisory_prompt must instruct the reviewer how to target a specific
+    obligation when multiple open obligations share the same checklist item.
+    Without this, a generic item-name PASS cannot disambiguate which obligation
+    was resolved, and the resolution logic leaves all same-item obligations open.
+    """
+    import tempfile
+    import pathlib as _pl
+    import subprocess as _sp
+    adv_mod = _get_advisory_module()
+
+    with tempfile.TemporaryDirectory() as d:
+        repo_dir = _pl.Path(d)
+        _sp.run(["git", "init"], cwd=str(repo_dir), capture_output=True)
+
+        prompt = adv_mod._build_advisory_prompt(repo_dir, "test commit")
+
+        # Must explain the (obligation <id>) suffix mechanism
+        assert "obligation" in prompt.lower(), (
+            "Prompt must mention 'obligation' targeting to allow per-finding resolution"
+        )
+        assert "(obligation" in prompt, (
+            "Prompt must show the '(obligation <id>)' suffix syntax for targeting specific obligations"
+        )
+        # Must warn that a generic PASS won't resolve all same-item obligations
+        assert "will NOT resolve" in prompt or "will not resolve" in prompt.lower(), (
+            "Prompt must warn that generic item-name PASS won't resolve all same-item obligations"
+        )
+

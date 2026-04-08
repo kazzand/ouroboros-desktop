@@ -1,10 +1,15 @@
 """Blocking scope reviewer for Ouroboros commit pipeline.
 
-Runs AFTER the triad diff review. Single-model (configurable via OUROBOROS_SCOPE_REVIEW_MODEL,
-fail-closed: timeout, parse error, API failure, or incomplete context all block.
+Runs IN PARALLEL with the triad diff review. Single-model (configurable via OUROBOROS_SCOPE_REVIEW_MODEL),
+fail-closed: timeout, parse error, API failure, or unreadable touched-file context all block.
 
-Role: completeness, forgotten touchpoints, cross-surface consistency,
-incomplete migrations, intent mismatch. NOT a duplicate of line-by-line diff review.
+Role: full-codebase reviewer with unique advantage — sees the ENTIRE repository,
+not just the diff. Finds cross-module bugs, broken implicit contracts, hidden
+regressions, and forgotten touchpoints that diff-only triad reviewers miss.
+
+The budget gate skips scope review (non-blocking warning) when the assembled
+scope-review prompt exceeds the model's safe input budget, preventing
+context-window errors.
 """
 
 from __future__ import annotations
@@ -14,24 +19,71 @@ import json
 import logging
 import os
 import pathlib
+from dataclasses import dataclass, field
 from typing import List, Optional
 
 from ouroboros.llm import LLMClient
 from ouroboros.tools.registry import ToolContext
 from ouroboros.tools.review_helpers import (
-    build_broader_repo_pack,
+    build_full_repo_pack,
     build_goal_section,
     build_head_snapshot_section,
     build_scope_section,
     build_touched_file_pack,
     load_checklist_section,
+    CRITICAL_FINDING_CALIBRATION,
 )
-from ouroboros.utils import run_cmd, utc_now_iso, append_jsonl
+from ouroboros.utils import run_cmd, utc_now_iso, append_jsonl, estimate_tokens
 
 log = logging.getLogger(__name__)
 
 _SCOPE_MODEL_DEFAULT = "anthropic/claude-opus-4.6"
 _SCOPE_MAX_TOKENS = 65536
+
+# Budget gate: if the fully assembled scope-review prompt exceeds this token
+# estimate, scope review is skipped with a non-blocking warning instead of
+# crashing or sending an oversized request. 800K gives a comfortable margin
+# under most 1M-token models.
+_SCOPE_BUDGET_TOKEN_LIMIT = 800_000
+
+
+@dataclass
+class ScopeReviewResult:
+    """Structured outcome from run_scope_review.
+
+    blocked: True if the commit is blocked.
+    block_message: Human-readable block string (non-empty when blocked=True).
+    critical_findings: List of structured finding dicts (same schema as triad review):
+        {"verdict": "FAIL", "severity": "critical", "item": <real_item_name>,
+         "reason": <str>, "model": "scope_reviewer"}
+    advisory_findings: Advisory (non-blocking) finding dicts.
+    """
+    blocked: bool = False
+    block_message: str = ""
+    critical_findings: List[dict] = field(default_factory=list)
+    advisory_findings: List[dict] = field(default_factory=list)
+
+
+@dataclass
+class _TouchedContextStatus:
+    """Structured status for touched-file context collection.
+
+    Using a dataclass avoids magic-string channels where real filenames could
+    accidentally collide with control sentinels (e.g. a file literally named
+    ``__empty__`` or ``__budget_exceeded_N__``).
+
+    status values:
+      "empty"          — no touched files could be read at all (fail-closed)
+      "omitted"        — some touched files are unreadable (fail-closed)
+      "budget_exceeded" — touched files OK but the assembled prompt exceeds token limit
+
+    Success (all files readable, prompt fits budget) is represented by
+    returning None from _compute_touched_status / _build_scope_prompt,
+    not by a separate "ok" status value.
+    """
+    status: str  # "empty" | "omitted" | "budget_exceeded"
+    omitted_paths: List[str] = field(default_factory=list)
+    token_count: int = 0  # estimated full prompt tokens when budget is exceeded
 
 
 def _get_scope_model() -> str:
@@ -134,23 +186,65 @@ def _add_deletion_placeholders(current_files_section: str, deleted_paths: list) 
     return joint
 
 
-def _compute_omission_signal(
+def _compute_touched_status(
     current_files_section: str,
     deleted_paths: list,
     omitted: list,
     current_paths: list,
-) -> Optional[str]:
-    """Return omission signal string for fail-closed check, or None if OK.
+) -> Optional["_TouchedContextStatus"]:
+    """Return a _TouchedContextStatus when touched-file context is incomplete, or None if OK.
 
     Deletion-only diffs are valid (HEAD snapshot provides context).
-    Block only when the current-files section is truly empty with no deletions,
-    or when readable non-deleted files couldn't be read.
+    Blocks only when the current-files section is truly empty with no deletions,
+    or when some readable non-deleted files couldn't be read.
+
+    Returns None when all touched files are accessible (proceed to budget check).
     """
     if not current_files_section.strip() and not deleted_paths:
-        return "__empty__"
+        return _TouchedContextStatus(status="empty")
     if omitted and current_paths:
-        return ", ".join(omitted)
+        return _TouchedContextStatus(status="omitted", omitted_paths=list(omitted))
     return None
+
+
+def _gather_scope_packs(repo_dir: pathlib.Path, all_touched_paths: list) -> str:
+    """Collect the wider repository pack for scope review.
+
+    Raises RuntimeError on git failure (fail-closed).
+    """
+    exclude_set = set(all_touched_paths)
+    try:
+        full_pack, _repo_omitted = build_full_repo_pack(repo_dir, exclude_paths=exclude_set)
+        repo_pack_section = full_pack
+        if _repo_omitted:
+            repo_pack_section += (
+                f"\n\n*(Omitted {len(_repo_omitted)} file(s): binary, vendored, sensitive, or >1MB)*\n"
+            )
+        if not repo_pack_section.strip():
+            repo_pack_section = "(no additional repo files)"
+    except RuntimeError:
+        raise
+    except Exception as exc:
+        raise RuntimeError(f"build_full_repo_pack error: {exc}") from exc
+
+    return repo_pack_section
+
+
+def _build_scope_history_section(scope_review_history: Optional[list]) -> str:
+    """Format prior scope review rounds into a prompt section."""
+    if not scope_review_history:
+        return ""
+    rounds = []
+    for i, entry in enumerate(scope_review_history, 1):
+        blocked = "BLOCKED" if entry.get("blocked") else "PASSED"
+        summary = entry.get("summary") or "(no summary)"
+        rounds.append(f"Round {i}: {blocked}\n{summary}")
+    return (
+        "\n## Prior scope review rounds (your previous findings for this commit)\n\n"
+        + "\n\n---\n".join(rounds)
+        + "\n\nAddress any previously raised issues. If the same issue persists, "
+        "mark it FAIL again with a reference to the prior round.\n"
+    )
 
 
 def _build_scope_prompt(
@@ -160,13 +254,19 @@ def _build_scope_prompt(
     scope: str = "",
     review_rebuttal: str = "",
     review_history: Optional[list] = None,
+    scope_review_history: Optional[list] = None,
 ) -> tuple:
     """Build the scope review prompt with full context packs.
 
-    Returns (prompt_str, touched_omitted) where touched_omitted is:
-    - None if all touched files were read successfully
-    - "__empty__" if no touched files could be read at all
-    - comma-separated string of omitted filenames otherwise
+    Returns (prompt_str_or_None, context_status_or_None) where:
+    - (prompt_str, None) — all OK, ready for LLM call
+    - (None, _TouchedContextStatus(status="empty"))   — no touched files (fail-closed)
+    - (None, _TouchedContextStatus(status="omitted"))  — some files unreadable (fail-closed)
+    - (None, _TouchedContextStatus(status="budget_exceeded", token_count=N)) — assembled prompt too large
+
+    Priority: touched-file omission ALWAYS takes precedence over the budget gate.
+    This ensures fail-closed guarantees for unreadable/binary touched files cannot
+    be silently downgraded to a non-blocking advisory by the budget gate.
     """
     try:
         scope_checklist = load_checklist_section("Intent / Scope Review Checklist")
@@ -176,66 +276,73 @@ def _build_scope_prompt(
     goal_section = build_goal_section(goal, scope, commit_message)
     scope_section = build_scope_section(scope)
     dev_guide = _load_dev_guide(repo_dir)
-
-    rebuttal_section = ""
-    if review_rebuttal:
-        rebuttal_section = (
-            "\n## Developer's rebuttal to previous review feedback\n\n"
-            f"{review_rebuttal}\n\n"
-            "Reconsider previous FAIL verdict(s) in light of this argument.\n"
-        )
-
+    critical_calibration = CRITICAL_FINDING_CALIBRATION  # noqa: F841 — used in f-string below
+    rebuttal_section = (
+        f"\n## Developer's rebuttal to previous review feedback\n\n{review_rebuttal}\n\n"
+        "Reconsider previous FAIL verdict(s) in light of this argument.\n"
+    ) if review_rebuttal else ""
     history_section = _build_review_history_section(review_history or [])
+    scope_history_section = _build_scope_history_section(scope_review_history)
 
-    # Get diff and changed files
     try:
         diff_text = run_cmd(["git", "diff", "--cached"], cwd=repo_dir)
     except Exception:
         diff_text = "(failed to get staged diff)"
 
-    # Parse staged changes using name-status for rename/delete/copy awareness
     touched_entries = _parse_staged_name_status(repo_dir)
     current_paths = [ep[1] for ep in touched_entries if ep[0] != "D"]
     deleted_paths = [ep[1] for ep in touched_entries if ep[0] == "D"]
     head_snapshot_paths = [ep[2] for ep in touched_entries]
     all_touched_paths = [ep[1] for ep in touched_entries]
 
-    # Build current-file pack (non-deleted files from working tree)
     current_files_section, omitted = build_touched_file_pack(repo_dir, current_paths)
     current_files_section = _add_deletion_placeholders(current_files_section, deleted_paths)
-
-    # Best-effort HEAD snapshots for before/after context
     head_snapshots_section = build_head_snapshot_section(repo_dir, head_snapshot_paths)
+    touched_status = _compute_touched_status(
+        current_files_section, deleted_paths, omitted, current_paths
+    )
 
-    # Compute fail-closed omission signal (deletion-only diffs are valid, not empty)
-    touched_omitted = _compute_omission_signal(current_files_section, deleted_paths, omitted, current_paths)
+    # Fail-closed check BEFORE the budget gate: touched-file omission always wins.
+    # If some touched files are unreadable/binary, return immediately with the
+    # structured status so _handle_prompt_signals can block the commit. This prevents
+    # the budget gate from silently downgrading an incomplete-context failure to an
+    # advisory skip.
+    if touched_status is not None:
+        return None, touched_status
 
-    # Build broader repo pack (best-effort)
-    exclude_set = set(all_touched_paths)
-    try:
-        repo_pack_section = build_broader_repo_pack(repo_dir, exclude_set)
-        if not repo_pack_section.strip():
-            repo_pack_section = "(no additional repo files)"
-    except Exception:
-        repo_pack_section = "(broader repo pack unavailable)"
+    repo_pack_section = _gather_scope_packs(repo_dir, all_touched_paths)
 
-    return f"""\
+    prompt = f"""\
 {_SCOPE_PREAMBLE}
 
 ## Your role
 
-You are the supplemental blocking scope reviewer for Ouroboros.
+You are the fourth reviewer — and the most powerful one.
 
-The diff reviewers already perform the strict line-by-line commit gate.
-Do NOT merely repeat generic diff review. Focus on completeness, forgotten
-touchpoints, stale adjacent surfaces, incomplete migrations, and intent mismatch.
+The triad diff reviewers see only the changed files and the diff hunks.
+**You see the ENTIRE codebase.** Use that advantage.
+
+Your primary mission: find problems that diff-only reviewers CANNOT see.
+Specifically:
+- **Cross-module bugs**: does this change break something in a different module
+  through implicit coupling, shared state, or assumed call patterns?
+- **Broken implicit contracts**: are there constants, data format assumptions,
+  expected function signatures, or protocol invariants relied upon by OTHER
+  modules that this change violates without updating those callers?
+- **Hidden regressions**: does a seemingly-unrelated module elsewhere in the
+  repo break because of this change in a non-obvious way?
+- **Forgotten touchpoints**: exact files/symbols that MUST also change but don't —
+  sibling tests, config values, adjacent prompts, parallel flows, doc sections.
+- **Completeness**: does the diff actually accomplish the stated intent end-to-end,
+  or does it only fix one surface while leaving the rest inconsistent?
+
+Diff-only reviewers handle line-by-line correctness. You handle whole-system coherence.
 
 ## Your task
 
-Judge whether the intended transformation is actually complete across:
-code, tests, prompts, docs, configs, architecture surfaces, and sibling flows.
-
-Use the richer context pack below.
+For each finding, you MUST name the exact file, symbol, test, prompt, doc,
+config, or sibling flow that proves the issue. Vague concerns without a
+concrete artifact reference must be marked advisory, not critical.
 
 ## Output format
 
@@ -252,6 +359,8 @@ Severity rules:
 - If you cannot point to an exact touchpoint, use "advisory".
 - Scope affects only unchanged legacy code outside the diff. The diff itself is always fully reviewable.
 
+{critical_calibration}
+
 {scope_checklist}
 {scope_section}
 
@@ -261,7 +370,7 @@ Severity rules:
 
 {dev_guide}
 
-{rebuttal_section}{history_section}
+{rebuttal_section}{history_section}{scope_history_section}
 
 ## Pre-change snapshots (HEAD versions — before this diff)
 
@@ -282,7 +391,14 @@ For new files (status A), the note says "File is new — no HEAD snapshot".
 ## Wider repository context
 
 {repo_pack_section}
-""", touched_omitted
+"""
+    prompt_tokens = estimate_tokens(prompt)
+    if prompt_tokens > _SCOPE_BUDGET_TOKEN_LIMIT:
+        return None, _TouchedContextStatus(
+            status="budget_exceeded",
+            token_count=prompt_tokens,
+        )
+    return prompt, None
 
 
 def _parse_scope_json(raw: str) -> Optional[list]:
@@ -334,43 +450,53 @@ def _emit_usage(ctx: ToolContext, model: str, usage: dict) -> None:
             pass
 
 
-def run_scope_review(
-    ctx: ToolContext,
-    commit_message: str,
-    goal: str = "",
-    scope: str = "",
-    review_rebuttal: str = "",
-    review_history: Optional[list] = None,
-) -> Optional[str]:
-    """Run the blocking scope review. Returns None if commit may proceed.
+def _classify_scope_findings(items: list) -> tuple:
+    """Classify raw JSON items into (critical_findings, advisory_findings) lists."""
+    critical_findings: List[dict] = []
+    advisory_findings: List[dict] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        verdict = str(item.get("verdict", "")).upper()
+        severity = str(item.get("severity", "advisory")).lower()
+        if verdict != "FAIL":
+            continue
+        finding = {
+            "verdict": "FAIL",
+            "severity": severity,
+            "item": str(item.get("item", "scope_review")),
+            "reason": str(item.get("reason", "")),
+            "model": "scope_reviewer",
+        }
+        if severity == "critical":
+            critical_findings.append(finding)
+        else:
+            advisory_findings.append(finding)
+    return critical_findings, advisory_findings
 
-    Returns a blocking error string if the scope review rejects the commit
-    or if the review fails to run (fail-closed).
+
+def _log_scope_result(ctx: ToolContext, critical_count: int, advisory_count: int) -> None:
+    """Append a scope_review_complete event to events.jsonl."""
+    try:
+        append_jsonl(ctx.drive_logs() / "events.jsonl", {
+            "ts": utc_now_iso(), "type": "scope_review_complete",
+            "task_id": getattr(ctx, "task_id", "") or "",
+            "model": _get_scope_model(),
+            "critical_count": critical_count,
+            "advisory_count": advisory_count,
+        })
+    except Exception:
+        pass
+
+
+def _call_scope_llm(prompt: str) -> tuple:
+    """Execute the scope review LLM call synchronously.
+
+    Returns (raw_text, usage, error_msg) — error_msg is non-empty on failure.
     """
-    repo_dir = pathlib.Path(ctx.repo_dir)
-
-    prompt, touched_omitted = _build_scope_prompt(
-        repo_dir, commit_message,
-        goal=goal, scope=scope,
-        review_rebuttal=review_rebuttal,
-        review_history=review_history,
-    )
-
-    # Fail-closed: incomplete touched-file context blocks immediately
-    if touched_omitted is not None:
-        if touched_omitted == "__empty__":
-            return (
-                "⚠️ SCOPE_REVIEW_BLOCKED: Could not read any touched files — "
-                "scope review requires direct file context. Commit blocked."
-            )
-        return (
-            f"⚠️ SCOPE_REVIEW_BLOCKED: Some touched file(s) could not be included "
-            f"in direct context (binary/oversize/unreadable): {touched_omitted}.\n"
-            "Scope review requires complete touched-file context. Commit blocked.\n"
-            "Possible fixes: reduce file size, commit binary files separately, "
-            "or ensure all touched files are readable text."
-        )
-
+    from ouroboros.config import resolve_effort as _resolve_effort
+    scope_model = _get_scope_model()
+    scope_effort = _resolve_effort("scope_review")
     messages = [
         {"role": "system", "content": prompt},
         {
@@ -378,11 +504,6 @@ def run_scope_review(
             "content": "Review the staged change and context above. Output ONLY a JSON array.",
         },
     ]
-
-    # Call the LLM
-    from ouroboros.config import resolve_effort as _resolve_effort
-    scope_model = _get_scope_model()
-    scope_effort = _resolve_effort("scope_review")
     llm = LLMClient()
     try:
         try:
@@ -410,78 +531,195 @@ def run_scope_review(
                 )
             )
     except Exception as e:
-        # Fail-closed: API failure blocks commit
-        return (
+        error_msg = (
             f"⚠️ SCOPE_REVIEW_BLOCKED: Scope reviewer ({scope_model}) failed — commit blocked.\n"
             f"Error: {type(e).__name__}: {e}\n"
             "Retry the commit, or check API key and network connectivity."
         )
+        return "", None, error_msg
+    return str(msg.get("content") or ""), usage, ""
 
+
+def _handle_prompt_signals(
+    prompt: Optional[str],
+    context_status: Optional["_TouchedContextStatus"],
+) -> Optional[ScopeReviewResult]:
+    """Translate context status into a ScopeReviewResult, or None to continue.
+
+    Returns a completed ScopeReviewResult if processing should stop (budget
+    exceeded or incomplete context), or None when the LLM call may proceed.
+
+    Uses a structured _TouchedContextStatus instead of magic strings to avoid
+    ambiguous collisions between real filenames and control sentinels.
+    """
+    if context_status is None:
+        return None  # proceed with LLM call
+
+    if context_status.status == "budget_exceeded":
+        token_count = context_status.token_count
+        log.warning(
+            "Scope review skipped: full scope-review prompt (~%d tokens) exceeds budget limit (%d). "
+            "Scope review downgraded to non-blocking warning.",
+            token_count, _SCOPE_BUDGET_TOKEN_LIMIT,
+        )
+        return ScopeReviewResult(
+            blocked=False,
+            block_message="",
+            advisory_findings=[{
+                "verdict": "FAIL",
+                "severity": "advisory",
+                "item": "scope_review_skipped",
+                "reason": (
+                    f"⚠️ SCOPE_REVIEW_SKIPPED: Full scope-review prompt (~{token_count} tokens) "
+                    f"exceeds model context budget ({_SCOPE_BUDGET_TOKEN_LIMIT} tokens). "
+                    "Scope review downgraded to non-blocking warning. "
+                    "Consider reducing codebase size or splitting the review."
+                ),
+                "model": "scope_reviewer",
+            }],
+        )
+
+    if context_status.status == "empty":
+        return ScopeReviewResult(
+            blocked=True,
+            block_message=(
+                "⚠️ SCOPE_REVIEW_BLOCKED: Could not read any touched files — "
+                "scope review requires direct file context. Commit blocked."
+            ),
+        )
+
+    if context_status.status == "omitted":
+        omitted_names = ", ".join(context_status.omitted_paths) or "(unknown)"
+        return ScopeReviewResult(
+            blocked=True,
+            block_message=(
+                f"⚠️ SCOPE_REVIEW_BLOCKED: Some touched file(s) could not be included "
+                f"in direct context (binary/oversize/unreadable): {omitted_names}.\n"
+                "Scope review requires complete touched-file context. Commit blocked.\n"
+                "Possible fixes: reduce file size, commit binary files separately, "
+                "or ensure all touched files are readable text."
+            ),
+        )
+
+    # Unknown status: fail-closed (block commit) to honour the documented contract.
+    # The module is explicitly fail-closed except for the explicit 'budget_exceeded' skip.
+    # Any unrecognised status is a programming error — block rather than silently proceeding.
+    log.error(
+        "Scope review: unrecognised _TouchedContextStatus.status=%r — blocking commit (fail-closed).",
+        context_status.status,
+    )
+    return ScopeReviewResult(
+        blocked=True,
+        block_message=(
+            f"⚠️ SCOPE_REVIEW_BLOCKED: Unexpected context status '{context_status.status}' — "
+            "commit blocked (fail-closed). This is a programming error; please report it."
+        ),
+    )
+
+
+def _build_block_message(
+    critical_findings: List[dict], advisory_findings: List[dict]
+) -> str:
+    """Format critical + advisory findings into a human-readable block message."""
+    crit_lines = "\n".join(
+        f"  CRITICAL: [scope:{f['item']}] {f['reason']}" for f in critical_findings
+    )
+    adv_section = ""
+    if advisory_findings:
+        adv_lines = "\n".join(
+            f"  WARN: [scope:{f['item']}] {f['reason']}" for f in advisory_findings
+        )
+        adv_section = f"\n\nAdvisory warnings:\n{adv_lines}"
+    return (
+        "⚠️ SCOPE_REVIEW_BLOCKED: Scope reviewer found critical completeness issues.\n"
+        "Commit has NOT been created. Fix the issues and try again.\n\n"
+        + crit_lines + adv_section
+    )
+
+
+def run_scope_review(
+    ctx: ToolContext,
+    commit_message: str,
+    goal: str = "",
+    scope: str = "",
+    review_rebuttal: str = "",
+    review_history: Optional[list] = None,
+    scope_review_history: Optional[list] = None,  # prior scope rounds for this commit
+) -> ScopeReviewResult:
+    """Run the blocking scope review. Returns a ScopeReviewResult.
+
+    result.blocked is True if the commit must not proceed.
+    result.critical_findings contains structured dicts with real checklist item
+    names (not synthetic strings), so callers can pass them directly into
+    obligation tracking without any string parsing.
+    """
+    repo_dir = pathlib.Path(ctx.repo_dir)
+
+    try:
+        prompt, context_status = _build_scope_prompt(
+            repo_dir, commit_message,
+            goal=goal, scope=scope,
+            review_rebuttal=review_rebuttal,
+            review_history=review_history,
+            scope_review_history=scope_review_history,
+        )
+    except RuntimeError as exc:
+        return ScopeReviewResult(
+            blocked=True,
+            block_message=(
+                "⚠️ SCOPE_REVIEW_BLOCKED: Failed to build review context — commit blocked.\n"
+                f"Error: {exc}\n"
+                "Ensure git is available and the repository is in a valid state."
+            ),
+        )
+
+    signal_result = _handle_prompt_signals(prompt, context_status)
+    if signal_result is not None:
+        return signal_result
+
+    raw_text, usage, llm_error = _call_scope_llm(prompt)  # type: ignore[arg-type]
+    if llm_error:
+        return ScopeReviewResult(blocked=True, block_message=llm_error)
     if usage:
-        _emit_usage(ctx, scope_model, usage or {})
+        _emit_usage(ctx, _get_scope_model(), usage or {})
 
-    raw_text = str(msg.get("content") or "")
     if not raw_text.strip():
-        return (
-            "⚠️ SCOPE_REVIEW_BLOCKED: Scope reviewer returned empty response — commit blocked.\n"
-            "Retry the commit."
+        return ScopeReviewResult(
+            blocked=True,
+            block_message=(
+                "⚠️ SCOPE_REVIEW_BLOCKED: Scope reviewer returned empty response — commit blocked.\n"
+                "Retry the commit."
+            ),
         )
 
     items = _parse_scope_json(raw_text)
     if items is None:
-        return (
-            "⚠️ SCOPE_REVIEW_BLOCKED: Could not parse scope reviewer output as JSON — commit blocked.\n"
-            f"Raw preview: {raw_text[:500]}"
+        return ScopeReviewResult(
+            blocked=True,
+            block_message=(
+                "⚠️ SCOPE_REVIEW_BLOCKED: Could not parse scope reviewer output as JSON — commit blocked.\n"
+                f"Raw preview: {raw_text[:500]}"
+            ),
         )
 
-    # Classify findings
-    critical_fails: List[str] = []
-    advisory_warns: List[str] = []
-    for item in items:
-        if not isinstance(item, dict):
-            continue
-        verdict = str(item.get("verdict", "")).upper()
-        severity = str(item.get("severity", "advisory")).lower()
-        if verdict != "FAIL":
-            continue
-        desc = f"[scope:{item.get('item', '?')}] {item.get('reason', '')}"
-        if severity == "critical":
-            critical_fails.append(desc)
-        else:
-            advisory_warns.append(desc)
+    critical_findings, advisory_findings = _classify_scope_findings(items)
+    _log_scope_result(ctx, len(critical_findings), len(advisory_findings))
 
-    # Log scope review result
-    try:
-        append_jsonl(ctx.drive_logs() / "events.jsonl", {
-            "ts": utc_now_iso(), "type": "scope_review_complete",
-            "task_id": getattr(ctx, "task_id", "") or "",
-            "model": scope_model,
-            "critical_count": len(critical_fails),
-            "advisory_count": len(advisory_warns),
-        })
-    except Exception:
-        pass
-
-    if critical_fails:
+    if critical_findings:
         from ouroboros import config as _cfg
-        review_enforcement = _cfg.get_review_enforcement()
-        if review_enforcement == "blocking":
-            return (
-                f"⚠️ SCOPE_REVIEW_BLOCKED: Scope reviewer found critical completeness issues.\n"
-                "Commit has NOT been created. Fix the issues and try again.\n\n"
-                + "\n".join(f"  CRITICAL: {f}" for f in critical_fails)
-                + ("\n\nAdvisory warnings:\n"
-                   + "\n".join(f"  WARN: {w}" for w in advisory_warns)
-                   if advisory_warns else "")
+        if _cfg.get_review_enforcement() == "blocking":
+            return ScopeReviewResult(
+                blocked=True,
+                block_message=_build_block_message(critical_findings, advisory_findings),
+                critical_findings=critical_findings,
+                advisory_findings=advisory_findings,
             )
-        # Advisory mode: log but don't block
-        for f in critical_fails:
-            ctx._review_advisory.append(f"SCOPE CRITICAL (advisory mode): {f}")
-        for w in advisory_warns:
-            ctx._review_advisory.append(f"SCOPE WARN: {w}")
+        # Advisory mode: findings returned but commit not blocked.
+        # (do NOT mutate ctx._review_advisory here; parallel_review.py aggregates
+        #  scope findings on the main thread after both futures complete to avoid races)
 
-    elif advisory_warns:
-        for w in advisory_warns:
-            ctx._review_advisory.append(f"SCOPE WARN: {w}")
-
-    return None  # commit may proceed
+    return ScopeReviewResult(
+        blocked=False,
+        critical_findings=critical_findings,
+        advisory_findings=advisory_findings,
+    )

@@ -40,36 +40,81 @@ def _codebase_health(ctx: ToolContext) -> str:
         lines.append(f"**Avg function length:** {metrics['avg_function_length']} lines")
         lines.append(f"**Max function length:** {metrics['max_function_length']} lines")
 
+        from ouroboros.review import (
+            MAX_FUNCTION_LINES,
+            MAX_MODULE_LINES,
+            MAX_TOTAL_FUNCTIONS,
+            TARGET_FUNCTION_LINES,
+            TARGET_MODULE_LINES,
+        )
+
         # Largest files
         if metrics.get("largest_files"):
             lines.append("\n### Largest Files")
             for path, size in metrics["largest_files"][:10]:
-                marker = " ⚠️ OVERSIZED" if size > 1000 else ""
+                if size > MAX_MODULE_LINES:
+                    marker = " 🚫 HARD LIMIT"
+                elif size > TARGET_MODULE_LINES:
+                    marker = " ⚠️ TARGET DRIFT"
+                else:
+                    marker = ""
                 lines.append(f"  {path}: {size} lines{marker}")
 
         # Longest functions
         if metrics.get("longest_functions"):
             lines.append("\n### Longest Functions")
             for path, start, length in metrics["longest_functions"][:10]:
-                marker = " ⚠️ OVERSIZED" if length > 150 else ""
+                if length > MAX_FUNCTION_LINES:
+                    marker = " 🚫 HARD LIMIT"
+                elif length > TARGET_FUNCTION_LINES:
+                    marker = " ⚠️ TARGET DRIFT"
+                else:
+                    marker = ""
                 lines.append(f"  {path}:{start}: {length} lines{marker}")
 
         # Warnings
+        target_drift_funcs = metrics.get("target_drift_functions", [])
+        target_drift_mods = metrics.get("target_drift_modules", [])
+        grandfathered_mods = metrics.get("grandfathered_modules", [])
         oversized_funcs = metrics.get("oversized_functions", [])
         oversized_mods = metrics.get("oversized_modules", [])
+        function_count_violation = int(metrics.get("total_functions") or 0) > MAX_TOTAL_FUNCTIONS
 
-        if oversized_funcs or oversized_mods:
-            lines.append("\n### ⚠️ Bible Violations (Principle 5: Minimalism)")
+        if (
+            oversized_funcs
+            or oversized_mods
+            or grandfathered_mods
+            or target_drift_funcs
+            or target_drift_mods
+            or function_count_violation
+        ):
+            lines.append("\n### Complexity Status (Principle 5: Minimalism)")
+            if function_count_violation:
+                lines.append(
+                    f"  Hard-limit total functions > {MAX_TOTAL_FUNCTIONS}: {metrics['total_functions']}"
+                )
             if oversized_funcs:
-                lines.append(f"  Functions > 150 lines: {len(oversized_funcs)}")
+                lines.append(f"  Hard-limit functions > {MAX_FUNCTION_LINES} lines: {len(oversized_funcs)}")
                 for path, start, length in oversized_funcs:
                     lines.append(f"    - {path}:{start} ({length} lines)")
+            elif target_drift_funcs:
+                lines.append(f"  Target-drift functions > {TARGET_FUNCTION_LINES} lines: {len(target_drift_funcs)}")
             if oversized_mods:
-                lines.append(f"  Modules > 1000 lines: {len(oversized_mods)}")
+                lines.append(f"  Hard-limit modules > {MAX_MODULE_LINES} lines: {len(oversized_mods)}")
                 for path, size in oversized_mods:
                     lines.append(f"    - {path} ({size} lines)")
+            if grandfathered_mods:
+                lines.append(f"  Grandfathered modules still above {MAX_MODULE_LINES} lines: {len(grandfathered_mods)}")
+                for path, size in grandfathered_mods:
+                    lines.append(f"    - {path} ({size} lines)")
+            elif target_drift_mods:
+                lines.append(f"  Target-drift modules > {TARGET_MODULE_LINES} lines: {len(target_drift_mods)}")
         else:
-            lines.append("\n✅ No Bible violations detected (all functions < 150 lines, all modules < 1000 lines)")
+            lines.append(
+                "\n✅ No hard P5 limit violations detected "
+                f"(all functions <= {MAX_FUNCTION_LINES} lines, total function count <= {MAX_TOTAL_FUNCTIONS}, "
+                f"all non-grandfathered modules <= {MAX_MODULE_LINES} lines)"
+            )
 
         return "\n".join(lines)
 

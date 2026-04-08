@@ -489,6 +489,7 @@ async def collect_evolution_metrics(repo_dir: str, data_dir: str | None = None) 
         loop.run_in_executor(None, _metrics_for_tag, tag, date)
         for tag, date in tags
     ])
+
     points = [r for r in results if r is not None]
 
     # Override latest tag's memory with live file sizes (same formula as historical: identity + scratchpad)
@@ -509,3 +510,32 @@ async def collect_evolution_metrics(repo_dir: str, data_dir: str | None = None) 
             points[-1]["memory_kb"] = round(identity_kb + scratchpad_kb, 2)
 
     return points
+
+
+# ---------------------------------------------------------------------------
+# Review-artifact preview helper (DEVELOPMENT.md item 2(f) compliance)
+# ---------------------------------------------------------------------------
+
+def truncate_review_artifact(text: str | None, limit: int = 4000) -> str:
+    """Return text or a capped prefix with an explicit OMISSION NOTE.
+
+    Complies with DEVELOPMENT.md item 2(f): review outputs and cognitive
+    artifacts must not be silently clipped with raw [:N] slicing.  Use this
+    helper everywhere a review-output string needs a display-safe preview.
+    An omission note including the original length is appended so nothing is
+    silently lost.
+
+    Accepts None (e.g. JSON null from a reviewer) and coerces it to "".
+    """
+    text = str(text or "")
+    if len(text) <= limit:
+        return text
+    return text[:limit] + f"\n⚠️ OMISSION NOTE: truncated at {limit} chars; original length {len(text)}"
+
+
+def truncate_review_reason(text: str, limit: int = 120) -> str:
+    """Compact preview of a single reviewer reason/finding string.
+
+    Uses explicit omission note rather than silent clipping.
+    """
+    return truncate_review_artifact(text, limit=limit)

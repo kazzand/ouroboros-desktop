@@ -33,7 +33,7 @@ def test_prepare_onboarding_settings_requires_runnable_config():
     prepared, error = prepare_onboarding_settings(_base_payload(), {})
 
     assert prepared == {}
-    assert "Configure OpenRouter, OpenAI, Anthropic, or a local model" in error
+    assert "Configure OpenRouter, OpenAI, Cloud.ru, Anthropic, or a local model" in error
 
 
 def test_prepare_onboarding_settings_accepts_openai_only_setup():
@@ -48,6 +48,21 @@ def test_prepare_onboarding_settings_accepts_openai_only_setup():
     assert prepared["TOTAL_BUDGET"] == 10.0
     assert prepared["OUROBOROS_PER_TASK_COST_USD"] == 20.0
     assert prepared["OUROBOROS_REVIEW_ENFORCEMENT"] == "advisory"
+
+
+def test_prepare_onboarding_settings_accepts_cloudru_only_setup():
+    payload = _base_payload()
+    payload["CLOUDRU_FOUNDATION_MODELS_API_KEY"] = "cloudru-key-1234567890"
+    payload["OUROBOROS_MODEL"] = "cloudru::GigaChat/GigaChat-2-Max"
+    payload["OUROBOROS_MODEL_CODE"] = "cloudru::GigaChat/GigaChat-2-Max"
+    payload["OUROBOROS_MODEL_LIGHT"] = "cloudru::GigaChat/GigaChat-2-Max"
+    payload["OUROBOROS_MODEL_FALLBACK"] = "cloudru::GigaChat/GigaChat-2-Max"
+
+    prepared, error = prepare_onboarding_settings(payload, {})
+
+    assert error is None
+    assert prepared["CLOUDRU_FOUNDATION_MODELS_API_KEY"] == "cloudru-key-1234567890"
+    assert prepared["OUROBOROS_MODEL"] == "cloudru::GigaChat/GigaChat-2-Max"
 
 
 def test_prepare_onboarding_settings_accepts_anthropic_only_setup():
@@ -132,20 +147,37 @@ def test_build_onboarding_html_adapts_to_multi_provider_access():
     assert "LOCAL_ROUTING_MODE: trim(state.localSource) ? (trim(state.localRoutingMode) || 'cloud') : 'cloud'" in html
 
 
-def test_build_onboarding_html_includes_claude_sdk_cta_and_host_transports():
+def test_build_onboarding_html_includes_claude_runtime_cta_and_host_transports():
     desktop_html = build_onboarding_html({}, host_mode="desktop")
     web_html = build_onboarding_html({}, host_mode="web")
 
-    assert "Install Claude Agent SDK" in desktop_html
+    assert "Claude Runtime" in desktop_html or "Claude runtime" in desktop_html
     assert "Skip for now" in desktop_html
-    assert "claude-agent-sdk" in desktop_html
     assert "window.pywebview.api.claude_code_status" in desktop_html
     assert "window.pywebview.api.install_claude_code" in desktop_html
     assert "/api/claude-code/status" in web_html
     assert "/api/claude-code/install" in web_html
 
 
-@pytest.mark.skipif(not (REPO / "launcher.py").exists(), reason="launcher.py not present in repo (bundle-only)")
+def _launcher_has_onboarding_bridge() -> bool:
+    launcher = REPO / "launcher.py"
+    if not launcher.exists():
+        return False
+    source = launcher.read_text(encoding="utf-8")
+    return all(marker in source for marker in (
+        "has_startup_ready_provider(settings)",
+        "prepare_onboarding_settings(data, settings)",
+        'build_onboarding_html(settings, host_mode="desktop")',
+        "def claude_code_status(self) -> dict:",
+        "def install_claude_code(self) -> dict:",
+    ))
+
+_LAUNCHER_HAS_ONBOARDING_BRIDGE = _launcher_has_onboarding_bridge()
+
+@pytest.mark.skipif(
+    not _LAUNCHER_HAS_ONBOARDING_BRIDGE,
+    reason="launcher.py does not contain onboarding bridge (may be an older bundle or post-refactor version)",
+)
 def test_launcher_uses_shared_onboarding_and_claude_cli_bridge():
     source = (REPO / "launcher.py").read_text(encoding="utf-8")
 

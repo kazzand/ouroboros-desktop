@@ -431,8 +431,15 @@ class TestReviewEnforcementModes:
         )
         result = review._run_unified_review(ctx, "test commit", repo_dir=ctx.repo_dir)
         assert result is None
-        assert any("critical review findings did not block commit" in w.lower() for w in ctx._review_advisory)
-        assert any("broken" in w for w in ctx._review_advisory)
+        assert any(
+            isinstance(w, str) and "critical review findings did not block commit" in w.lower()
+            for w in ctx._review_advisory
+        )
+        assert any(
+            (isinstance(w, dict) and w.get("reason") == "broken")
+            or (isinstance(w, str) and "broken" in w)
+            for w in ctx._review_advisory
+        )
         assert ctx._review_iteration_count == 0
 
     def test_advisory_mode_downgrades_quorum_failure(self, tmp_path, monkeypatch):
@@ -471,7 +478,10 @@ class TestReviewEnforcementModes:
         )
         result = review._run_unified_review(ctx, "version update", repo_dir=ctx.repo_dir)
         assert result is None
-        assert any("preflight warning did not block commit" in w.lower() for w in ctx._review_advisory)
+        assert any(
+            isinstance(w, str) and "preflight warning did not block commit" in w.lower()
+            for w in ctx._review_advisory
+        )
 
     def test_new_module_triggers_architecture_preflight_through_run_unified_review(self, tmp_path, monkeypatch):
         """Check 4 (architecture_doc) fires through the real _run_unified_review caller.
@@ -690,12 +700,16 @@ class TestReviewInCommitPipeline:
     def test_repo_commit_calls_unified_review(self):
         git_mod = _get_git_module()
         source = inspect.getsource(git_mod._repo_commit_push)
-        assert "_run_unified_review" in source
+        assert "_run_parallel_review" in source
+        parallel_source = inspect.getsource(git_mod._run_parallel_review)
+        assert "_run_unified_review" in parallel_source
 
     def test_repo_write_commit_calls_unified_review(self):
         git_mod = _get_git_module()
         source = inspect.getsource(git_mod._repo_write_commit)
-        assert "_run_unified_review" in source
+        assert "_run_parallel_review" in source
+        parallel_source = inspect.getsource(git_mod._run_parallel_review)
+        assert "_run_unified_review" in parallel_source
 
     def test_blocked_review_unstages(self):
         """When review blocks, git reset HEAD must be called."""

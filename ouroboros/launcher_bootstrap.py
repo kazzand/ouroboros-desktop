@@ -332,11 +332,57 @@ def install_deps(context: BootstrapContext) -> None:
         context.log.warning("Dependency install/update failed: %s", exc)
 
 
+_CLAUDE_SDK_BASELINE = "claude-agent-sdk>=0.1.50"
+
+
+def verify_claude_runtime(context: BootstrapContext) -> bool:
+    """Ensure the Claude runtime baseline is present in the app-managed interpreter.
+
+    Checks that ``claude-agent-sdk`` is importable and its bundled CLI binary
+    exists. If not, attempts a repair install. Returns True on success.
+    """
+    import sys as _sys
+    cli_name = "claude.exe" if _sys.platform == "win32" else "claude"
+    try:
+        result = context.hidden_run(
+            [context.embedded_python, "-c",
+             "import claude_agent_sdk; "
+             "from pathlib import Path; "
+             f"cli = Path(claude_agent_sdk.__file__).parent / '_bundled' / '{cli_name}'; "
+             "print('ok' if cli.exists() else 'no_cli')"],
+            capture_output=True, text=True, timeout=30,
+        )
+        stdout = (result.stdout or "").strip()
+        if result.returncode == 0 and stdout == "ok":
+            context.log.info("Claude runtime verified: SDK importable, bundled CLI present.")
+            return True
+        context.log.warning("Claude runtime check: %s (exit %d)", stdout, result.returncode)
+    except Exception as exc:
+        context.log.warning("Claude runtime probe failed: %s", exc)
+
+    context.log.info("Repairing Claude runtime baseline...")
+    try:
+        repair = context.hidden_run(
+            [context.embedded_python, "-m", "pip", "install", "--upgrade", _CLAUDE_SDK_BASELINE],
+            timeout=120,
+            capture_output=True,
+        )
+        if repair.returncode != 0:
+            context.log.warning("Claude runtime repair pip returned exit %d", repair.returncode)
+            return False
+        context.log.info("Claude runtime repair install complete.")
+        return True
+    except Exception as exc:
+        context.log.warning("Claude runtime repair failed: %s", exc)
+        return False
+
+
 def bootstrap_repo(context: BootstrapContext) -> None:
     """Copy the bundled source tree to REPO_DIR on first run and upgrade safely later."""
     context.data_dir.mkdir(parents=True, exist_ok=True)
     if context.repo_dir.exists() and (context.repo_dir / "server.py").exists():
         sync_existing_repo_from_bundle(context)
+        verify_claude_runtime(context)
         return
 
     needs_full_bootstrap = not context.repo_dir.exists()
@@ -381,4 +427,5 @@ def bootstrap_repo(context: BootstrapContext) -> None:
 
     _migrate_old_settings(context)
     install_deps(context)
+    verify_claude_runtime(context)
     context.log.info("Bootstrap complete.")

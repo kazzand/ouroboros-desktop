@@ -24,6 +24,20 @@ import threading
 import time
 from typing import Optional
 
+from ouroboros.compat import (
+    IS_WINDOWS,
+    IS_MACOS,
+    embedded_python_candidates,
+    kill_process_on_port,
+    force_kill_pid,
+    git_install_hint,
+    create_kill_on_close_job,
+    assign_pid_to_job,
+    terminate_job,
+    close_job,
+    resume_process,
+)
+
 # ---------------------------------------------------------------------------
 # Paths (single source of truth: ouroboros.config)
 # ---------------------------------------------------------------------------
@@ -58,22 +72,36 @@ log = logging.getLogger("launcher")
 APP_VERSION = read_version()
 
 
+# Windows: prevent console windows when spawning subprocesses from the GUI app.
+_SUBPROCESS_NO_WINDOW = (
+    getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000) if IS_WINDOWS else 0
+)
+
+
+def _hidden_run(command, **kwargs):
+    if _SUBPROCESS_NO_WINDOW:
+        kwargs = dict(kwargs)
+        kwargs["creationflags"] = kwargs.get("creationflags", 0) | _SUBPROCESS_NO_WINDOW
+    return subprocess.run(command, **kwargs)
+
+
+def _hidden_popen(command, **kwargs):
+    if _SUBPROCESS_NO_WINDOW:
+        kwargs = dict(kwargs)
+        kwargs["creationflags"] = kwargs.get("creationflags", 0) | _SUBPROCESS_NO_WINDOW
+    return subprocess.Popen(command, **kwargs)
+
+
 # ---------------------------------------------------------------------------
 # Embedded Python
 # ---------------------------------------------------------------------------
 def _find_embedded_python() -> str:
     """Locate the embedded python-build-standalone interpreter."""
     if getattr(sys, "frozen", False):
-        candidates = [
-            pathlib.Path(sys._MEIPASS) / "python-standalone" / "bin" / "python3",
-            pathlib.Path(sys._MEIPASS) / "python-standalone" / "bin" / "python",
-        ]
+        base = pathlib.Path(sys._MEIPASS)
     else:
-        candidates = [
-            pathlib.Path(__file__).parent / "python-standalone" / "bin" / "python3",
-            pathlib.Path(__file__).parent / "python-standalone" / "bin" / "python",
-        ]
-    for p in candidates:
+        base = pathlib.Path(__file__).parent
+    for p in embedded_python_candidates(base):
         if p.exists():
             return str(p)
     return sys.executable
@@ -83,10 +111,119 @@ EMBEDDED_PYTHON = _find_embedded_python()
 
 
 # ---------------------------------------------------------------------------
+# Windows UI runtime
+# ---------------------------------------------------------------------------
+_windows_dll_dir_handles: list = []
+
+
+def _show_windows_message(title: str, message: str) -> None:
+    if not IS_WINDOWS:
+        return
+    try:
+        import ctypes
+        ctypes.windll.user32.MessageBoxW(None, message, title, 0x10)
+    except Exception:
+        pass
+
+
+def _prepare_windows_webview_runtime() -> tuple[bool, str]:
+    """Prepare pythonnet/pywebview runtime before importing webview on Windows."""
+    if not IS_WINDOWS:
+        return True, ""
+
+    base_dir = pathlib.Path(getattr(sys, "_MEIPASS", pathlib.Path(sys.executable).parent))
+    exe_dir = pathlib.Path(sys.executable).parent
+    runtime_dir = base_dir / "pythonnet" / "runtime"
+    webview_lib_dir = base_dir / "webview" / "lib"
+    py_dll_name = f"python{sys.version_info[0]}{sys.version_info[1]}.dll"
+
+    def _unblock_file(path: pathlib.Path) -> None:
+        try:
+            os.remove(f"{path}:Zone.Identifier")
+        except OSError:
+            pass
+
+    def _unblock_tree(root: pathlib.Path) -> None:
+        if not root.is_dir():
+            return
+        for child in root.rglob("*"):
+            if child.is_file() and child.suffix.lower() in {".dll", ".exe", ".pyd"}:
+                _unblock_file(child)
+
+    py_dll_candidates = [
+        base_dir / py_dll_name,
+        exe_dir / py_dll_name,
+    ]
+    for root, _dirs, files in os.walk(base_dir):
+        if py_dll_name in files:
+            py_dll_candidates.append(pathlib.Path(root) / py_dll_name)
+            if len(py_dll_candidates) >= 6:
+                break
+
+    py_dll_path = next((p for p in py_dll_candidates if p.is_file()), None)
+    runtime_dll_path = runtime_dir / "Python.Runtime.dll"
+    if not runtime_dll_path.is_file():
+        for root, _dirs, files in os.walk(base_dir):
+            if "Python.Runtime.dll" in files:
+                runtime_dll_path = pathlib.Path(root) / "Python.Runtime.dll"
+                break
+
+    if py_dll_path is None:
+        return False, f"Bundled {py_dll_name} was not found."
+    if not runtime_dll_path.is_file():
+        return False, "Bundled Python.Runtime.dll was not found."
+
+    _unblock_file(py_dll_path)
+    _unblock_file(runtime_dll_path)
+    _unblock_tree(runtime_dll_path.parent)
+    _unblock_tree(webview_lib_dir)
+
+    os.environ["PYTHONNET_RUNTIME"] = "netfx"
+    os.environ["PYTHONNET_PYDLL"] = str(py_dll_path)
+
+    search_dirs = []
+    for candidate in (base_dir, exe_dir, runtime_dir, runtime_dll_path.parent, py_dll_path.parent, webview_lib_dir):
+        candidate_str = str(candidate)
+        if candidate.is_dir() and candidate_str not in search_dirs:
+            search_dirs.append(candidate_str)
+
+    current_path_parts = os.environ.get("PATH", "").split(os.pathsep) if os.environ.get("PATH") else []
+    os.environ["PATH"] = os.pathsep.join(search_dirs + [p for p in current_path_parts if p and p not in search_dirs])
+
+    if hasattr(os, "add_dll_directory"):
+        global _windows_dll_dir_handles
+        for candidate in search_dirs:
+            try:
+                _windows_dll_dir_handles.append(os.add_dll_directory(candidate))
+            except (FileNotFoundError, OSError):
+                pass
+
+    try:
+        from clr_loader import get_netfx
+        from pythonnet import set_runtime
+        set_runtime(get_netfx())
+    except Exception as exc:
+        return False, f"Windows .NET runtime init failed: {exc}"
+
+    return True, ""
+
+
+# ---------------------------------------------------------------------------
 # Bootstrap
 # ---------------------------------------------------------------------------
 def check_git() -> bool:
-    return shutil.which("git") is not None
+    if shutil.which("git") is not None:
+        return True
+    if IS_WINDOWS:
+        for _candidate in (
+            os.path.join(os.environ.get("ProgramFiles", r"C:\Program Files"), "Git", "cmd", "git.exe"),
+            os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs", "Git", "cmd", "git.exe"),
+        ):
+            if os.path.isfile(_candidate):
+                git_dir = os.path.dirname(_candidate)
+                os.environ["PATH"] = git_dir + ";" + os.environ.get("PATH", "")
+                return True
+    return False
 
 
 def _sync_core_files() -> None:
@@ -315,13 +452,14 @@ def _install_deps() -> None:
 # Agent process management
 # ---------------------------------------------------------------------------
 _agent_proc: Optional[subprocess.Popen] = None
+_agent_job = None
 _agent_lock = threading.Lock()
 _shutdown_event = threading.Event()
 
 
 def start_agent(port: int = AGENT_SERVER_PORT) -> subprocess.Popen:
     """Start the agent server.py as a subprocess."""
-    global _agent_proc
+    global _agent_proc, _agent_job
     env = os.environ.copy()
     env["PYTHONPATH"] = str(REPO_DIR)
     env["OUROBOROS_SERVER_PORT"] = str(port)
@@ -339,7 +477,7 @@ def start_agent(port: int = AGENT_SERVER_PORT) -> subprocess.Popen:
     server_py = REPO_DIR / "server.py"
     log.info("Starting agent: %s %s (port=%d)", EMBEDDED_PYTHON, server_py, port)
 
-    proc = subprocess.Popen(
+    proc = _hidden_popen(
         [EMBEDDED_PYTHON, str(server_py)],
         cwd=str(REPO_DIR),
         env=env,
@@ -347,6 +485,20 @@ def start_agent(port: int = AGENT_SERVER_PORT) -> subprocess.Popen:
         stderr=subprocess.STDOUT,
     )
     _agent_proc = proc
+    _agent_job = None
+
+    if IS_WINDOWS:
+        try:
+            job = create_kill_on_close_job()
+            if job is not None and assign_pid_to_job(job, proc.pid):
+                _agent_job = job
+            elif job is not None:
+                close_job(job)
+            resume_process(proc.pid)
+        except Exception:
+            if _agent_job is not None:
+                close_job(_agent_job)
+                _agent_job = None
 
     # Stream agent stdout to log file in background
     def _stream_output():
@@ -366,22 +518,28 @@ def start_agent(port: int = AGENT_SERVER_PORT) -> subprocess.Popen:
 
 def stop_agent() -> None:
     """Gracefully stop the agent process."""
-    global _agent_proc
+    global _agent_proc, _agent_job
     with _agent_lock:
         if _agent_proc is None:
             return
         proc = _agent_proc
+        job = _agent_job
+        _agent_proc = None
+        _agent_job = None
     log.info("Stopping agent (pid=%s)...", proc.pid)
     try:
         proc.terminate()
         proc.wait(timeout=10)
     except subprocess.TimeoutExpired:
-        proc.kill()
+        if IS_WINDOWS and job is not None:
+            terminate_job(job)
+        else:
+            proc.kill()
         proc.wait(timeout=5)
     except Exception:
         pass
-    with _agent_lock:
-        _agent_proc = None
+    if IS_WINDOWS and job is not None:
+        close_job(job)
 
 
 def _read_port_file() -> int:
@@ -396,6 +554,9 @@ def _read_port_file() -> int:
 
 def _kill_stale_on_port(port: int) -> None:
     """Kill any process listening on the given port (cleanup from previous runs)."""
+    if IS_WINDOWS:
+        kill_process_on_port(port)
+        return
     try:
         result = subprocess.run(
             ["lsof", "-ti", f"tcp:{port}"],
@@ -450,6 +611,7 @@ _webview_window = None  # set by main(), used by lifecycle loop
 
 def agent_lifecycle_loop(port: int = AGENT_SERVER_PORT) -> None:
     """Main loop: start agent, monitor, restart on exit code 42 or crash."""
+    global _agent_job
     crash_times: list = []
 
     # Kill anything left over from a previous launcher session
@@ -475,6 +637,9 @@ def agent_lifecycle_loop(port: int = AGENT_SERVER_PORT) -> None:
 
         with _agent_lock:
             _agent_proc = None
+            if IS_WINDOWS and _agent_job is not None:
+                close_job(_agent_job)
+                _agent_job = None
 
         if _shutdown_event.is_set():
             break
@@ -486,10 +651,13 @@ def agent_lifecycle_loop(port: int = AGENT_SERVER_PORT) -> None:
             _kill_stale_on_port(port)
             import multiprocessing as _mp
             for child in _mp.active_children():
-                try:
-                    os.kill(child.pid, 9)
-                except (ProcessLookupError, PermissionError, OSError):
-                    pass
+                if IS_WINDOWS:
+                    force_kill_pid(child.pid)
+                else:
+                    try:
+                        os.kill(child.pid, 9)
+                    except (ProcessLookupError, PermissionError, OSError):
+                        pass
             if _webview_window:
                 try:
                     _webview_window.destroy()
@@ -532,6 +700,18 @@ def _load_settings() -> dict:
 # Main
 # ---------------------------------------------------------------------------
 def main():
+    if IS_WINDOWS:
+        ok, reason = _prepare_windows_webview_runtime()
+        if not ok:
+            log.error("Windows UI runtime initialization failed: %s", reason)
+            _show_windows_message(
+                "Ouroboros — Startup Failed",
+                "Windows UI runtime initialization failed.\n\n"
+                f"{reason}\n\n"
+                "Check launcher.log for details.",
+            )
+            return
+
     import webview
 
     if not acquire_pid_lock():
@@ -552,18 +732,35 @@ def main():
     if not check_git():
         log.warning("Git not found.")
         _result = {"installed": False}
+        _hint = git_install_hint()
+        _install_status = (
+            "Installing... A system dialog may appear."
+            if IS_MACOS else
+            "Installing... Please wait."
+        )
 
         def _git_page(window):
             window.evaluate_js("""
                 document.getElementById('install-btn').onclick = function() {
-                    document.getElementById('status').textContent = 'Installing... A system dialog may appear.';
+                    document.getElementById('status').textContent = '__INSTALL_STATUS__';
                     window.pywebview.api.install_git();
                 };
-            """)
+            """.replace("__INSTALL_STATUS__", _install_status))
 
         class GitApi:
             def install_git(self):
-                subprocess.Popen(["xcode-select", "--install"])
+                if IS_MACOS:
+                    subprocess.Popen(["xcode-select", "--install"])
+                elif IS_WINDOWS:
+                    _hidden_popen(["winget", "install", "Git.Git", "--source", "winget", "--accept-source-agreements"])
+                else:
+                    for cmd in [["sudo", "apt", "install", "-y", "git"],
+                                ["sudo", "dnf", "install", "-y", "git"]]:
+                        try:
+                            _hidden_popen(cmd)
+                            break
+                        except FileNotFoundError:
+                            continue
                 for _ in range(300):
                     time.sleep(3)
                     if shutil.which("git"):
@@ -573,7 +770,8 @@ def main():
 
         git_window = webview.create_window(
             "Ouroboros — Setup Required",
-            html="""<html><body style="background:#1a1a2e;color:white;font-family:system-ui;display:flex;align-items:center;justify-content:center;height:100vh;margin:0">
+            html=(
+                """<html><body style="background:#1a1a2e;color:white;font-family:system-ui;display:flex;align-items:center;justify-content:center;height:100vh;margin:0">
             <div style="text-align:center">
                 <h2>Git is required</h2>
                 <p>Ouroboros needs Git to manage its local repository.</p>
@@ -581,7 +779,19 @@ def main():
                     Install Git (Xcode CLI Tools)
                 </button>
                 <p id="status" style="color:#fbbf24;margin-top:12px"></p>
-            </div></body></html>""",
+            </div></body></html>"""
+                if IS_MACOS else
+                f"""<html><body style="background:#1a1a2e;color:white;font-family:system-ui;display:flex;align-items:center;justify-content:center;height:100vh;margin:0">
+            <div style="text-align:center">
+                <h2>Git is required</h2>
+                <p>Ouroboros needs Git to manage its local repository.</p>
+                <p style="color:#94a3b8;font-size:13px;margin-top:8px">{_hint}</p>
+                <button id="install-btn" style="padding:10px 24px;border-radius:8px;border:none;background:#0ea5e9;color:white;cursor:pointer;font-size:14px;margin-top:12px">
+                    Install Git
+                </button>
+                <p id="status" style="color:#fbbf24;margin-top:12px"></p>
+            </div></body></html>"""
+            ),
             js_api=GitApi(),
             width=520, height=300,
         )
@@ -630,19 +840,22 @@ def main():
     def _kill_orphaned_children():
         """Final safety net: kill any processes still on the server port.
 
-        After stop_agent() sends SIGTERM/SIGKILL to server.py, worker
-        grandchildren may survive as orphans (fork on macOS). Sweeping
-        the port guarantees nothing lingers.
+        After stop_agent() terminates server.py, worker grandchildren may
+        survive as orphans. Sweeping the port guarantees nothing lingers.
         """
         _kill_stale_on_port(port)
         _kill_stale_on_port(8766)
-        import signal
         for child in __import__('multiprocessing').active_children():
-            try:
-                os.kill(child.pid, signal.SIGKILL)
+            if IS_WINDOWS:
+                force_kill_pid(child.pid)
                 log.info("Killed orphaned child pid=%d", child.pid)
-            except (ProcessLookupError, PermissionError, OSError):
-                pass
+            else:
+                import signal
+                try:
+                    os.kill(child.pid, signal.SIGKILL)
+                    log.info("Killed orphaned child pid=%d", child.pid)
+                except (ProcessLookupError, PermissionError, OSError):
+                    pass
 
     window.events.closing += _on_closing
     _webview_window = window
