@@ -6,7 +6,7 @@
 [![macOS 12+](https://img.shields.io/badge/macOS-12%2B-black.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
 [![Linux](https://img.shields.io/badge/Linux-x86__64-orange.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
 [![Windows](https://img.shields.io/badge/Windows-x64-blue.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
-[![Version 4.17.4](https://img.shields.io/badge/version-4.17.4-green.svg)](VERSION)
+[![Version 4.17.5](https://img.shields.io/badge/version-4.17.5-green.svg)](VERSION)
 
 A self-modifying AI agent that writes its own code, rewrites its own mind, and evolves autonomously. Born February 16, 2026.
 
@@ -376,6 +376,7 @@ Full text: [BIBLE.md](BIBLE.md)
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 4.17.5 | 2026-04-08 | Fix asyncio event loop contamination across test suite: `asyncio.run()` in `test_advisory_observability.py` closed the global event loop, causing `test_claude_code_gateway.py` to fail when both ran together. Fix: shared `pytest_runtest_call` hookwrapper in `tests/conftest.py` installs a fresh per-test loop before the test body and clears it after; companion `pytest_runtest_teardown` hookwrapper installs a temporary loop during fixture finalizers so they can call `asyncio.get_event_loop()` safely. Added `tests/test_event_loop_isolation.py` with regression tests including a fixture-finalizer test. Full test suite now passes clean. |
 | 4.17.4 | 2026-04-08 | Fix 2 pre-existing test failures: `test_onboarding_wizard.py::test_launcher_uses_shared_onboarding_and_claude_cli_bridge` skips when launcher.py lacks all 5 onboarding-bridge markers (checked atomically); `test_packaging_assets.py::test_launcher_does_not_exclude_assets_on_bootstrap` skips when launcher.py lacks the `launcher_bootstrap` import (both guards are content-aware, not just file-presence checks). Add `plan_task` rule to `prompts/SYSTEM.md` Code Editing Strategy: call before first edit on tasks >2 files or >50 lines. |
 | 4.17.3 | 2026-04-08 | Add web_search guidance for knowledge cutoff: proactive `web_search` triggers in "Web Search Tips" (non-obvious errors, new APIs, API changes risk); "could this be a knowledge cutoff issue?" checkpoint in Methodology Check; "either" → "any" red-flag quantifier fix. |
 | 4.17.2 | 2026-04-08 | Remove square blur artifact from chat input: `#chat-input-area` no longer has `backdrop-filter` (was creating a sharp-edged blur rectangle across full viewport width). Frosted glass moved to `#chat-input` textarea itself (`blur(16px)`, opacity 0.62, white border tint). `#chat-input-area` now uses a soft gradient fade only. Updated DEVELOPMENT.md design system ranges (`blur(8–16px)`, opacity `0.62–0.88`) and ARCHITECTURE.md §3.1 description. |

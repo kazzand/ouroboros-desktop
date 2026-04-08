@@ -9,6 +9,8 @@ import os
 import sys
 import types
 
+import asyncio
+
 import pytest
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -394,7 +396,6 @@ def test_run_readonly_async_breaks_after_result_message():
     that the break prevents the post-ResultMessage Exception from reaching the
     caller as a failure.
     """
-    import asyncio
     import sys
     import types
 
@@ -454,7 +455,6 @@ def test_run_readonly_async_breaks_after_result_message():
         gw.AssistantMessage = orig_AssistantMessage
         gw.ResultMessage = orig_ResultMessage
         gw.ClaudeAgentOptions = orig_ClaudeAgentOptions
-
     assert result.success, f"Expected success but got error: {result.error}"
     assert result.session_id == "test-session-123"
     assert "Hello" in result.result_text
@@ -466,7 +466,6 @@ def test_run_edit_async_breaks_after_result_message():
     Companion to test_run_readonly_async_breaks_after_result_message.
     Verifies the same break-after-ResultMessage fix on the ClaudeSDKClient+receive_response path.
     """
-    import asyncio
     import sys
 
     sys.path.insert(0, REPO)
@@ -539,7 +538,6 @@ def test_run_edit_async_breaks_after_result_message():
         gw.ResultMessage = orig_ResultMessage
         gw.ClaudeAgentOptions = orig_ClaudeAgentOptions
         gw.HookMatcher = orig_HookMatcher
-
     assert result.success, f"Expected success but got error: {result.error}"
     assert result.session_id == "edit-session-456"
     assert "Edit output" in result.result_text
