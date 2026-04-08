@@ -135,6 +135,26 @@ class TestPathGuard:
             ))
             assert "deny" in str(result), f"Should block {critical}"
 
+    def test_blocks_safety_critical_with_backslash_paths(self, tmp_path):
+        """Safety-critical check must work regardless of OS path separator.
+
+        On Windows os.path.relpath returns backslashes. The guard must normalize
+        to forward slashes (via pathlib.as_posix) before comparing against
+        SAFETY_CRITICAL which uses forward slashes.
+        """
+        guard = make_path_guard(str(tmp_path))
+        # Simulate a Windows-style resolved path by using the native separator
+        for critical in SAFETY_CRITICAL:
+            # Build path using tmp_path / critical (pathlib handles separators)
+            target = str(tmp_path / critical)
+            result = self._run(guard(
+                {"tool_name": "Edit", "tool_input": {"file_path": target}},
+                f"tid-bslash-{critical}", None,
+            ))
+            assert "deny" in str(result), (
+                f"Should block '{critical}' even with native path separators"
+            )
+
     def test_allows_read_tool(self, tmp_path):
         guard = make_path_guard(str(tmp_path))
         result = self._run(guard(

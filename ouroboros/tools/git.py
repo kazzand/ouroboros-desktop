@@ -23,6 +23,11 @@ _CONTENT_OMITTED_PREFIX = "<<CONTENT_OMITTED"
 log = logging.getLogger(__name__)
 
 
+def _normalize_to_posix(path_str: str) -> str:
+    """Normalize path to forward-slash POSIX form (Windows normpath returns backslashes)."""
+    return pathlib.PurePosixPath(pathlib.PurePath(path_str.strip().lstrip("./"))).as_posix()
+
+
 def _sanitize_git_error(msg: str) -> str:
     return re.sub(r"(https?://)([^@\s]+@)", r"\1<redacted>@", msg)
 
@@ -294,7 +299,7 @@ def _repo_write(ctx: ToolContext, path: str = "", content: str = "",
         return "⚠️ WRITE_ERROR: nothing to write."
 
     for e in write_list:
-        norm = os.path.normpath(e["path"].strip().lstrip("./"))
+        norm = _normalize_to_posix(e["path"])
         if norm in SAFETY_CRITICAL_PATHS:
             return (
                 f"⚠️ SAFETY_VIOLATION: Cannot write safety-critical file: {norm}. "
@@ -341,7 +346,7 @@ def _str_replace_editor(ctx: ToolContext, path: str, old_str: str, new_str: str)
     if not old_str:
         return "⚠️ STR_REPLACE_ERROR: old_str is required (cannot be empty)."
 
-    norm = os.path.normpath(path.strip().lstrip("./"))
+    norm = _normalize_to_posix(path)
     if norm in SAFETY_CRITICAL_PATHS:
         return (
             f"⚠️ SAFETY_VIOLATION: Cannot edit safety-critical file: {norm}. "
@@ -537,7 +542,7 @@ def _repo_write_commit(ctx: ToolContext, path: str, content: str,
                 extra = extra.strip()
                 if not extra:
                     continue
-                if os.path.normpath(extra.lstrip("./")) in SAFETY_CRITICAL_PATHS:
+                if _normalize_to_posix(extra) in SAFETY_CRITICAL_PATHS:
                     continue
                 try:
                     run_cmd(["git", "add", safe_relpath(extra)], cwd=ctx.repo_dir)
@@ -797,12 +802,12 @@ def _restore_to_head(ctx: ToolContext, confirm: bool = False,
     dirty_files = [line[3:].strip().split(" -> ")[-1]
                    for line in status.splitlines() if line.strip()]
     affected_critical = [
-        os.path.normpath(f) for f in dirty_files
-        if os.path.normpath(f) in SAFETY_CRITICAL_PATHS
+        _normalize_to_posix(f) for f in dirty_files
+        if _normalize_to_posix(f) in SAFETY_CRITICAL_PATHS
     ]
     if paths:
         for p in paths:
-            norm = os.path.normpath(p.strip().lstrip("./"))
+            norm = _normalize_to_posix(p)
             if norm in SAFETY_CRITICAL_PATHS:
                 return (
                     f"⚠️ RESTORE_BLOCKED: Cannot restore safety-critical file: {norm}. "
@@ -893,7 +898,7 @@ def _revert_commit(ctx: ToolContext, sha: str, confirm: bool = False) -> str:
     except Exception:
         changed_files = []
     for f in changed_files:
-        norm = os.path.normpath(f.strip())
+        norm = _normalize_to_posix(f)
         if norm in SAFETY_CRITICAL_PATHS:
             return (
                 f"⚠️ REVERT_BLOCKED: Commit {sha[:8]} touches safety-critical file: {norm}. "

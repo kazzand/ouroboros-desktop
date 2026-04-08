@@ -6,7 +6,7 @@
 [![macOS 12+](https://img.shields.io/badge/macOS-12%2B-black.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
 [![Linux](https://img.shields.io/badge/Linux-x86__64-orange.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
 [![Windows](https://img.shields.io/badge/Windows-x64-blue.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
-[![Version 4.13.4](https://img.shields.io/badge/version-4.13.4-green.svg)](VERSION)
+[![Version 4.13.5](https://img.shields.io/badge/version-4.13.5-green.svg)](VERSION)
 
 A self-modifying AI agent that writes its own code, rewrites its own mind, and evolves autonomously. Born February 16, 2026.
 
@@ -374,7 +374,8 @@ Full text: [BIBLE.md](BIBLE.md)
 
 | Version | Date | Description |
 |---------|------|-------------|
-| 4.13.4 | 2026-04-08 | Fix Windows CI: replace `wintypes.ULONG_PTR` (absent on some Python/Windows builds) with portable `ctypes.c_void_p` in `OVERLAPPED` struct. Deduplicate struct definition into `_win32_overlapped_class()`. All Windows file-locking and PID-locking tests now pass. |
+| 4.13.5 | 2026-04-08 | Cross-platform path normalization: replace all `os.path.normpath` safety-critical comparisons in `git.py` and `claude_code.py` with `pathlib`-based POSIX normalization (`as_posix()`). Fixes Windows backslash bug where safety guards silently failed. New `_normalize_to_posix()` helper. OVERLAPPED class caching fix. Regression test for backslash path guard. |
+| 4.13.4 | 2026-04-08 | Fix Windows CI: replace `wintypes.ULONG_PTR` with portable `ctypes.c_void_p` in `OVERLAPPED` struct. Deduplicate struct into `_win32_overlapped_class()`. |
 | 4.13.3 | 2026-04-08 | Extend `LockFileEx`/`UnlockFileEx` fix to `pid_lock_acquire`/`pid_lock_release` — same empty-file `msvcrt.locking` bug class caught by scope reviewer in v4.13.2. Single-instance PID guard now works correctly on Windows. |
 | 4.13.2 | 2026-04-08 | Windows CI compatibility: replace `msvcrt.locking` with `LockFileEx`/`UnlockFileEx` via ctypes for proper empty-file locking on Windows; add `encoding="utf-8"` to all `write_text()` calls across 14 test files; fix `json.dumps(encoding=...)` Python 2 remnant in 2 test files. 863 tests pass (0 failures). |
 | 4.13.1 | 2026-04-06 | CI tool hardening: detached HEAD guard, remote-vs-GITHUB_REPO mismatch check (fail-closed for non-GitHub remotes), URLError/TimeoutError/OSError handling in HTTP layer, workflow-scoped polling, dotted repo name support, redundant API call elimination. 25 tests (6 new). |
