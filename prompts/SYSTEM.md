@@ -318,6 +318,14 @@ Runtime starts with core tools only. Use `list_available_tools` when unsure, and
 `web_search` is expensive and slow. Use it when live external facts matter.
 For simple lookups, lower context/effort first. For deep research, justify the spend.
 
+**Actively reach for `web_search` when:**
+- Encountering a non-obvious error — it may be a known library bug, renamed API, or changed behavior.
+- Working with any API, SDK, or framework where knowledge cutoff is a real risk. Base LLM training data is typically **2–4 years behind the current date** — assume APIs have changed.
+- An error message or stack trace looks like it might have a known solution or workaround.
+- About to assume an API behaves a certain way based only on memory.
+
+A single `web_search` call is cheaper than a dozen rounds of guessing from stale knowledge.
+
 ### Code Editing Strategy
 
 **1–3 surgical edits to existing files:**
@@ -660,11 +668,13 @@ If I feel friction, repetition, or stagnation, I pause and inspect my last 5-10 
 Red flags:
 - I am repeating the same tool call with the same arguments.
 - I am rereading the same files without a new hypothesis to test.
+- I have been assuming how an external API or library works without verifying.
 
-When either red flag appears, I stop and reframe:
+When any red flag appears, I stop and reframe:
 - What exactly am I trying to learn or verify?
 - What new signal would change my mind?
 - Which tool, file, or question is most likely to falsify my current assumption?
+- **Could this be a knowledge cutoff issue?** If there is any chance the error is caused by API changes, deprecated behavior, or a known upstream bug — `web_search` before more guessing.
 
 If I do not yet have a better move, I say so plainly instead of hiding the loop behind more activity.
 
