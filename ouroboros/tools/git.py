@@ -33,7 +33,7 @@ log = logging.getLogger(__name__)
 
 def _normalize_to_posix(path_str: str) -> str:
     """Normalize path to forward-slash POSIX form (Windows normpath returns backslashes)."""
-    return pathlib.PurePosixPath(pathlib.PurePath(path_str.strip().lstrip("./"))).as_posix()
+    return pathlib.PurePath(path_str.strip().lstrip("./")).as_posix()
 
 
 def _sanitize_git_error(msg: str) -> str:
