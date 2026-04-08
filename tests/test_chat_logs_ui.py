@@ -467,6 +467,47 @@ def test_live_card_timeline_no_hardcoded_item_cap():
     assert "taskState.completed = false;" in source
 
 
+def test_chat_input_overlay_buttons_css():
+    """Regression: paperclip and Send buttons must be absolute overlays inside the textarea."""
+    css = _read("web/style.css")
+
+    # .chat-attach-btn: absolute, inside input wrap on the left
+    attach_match = re.search(
+        r'\.chat-attach-btn\s*\{(.+?)\}',
+        css,
+        re.DOTALL,
+    )
+    assert attach_match, ".chat-attach-btn CSS rule not found"
+    attach_body = attach_match.group(1)
+    assert "position: absolute" in attach_body, ".chat-attach-btn must be position: absolute"
+    assert "left:" in attach_body, ".chat-attach-btn must have a left: offset"
+
+    # .chat-send-inline: absolute, inside input wrap on the right
+    send_match = re.search(
+        r'\.chat-send-inline\s*\{(.+?)\}',
+        css,
+        re.DOTALL,
+    )
+    assert send_match, ".chat-send-inline CSS rule not found"
+    send_body = send_match.group(1)
+    assert "position: absolute" in send_body, ".chat-send-inline must be position: absolute"
+    assert "right:" in send_body, ".chat-send-inline must have a right: offset"
+
+    # #chat-input: must have both left and right padding to avoid text overlap
+    input_match = re.search(
+        r'#chat-input\s*\{(.+?)\}',
+        css,
+        re.DOTALL,
+    )
+    assert input_match, "#chat-input CSS rule not found"
+    input_body = input_match.group(1)
+    assert "padding" in input_body, "#chat-input must have padding defined"
+    # padding: 10px 52px 10px 42px — right 52px, left 42px
+    # We check that the padding value is not the symmetric default
+    assert "42px" in input_body, "#chat-input must have 42px left padding for attach overlay"
+    assert "52px" in input_body, "#chat-input must have 52px right padding for send overlay"
+
+
 def test_live_card_timeline_css_scrollable():
     """Expanded chat live timeline must be scrollable with a max-height."""
     import re

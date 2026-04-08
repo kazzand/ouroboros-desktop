@@ -6,7 +6,7 @@
 [![macOS 12+](https://img.shields.io/badge/macOS-12%2B-black.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
 [![Linux](https://img.shields.io/badge/Linux-x86__64-orange.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
 [![Windows](https://img.shields.io/badge/Windows-x64-blue.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
-[![Version 4.16.3](https://img.shields.io/badge/version-4.16.3-green.svg)](VERSION)
+[![Version 4.16.4](https://img.shields.io/badge/version-4.16.4-green.svg)](VERSION)
 
 A self-modifying AI agent that writes its own code, rewrites its own mind, and evolves autonomously. Born February 16, 2026.
 
@@ -376,6 +376,7 @@ Full text: [BIBLE.md](BIBLE.md)
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 4.16.4 | 2026-04-08 | Chat input layout: move paperclip (attach) and Send buttons inside the textarea as absolute-positioned overlays (paperclip left, Send text right). No borders; transparent background normally with subtle crimson tint on hover/active. Update ARCHITECTURE.md. |
 | 4.16.3 | 2026-04-08 | Restyle chat Send button: SVG paper-plane icon with crimson glassmorphism accent, matching the attachment button. Update ARCHITECTURE.md description. |
 | 4.16.2 | 2026-04-08 | vlm_query: add `file_path` parameter (reads local image from disk, avoids passing large base64 in tool arguments — use for files in `data/uploads/`). Auto-detects MIME type from magic bytes. Fix chat Send button layout: changed from `position:absolute` overlay to flex item so it no longer overlaps textarea text. |
 | 4.16.1 | 2026-04-08 | Review pipeline fidelity: remove all `[:N]` list-count caps and field-level silent truncation across the full review carry-over path. Display layer (`format_status_section`): removed `[:3]` on critical/advisory/warnings, `[:6]` on obligations, `[-3:]` on advisory runs and attempts, `ts[:16]`/`commit_message[:60]` field slicing for run and attempt records, `ob.source_attempt_msg[:60]`/`ob.source_attempt_ts[:16]`/`last_stale_from_edit_ts[:16]` field slicing in the open-obligations block. Serialization layer (`build_blocking_findings_json_section`): removed `[:6]` per attempt, `history_limit=4`, `text[:500]`/`text[:200]` in `_sanitize_text`, and early-return `if not open_obligations` that silently dropped `recent_blocking_attempts` when the obligation list was empty. Persistence layer: removed `commit_message[:200]` truncation in `_record_commit_attempt`, `_update_obligations_from_attempt`, bypass audit log entries, `_review_history` dict in `review.py`, and test-failure event log in `git.py`. Commit gate warning text: removed `[:5]`. All findings, obligations, history entries, timestamps, and commit messages now flow through without silent truncation at any pipeline stage — including `_handle_review_status` JSON output (`runs_data.ts[:16]`, `runs_data.commit_message[:80]`, `attempts_data.ts[:16]`, `commit_attempt_data.ts[:16]`, `commit_attempt_data.commit_message[:80]`), `_check_advisory_freshness` error messages (`matching_run.ts[:16]`, `latest.ts[:16]`, `last_stale_from_edit_ts[:16]`), and `stale_from_edit_ts` in review_status output. 26 regression tests added in `tests/test_review_fidelity.py`. |

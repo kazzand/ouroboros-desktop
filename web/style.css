@@ -1270,29 +1270,32 @@ body {
     flex: 1;
     position: relative;
     display: flex;
-    align-items: center;
+    align-items: flex-end;
     gap: 6px;
 }
 
+/* Attach button sits INSIDE the textarea on the left */
 .chat-attach-btn {
-    flex-shrink: 0;
-    width: 32px;
-    height: 32px;
-    border-radius: var(--radius-sm);
-    border: 1px solid rgba(255, 255, 255, 0.08);
-    background: rgba(255, 255, 255, 0.04);
-    color: rgba(226, 232, 240, 0.5);
+    position: absolute;
+    left: 10px;
+    bottom: 8px;
+    z-index: 2;
+    width: 24px;
+    height: 24px;
+    border-radius: var(--radius-xs);
+    border: none;
+    background: transparent;
+    color: rgba(226, 232, 240, 0.35);
     display: flex;
     align-items: center;
     justify-content: center;
     cursor: pointer;
-    transition: color 0.15s, background 0.15s, border-color 0.15s;
+    transition: color 0.15s;
+    padding: 0;
 }
 
 .chat-attach-btn:hover {
-    color: rgba(226, 232, 240, 0.9);
-    background: rgba(255, 255, 255, 0.08);
-    border-color: rgba(255, 255, 255, 0.15);
+    color: rgba(226, 232, 240, 0.75);
 }
 
 .chat-file-input-hidden {
@@ -1358,7 +1361,7 @@ body {
 
 #chat-input {
     flex: 1;
-    padding: 10px 16px;
+    padding: 10px 52px 10px 42px;
     border-radius: 24px;
     border: 1px solid rgba(201, 53, 69, 0.12);
     background: rgba(26, 21, 32, 0.75);
@@ -1379,33 +1382,32 @@ body {
 #chat-input::placeholder { color: var(--text-muted); }
 
 .chat-send-inline {
-    flex-shrink: 0;
-    width: 32px;
-    height: 32px;
-    border-radius: var(--radius-sm);
-    border: 1px solid rgba(201, 53, 69, 0.25);
-    background: rgba(201, 53, 69, 0.12);
-    color: rgba(232, 93, 111, 0.85);
-    display: flex;
-    align-items: center;
-    justify-content: center;
+    position: absolute;
+    right: 8px;
+    top: 50%;
+    transform: translateY(-50%);
+    border: none;
+    background: transparent;
+    color: var(--accent);
+    font-size: 13px;
+    font-weight: 700;
+    font-family: inherit;
+    letter-spacing: 0.04em;
     cursor: pointer;
-    transition: color 0.15s, background 0.15s, border-color 0.15s, box-shadow 0.15s;
-    align-self: flex-end;
-    margin-bottom: 1px;
-    padding: 0;
-    font-size: 0;
+    padding: 4px 10px;
+    border-radius: var(--radius);
+    transition: color 0.15s, background 0.15s;
+    opacity: 0.7;
+    line-height: 1;
+    z-index: 1;
 }
 .chat-send-inline:hover {
-    color: rgba(232, 93, 111, 1);
-    background: rgba(201, 53, 69, 0.22);
-    border-color: rgba(201, 53, 69, 0.5);
-    box-shadow: 0 0 8px rgba(201, 53, 69, 0.2);
+    opacity: 1;
+    background: rgba(201, 53, 69, 0.10);
 }
 .chat-send-inline:active {
-    background: rgba(201, 53, 69, 0.32);
-    border-color: rgba(201, 53, 69, 0.6);
-    box-shadow: 0 0 12px rgba(201, 53, 69, 0.3);
+    background: rgba(201, 53, 69, 0.18);
+    opacity: 1;
 }
 
 /* Shared UI components (stat cards used by Costs, section titles by Evolution) */

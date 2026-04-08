@@ -75,7 +75,7 @@ export function initChat({ ws, state, updateUnreadBadge }) {
                 </button>
                 <input type="file" id="chat-file-input" class="chat-file-input-hidden" accept="*/*">
                 <textarea id="chat-input" placeholder="Message Ouroboros..." rows="1"></textarea>
-                <button class="chat-send-inline" id="chat-send" title="Send message" aria-label="Send message"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg></button>
+                <button class="chat-send-inline" id="chat-send" title="Send message">Send</button>
             </div>
         </div>
     `;
