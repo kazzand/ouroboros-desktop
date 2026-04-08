@@ -176,8 +176,8 @@ def make_path_guard(cwd: str):
             }
 
         # Check: safety-critical file?
-        # Use forward slashes for cross-platform comparison with SAFETY_CRITICAL set
-        rel = os.path.normpath(os.path.relpath(str(target), str(cwd_resolved))).replace("\\", "/")
+        # Use pathlib.as_posix() for cross-platform forward-slash comparison
+        rel = target.relative_to(cwd_resolved).as_posix()
         if rel in SAFETY_CRITICAL:
             return {
                 "hookSpecificOutput": {
