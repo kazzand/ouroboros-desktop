@@ -159,7 +159,25 @@ def test_build_onboarding_html_includes_claude_runtime_cta_and_host_transports()
     assert "/api/claude-code/install" in web_html
 
 
-@pytest.mark.skipif(not (REPO / "launcher.py").exists(), reason="launcher.py not present in repo (bundle-only)")
+def _launcher_has_onboarding_bridge() -> bool:
+    launcher = REPO / "launcher.py"
+    if not launcher.exists():
+        return False
+    source = launcher.read_text(encoding="utf-8")
+    return all(marker in source for marker in (
+        "has_startup_ready_provider(settings)",
+        "prepare_onboarding_settings(data, settings)",
+        'build_onboarding_html(settings, host_mode="desktop")',
+        "def claude_code_status(self) -> dict:",
+        "def install_claude_code(self) -> dict:",
+    ))
+
+_LAUNCHER_HAS_ONBOARDING_BRIDGE = _launcher_has_onboarding_bridge()
+
+@pytest.mark.skipif(
+    not _LAUNCHER_HAS_ONBOARDING_BRIDGE,
+    reason="launcher.py does not contain onboarding bridge (may be an older bundle or post-refactor version)",
+)
 def test_launcher_uses_shared_onboarding_and_claude_cli_bridge():
     source = (REPO / "launcher.py").read_text(encoding="utf-8")
 

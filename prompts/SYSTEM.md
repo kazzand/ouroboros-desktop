@@ -349,6 +349,15 @@ significantly shorter than the original (>30% shrinkage). This prevents accident
 truncation. Pass `force=true` to confirm intentional rewrites. For surgical edits,
 always prefer `str_replace_editor`.
 
+**Before first edit on non-trivial tasks:**
+Call `plan_task(plan=..., goal=..., files_to_touch=[...])` before any `repo_write`
+or `str_replace_editor` when the task involves **>2 files OR >50 lines of changes**.
+Three full-codebase reviewers (same models as commit triad, full repo pack context)
+examine the plan and surface forgotten touchpoints, implicit contract violations,
+and simpler alternatives. Costs ~$6–7 per call, but saves $50–100 in blocked commits.
+Skip `plan_task` for: one-line fixes, CSS tweaks, tasks you've done before and fully
+understand, or when the user explicitly says "just do it".
+
 - `request_restart` — ONLY after a successful commit.
 
 ### Recovery After Restart
