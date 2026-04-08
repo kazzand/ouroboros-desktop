@@ -139,6 +139,28 @@ def file_unlock(fd: int) -> None:
 _win32_overlapped: dict = {}
 
 
+def _win32_overlapped_class():
+    """Build a portable OVERLAPPED ctypes Structure.
+
+    ``wintypes.ULONG_PTR`` is absent on some Python/Windows builds, so we use
+    ``ctypes.c_void_p`` which is pointer-width on all architectures (4 bytes on
+    32-bit, 8 bytes on 64-bit) — exactly what ``ULONG_PTR`` is.
+    """
+    import ctypes
+    from ctypes import wintypes
+
+    class OVERLAPPED(ctypes.Structure):
+        _fields_ = [
+            ("Internal", ctypes.c_void_p),
+            ("InternalHigh", ctypes.c_void_p),
+            ("Offset", wintypes.DWORD),
+            ("OffsetHigh", wintypes.DWORD),
+            ("hEvent", wintypes.HANDLE),
+        ]
+
+    return OVERLAPPED
+
+
 def _win32_lock(fd: int, *, exclusive: bool = True, blocking: bool = True) -> None:
     """Lock a file descriptor using Win32 LockFileEx. Works on empty files."""
     import ctypes
@@ -148,14 +170,7 @@ def _win32_lock(fd: int, *, exclusive: bool = True, blocking: bool = True) -> No
     _LOCKFILE_FAIL_IMMEDIATELY = 0x00000001
     _LOCKFILE_EXCLUSIVE_LOCK = 0x00000002
 
-    class OVERLAPPED(ctypes.Structure):
-        _fields_ = [
-            ("Internal", wintypes.ULONG_PTR),
-            ("InternalHigh", wintypes.ULONG_PTR),
-            ("Offset", wintypes.DWORD),
-            ("OffsetHigh", wintypes.DWORD),
-            ("hEvent", wintypes.HANDLE),
-        ]
+    OVERLAPPED = _win32_overlapped_class()
 
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
     kernel32.LockFileEx.argtypes = [
@@ -189,14 +204,7 @@ def _win32_unlock(fd: int) -> None:
     if entry is None:
         return
 
-    class OVERLAPPED(ctypes.Structure):
-        _fields_ = [
-            ("Internal", wintypes.ULONG_PTR),
-            ("InternalHigh", wintypes.ULONG_PTR),
-            ("Offset", wintypes.DWORD),
-            ("OffsetHigh", wintypes.DWORD),
-            ("hEvent", wintypes.HANDLE),
-        ]
+    OVERLAPPED = _win32_overlapped_class()
 
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
     kernel32.UnlockFileEx.argtypes = [
