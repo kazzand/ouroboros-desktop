@@ -97,26 +97,34 @@ def test_find_free_port_waits_for_preferred_port():
 
 
 def test_find_free_port_falls_back_when_stuck():
-    """find_free_port should fall back to a nearby port if preferred stays busy."""
-    import socket
-    from ouroboros.server_entrypoint import find_free_port
+    """find_free_port should fall back to a nearby port if preferred stays busy.
 
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("127.0.0.1", 0))
-        preferred = s.getsockname()[1]
+    On Windows, SO_REUSEADDR allows binding to a port already in LISTEN state,
+    so the real-socket blocking approach does not reliably prevent rebind.
+    We use monkeypatching to guarantee the preferred port stays unavailable.
+    """
+    from ouroboros import server_entrypoint
 
-    blocker = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    blocker.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    blocker.bind(("127.0.0.1", preferred))
-    blocker.listen(1)
+    preferred = 51234  # arbitrary high port unlikely to collide
 
+    _original = getattr(server_entrypoint, "_can_bind_port", None)
+
+    def _fake_can_bind(host: str, port: int) -> bool:
+        if port == preferred:
+            return False  # always blocked
+        # For fallback ports, allow the first one
+        return True
+
+    server_entrypoint._can_bind_port = _fake_can_bind
     try:
-        # Very short wait — should give up and use fallback
-        result = find_free_port("127.0.0.1", preferred, max_tries=10,
-                                wait_retries=2, wait_interval=0.05)
+        result = server_entrypoint.find_free_port(
+            "127.0.0.1", preferred, max_tries=10,
+            wait_retries=2, wait_interval=0.05,
+        )
         assert result != preferred, f"Should have fallen back, but got preferred {preferred}"
     finally:
-        blocker.close()
+        if _original is not None:
+            server_entrypoint._can_bind_port = _original
 
 
 def test_find_free_port_retries_fallback_range_until_port_frees(monkeypatch):

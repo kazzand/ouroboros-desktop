@@ -1105,7 +1105,7 @@ def _emergency_process_cleanup() -> None:
     except Exception:
         pass
     import multiprocessing
-    from ouroboros.compat import force_kill_pid, kill_process_on_port
+    from ouroboros.platform_layer import force_kill_pid, kill_process_on_port
     for child in multiprocessing.active_children():
         try:
             force_kill_pid(child.pid)

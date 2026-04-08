@@ -116,11 +116,11 @@ def _make_ctx(tmp_path):
 
 def _populate_repo(tmp_path):
     """Create a mini repo structure for search tests."""
-    (tmp_path / "foo.py").write_text("def hello():\n    return 'world'\n")
-    (tmp_path / "bar.py").write_text("import os\ndef hello_bar():\n    pass\n")
+    (tmp_path / "foo.py").write_text("def hello():\n    return 'world'\n", encoding="utf-8")
+    (tmp_path / "bar.py").write_text("import os\ndef hello_bar():\n    pass\n", encoding="utf-8")
     sub = tmp_path / "sub"
     sub.mkdir()
-    (sub / "baz.py").write_text("class MyClass:\n    hello = True\n")
+    (sub / "baz.py").write_text("class MyClass:\n    hello = True\n", encoding="utf-8")
     # Binary-like file (should be skipped)
     (tmp_path / "data.png").write_bytes(b'\x89PNG\r\n\x1a\n' + b'\x00' * 100)
     # Cache dir (should be skipped)
@@ -161,7 +161,7 @@ def test_code_search_include_filter(tmp_path):
     from ouroboros.tools.core import _code_search
     ctx = _make_ctx(tmp_path)
     _populate_repo(tmp_path)
-    (tmp_path / "readme.md").write_text("hello from markdown\n")
+    (tmp_path / "readme.md").write_text("hello from markdown\n", encoding="utf-8")
     result = _code_search(ctx, "hello", include="*.md")
     assert "readme.md" in result
     assert "foo.py" not in result
@@ -197,7 +197,7 @@ def test_code_search_max_results(tmp_path):
     ctx = _make_ctx(tmp_path)
     # Create many matching lines
     lines = "\n".join(f"match_line_{i}" for i in range(50))
-    (tmp_path / "many.py").write_text(lines)
+    (tmp_path / "many.py").write_text(lines, encoding="utf-8")
     result = _code_search(ctx, "match_line", max_results=10)
     assert "truncated at 10" in result
 

@@ -47,7 +47,11 @@ TOOL_MODULES = [
     "ouroboros.tools.claude_advisory_review",
     "ouroboros.tools.scope_review",
     "ouroboros.tools.review_helpers",
+<<<<<<< ours
     "ouroboros.tools.plan_review",
+=======
+    "ouroboros.tools.ci",
+>>>>>>> theirs
 ]
 
 SUPERVISOR_MODULES = [
@@ -126,8 +130,13 @@ EXPECTED_TOOLS = [
     "enable_tools",
     # Advisory pre-review gate
     "advisory_pre_review", "review_status",
+<<<<<<< ours
     # Pre-implementation design review
     "plan_task",
+=======
+    # CI
+    "run_ci_tests",
+>>>>>>> theirs
 ]
 
 
@@ -238,7 +247,7 @@ def test_memory_identity():
         mem = Memory(drive_root=pathlib.Path(tmp))
         # Write identity file directly (identity_path is a method)
         mem.identity_path().parent.mkdir(parents=True, exist_ok=True)
-        mem.identity_path().write_text("I am Ouroboros")
+        mem.identity_path().write_text("I am Ouroboros", encoding="utf-8")
         content = mem.load_identity()
         assert "Ouroboros" in content
 
@@ -303,7 +312,7 @@ def test_no_hardcoded_replies():
             if not f.endswith(".py"):
                 continue
             path = pathlib.Path(root) / f
-            for i, line in enumerate(path.read_text().splitlines(), 1):
+            for i, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
                 if line.strip().startswith("#"):
                     continue
                 if suspicious.search(line):
@@ -315,7 +324,7 @@ def test_no_hardcoded_replies():
 
 def test_version_file_exists():
     """VERSION file exists and contains valid semver."""
-    version = (REPO / "VERSION").read_text().strip()
+    version = (REPO / "VERSION").read_text(encoding="utf-8").strip()
     parts = version.split(".")
     assert len(parts) == 3, f"VERSION '{version}' is not semver"
     for p in parts:
@@ -324,14 +333,14 @@ def test_version_file_exists():
 
 def test_version_in_readme():
     """VERSION matches what README claims."""
-    version = (REPO / "VERSION").read_text().strip()
-    readme = (REPO / "README.md").read_text()
+    version = (REPO / "VERSION").read_text(encoding="utf-8").strip()
+    readme = (REPO / "README.md").read_text(encoding="utf-8")
     assert version in readme, f"VERSION {version} not found in README.md"
 
 
 def test_bible_exists_and_has_principles():
     """BIBLE.md exists and contains the current principle set (0-8)."""
-    bible = (REPO / "BIBLE.md").read_text()
+    bible = (REPO / "BIBLE.md").read_text(encoding="utf-8")
     principles = re.findall(r"^## Principle (\d+):", bible, flags=re.MULTILINE)
     assert principles == [str(i) for i in range(9)], f"Unexpected BIBLE principles: {principles}"
 
@@ -354,7 +363,7 @@ def test_no_env_dumping():
             if not f.endswith(".py"):
                 continue
             path = pathlib.Path(root) / f
-            for i, line in enumerate(path.read_text().splitlines(), 1):
+            for i, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
                 if line.strip().startswith("#"):
                     continue
                 if dangerous.search(line):
@@ -363,11 +372,23 @@ def test_no_env_dumping():
 
 
 def test_no_oversized_modules():
+<<<<<<< ours
     """Principle 5: no non-grandfathered module exceeds the hard gate."""
     from ouroboros.review import GRANDFATHERED_OVERSIZED_MODULES, MAX_MODULE_LINES
 
     max_lines = MAX_MODULE_LINES
     grandfathered = set(GRANDFATHERED_OVERSIZED_MODULES)
+=======
+    """Principle 5: no module exceeds 1050 lines."""
+    max_lines = 1050
+    grandfathered = {
+        # Existing large modules tracked as refactor debt. Keep the gate for all others.
+        "git.py",
+        "llm.py",
+        "onboarding_wizard.py",
+        "server.py",
+    }
+>>>>>>> theirs
     violations = []
     for root, dirs, files in os.walk(REPO):
         dirs[:] = [d for d in dirs if d not in _SKIP_DIRS]
@@ -375,7 +396,7 @@ def test_no_oversized_modules():
             if not f.endswith(".py"):
                 continue
             path = pathlib.Path(root) / f
-            lines = len(path.read_text().splitlines())
+            lines = len(path.read_text(encoding="utf-8").splitlines())
             if lines > max_lines and path.name not in grandfathered:
                 violations.append(f"{path.name}: {lines} lines")
     assert len(violations) == 0, f"Oversized modules (>{max_lines} lines):\n" + "\n".join(violations)
@@ -394,7 +415,7 @@ def test_no_bare_except_pass():
             if not f.endswith(".py"):
                 continue
             path = pathlib.Path(root) / f
-            lines = path.read_text().splitlines()
+            lines = path.read_text(encoding="utf-8").splitlines()
             for i, line in enumerate(lines, 1):
                 stripped = line.strip()
                 # Only flag bare `except:` (no class specified)
@@ -426,7 +447,7 @@ def _get_function_sizes():
                 continue
             path = pathlib.Path(root) / f
             try:
-                tree = ast.parse(path.read_text())
+                tree = ast.parse(path.read_text(encoding="utf-8"))
             except SyntaxError:
                 continue
             for node in ast.walk(tree):

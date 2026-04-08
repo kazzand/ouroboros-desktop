@@ -56,7 +56,7 @@ class TestScratchpadBlocks:
         assert f"{_SCRATCHPAD_MAX_BLOCKS} blocks" in md
 
     def test_legacy_migration(self, memory):
-        memory.scratchpad_path().write_text("Legacy scratchpad content here")
+        memory.scratchpad_path().write_text("Legacy scratchpad content here", encoding="utf-8")
         block = memory.append_scratchpad_block("new block")
         blocks = memory.load_scratchpad_blocks()
         assert len(blocks) == 2
@@ -81,7 +81,7 @@ class TestDialogueBlocks:
             {"type": "summary", "content": "First block", "range": "2026-01-01"},
             {"type": "era", "content": "Old era", "range": "2025-12-01 to 2025-12-31"},
         ]
-        blocks_path.write_text(json.dumps(blocks))
+        blocks_path.write_text(json.dumps(blocks), encoding="utf-8")
         loaded = memory.load_dialogue_blocks()
         assert len(loaded) == 2
 
@@ -96,7 +96,7 @@ class TestDialogueBlocks:
 
     def test_corrupt_blocks_file(self, memory):
         blocks_path = memory.drive_root / "memory" / "dialogue_blocks.json"
-        blocks_path.write_text("NOT VALID JSON {{{")
+        blocks_path.write_text("NOT VALID JSON {{{", encoding="utf-8")
         assert memory.load_dialogue_blocks() == []
 
 
@@ -115,7 +115,7 @@ class TestCacheHitRate:
                 "prompt_tokens": 1000,
                 "cached_tokens": 600,
             }))
-        events_path.write_text("\n".join(entries))
+        events_path.write_text("\n".join(entries), encoding="utf-8")
 
         env = types.SimpleNamespace(
             drive_path=lambda p: memory.drive_root / p,

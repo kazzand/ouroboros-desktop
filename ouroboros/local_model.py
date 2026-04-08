@@ -15,7 +15,7 @@ import threading
 import time
 from typing import Any, Callable, Dict, Optional
 
-from ouroboros.compat import IS_MACOS, terminate_process_tree, kill_process_tree
+from ouroboros.platform_layer import IS_MACOS, terminate_process_tree, kill_process_tree
 
 log = logging.getLogger(__name__)
 

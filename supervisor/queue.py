@@ -262,7 +262,7 @@ def cancel_task_by_id(task_id: str) -> bool:
                     w.proc.terminate()
                 w.proc.join(timeout=5)
                 if w.proc.is_alive() and w.proc.pid:
-                    from ouroboros.compat import kill_pid_tree
+                    from ouroboros.platform_layer import kill_pid_tree
                     kill_pid_tree(w.proc.pid)
                     w.proc.join(timeout=2)
                 workers.respawn_worker(w.wid)
@@ -332,7 +332,7 @@ def enforce_task_timeouts() -> None:
                     w.proc.terminate()
                 w.proc.join(timeout=5)
                 if w.proc.is_alive() and w.proc.pid:
-                    from ouroboros.compat import kill_pid_tree
+                    from ouroboros.platform_layer import kill_pid_tree
                     kill_pid_tree(w.proc.pid)
                     w.proc.join(timeout=2)
             except Exception:

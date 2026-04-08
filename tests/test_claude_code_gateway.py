@@ -135,6 +135,26 @@ class TestPathGuard:
             ))
             assert "deny" in str(result), f"Should block {critical}"
 
+    def test_blocks_safety_critical_with_backslash_paths(self, tmp_path):
+        """Safety-critical check must work regardless of OS path separator.
+
+        On Windows os.path.relpath returns backslashes. The guard must normalize
+        to forward slashes (via pathlib.as_posix) before comparing against
+        SAFETY_CRITICAL which uses forward slashes.
+        """
+        guard = make_path_guard(str(tmp_path))
+        # Simulate a Windows-style resolved path by using the native separator
+        for critical in SAFETY_CRITICAL:
+            # Build path using tmp_path / critical (pathlib handles separators)
+            target = str(tmp_path / critical)
+            result = self._run(guard(
+                {"tool_name": "Edit", "tool_input": {"file_path": target}},
+                f"tid-bslash-{critical}", None,
+            ))
+            assert "deny" in str(result), (
+                f"Should block '{critical}' even with native path separators"
+            )
+
     def test_allows_read_tool(self, tmp_path):
         guard = make_path_guard(str(tmp_path))
         result = self._run(guard(
@@ -202,9 +222,9 @@ class TestReadonlyGuard:
 
 class TestProjectContext:
     def test_loads_existing_docs(self, tmp_path):
-        (tmp_path / "BIBLE.md").write_text("# Constitution")
+        (tmp_path / "BIBLE.md").write_text("# Constitution", encoding="utf-8")
         (tmp_path / "docs").mkdir()
-        (tmp_path / "docs" / "DEVELOPMENT.md").write_text("# Dev guide")
+        (tmp_path / "docs" / "DEVELOPMENT.md").write_text("# Dev guide", encoding="utf-8")
         ctx = _load_project_context(tmp_path)
         assert "CONSTITUTION" in ctx
         assert "DEVELOPMENT GUIDE" in ctx
@@ -214,7 +234,7 @@ class TestProjectContext:
         assert ctx == ""  # no docs, empty context
 
     def test_truncates_large_docs(self, tmp_path):
-        (tmp_path / "BIBLE.md").write_text("x" * 100_000)
+        (tmp_path / "BIBLE.md").write_text("x" * 100_000, encoding="utf-8")
         ctx = _load_project_context(tmp_path)
         assert "truncated" in ctx.lower()
 
@@ -233,26 +253,41 @@ class TestImportFallback:
 
     def test_gateway_import_requires_sdk(self):
         """Without the real SDK (or our mock), import should raise ImportError."""
-        # We can't truly un-mock here, but we can verify the design intent:
         # The module does `from claude_agent_sdk import ...` at module level,
         # so ImportError is raised before any code runs.
         # This documents that the SDK is a hard requirement (no CLI fallback).
+        #
+        # To simulate absence even when SDK is installed, we must:
+        # 1. Save and remove ALL claude_agent_sdk* entries from sys.modules
+        # 2. Set sys.modules["claude_agent_sdk"] = None (triggers ImportError)
+        # 3. Remove the cached gateway module
+        # Without step 1, Python may resolve sub-module imports from cached
+        # entries even when the top-level package is blocked.
         import importlib
-        saved = sys.modules.get("claude_agent_sdk")
+
+        # Save all SDK-related modules so we can restore them
+        saved_modules = {}
+        for key in list(sys.modules):
+            if key == "claude_agent_sdk" or key.startswith("claude_agent_sdk."):
+                saved_modules[key] = sys.modules.pop(key)
+
         try:
-            # Temporarily remove the mock
-            sys.modules.pop("claude_agent_sdk", None)
-            # Also remove cached gateway module
+            # Block the import — setting to None triggers ImportError
+            sys.modules["claude_agent_sdk"] = None
+            # Also remove cached gateway module so it re-imports
             sys.modules.pop("ouroboros.gateways.claude_code", None)
             with pytest.raises(ImportError):
                 importlib.import_module("ouroboros.gateways.claude_code")
         finally:
-            # Restore
-            if saved is not None:
-                sys.modules["claude_agent_sdk"] = saved
-            # Re-import with mock
+            # Remove the None sentinel
+            sys.modules.pop("claude_agent_sdk", None)
+            # Restore all saved SDK modules
+            sys.modules.update(saved_modules)
+            # If nothing was saved (SDK not installed), ensure mock is in place
+            if not saved_modules:
+                _ensure_gateway_importable()
+            # Re-import gateway with real/mock SDK
             sys.modules.pop("ouroboros.gateways.claude_code", None)
-            _ensure_gateway_importable()
             importlib.import_module("ouroboros.gateways.claude_code")
 
 

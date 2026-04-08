@@ -17,42 +17,16 @@ import logging
 import os
 import pathlib
 import re
-import sys
 from typing import Any, Dict, List, Optional, Tuple
 
 from ouroboros.utils import utc_now_iso, read_text, write_text
 
-if sys.platform == "win32":
-    import msvcrt
-
-    def _lock_nb(fd: int) -> None:
-        msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
-
-    def _lock_ex(fd: int) -> None:
-        msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
-
-    def _lock_sh(fd: int) -> None:
-        msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
-
-    def _unlock(fd: int) -> None:
-        try:
-            msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
-        except OSError:
-            pass
-else:
-    import fcntl
-
-    def _lock_nb(fd: int) -> None:
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-
-    def _lock_ex(fd: int) -> None:
-        fcntl.flock(fd, fcntl.LOCK_EX)
-
-    def _lock_sh(fd: int) -> None:
-        fcntl.flock(fd, fcntl.LOCK_SH)
-
-    def _unlock(fd: int) -> None:
-        fcntl.flock(fd, fcntl.LOCK_UN)
+from ouroboros.platform_layer import (
+    file_lock_exclusive as _lock_ex,
+    file_lock_shared as _lock_sh,
+    file_lock_exclusive_nb as _lock_nb,
+    file_unlock as _unlock,
+)
 
 log = logging.getLogger(__name__)
 

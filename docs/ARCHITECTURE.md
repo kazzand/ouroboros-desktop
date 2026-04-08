@@ -1,4 +1,8 @@
+<<<<<<< ours
 # Ouroboros v4.17.5 — Architecture & Reference
+=======
+# Ouroboros v4.13.5 — Architecture & Reference
+>>>>>>> theirs
 
 This document describes every component, page, button, API endpoint, and data flow.
 It is the single source of truth for how the system works. Keep it updated.
@@ -72,14 +76,25 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on localhost:8765
       ├── gateways/            ← External API adapters (thin transport, no business logic)
       │   └── claude_code.py   ← Claude Agent SDK gateway (edit + read-only paths)
       ├── tools/               ← Auto-discovered tool plugins
+<<<<<<< ours
       │   ├── claude_advisory_review.py ← Advisory pre-review tool (read-only Claude Agent SDK)
       │   ├── commit_gate.py     ← Advisory freshness gate and commit-attempt recording (extracted from git.py)
       │   ├── parallel_review.py ← Parallel triad+scope orchestration and verdict aggregation (extracted from git.py)
       │   ├── plan_review.py     ← Pre-implementation design review (3 parallel full-codebase reviewers, plan_task tool)
       │   ├── review.py          ← Triad diff review (3-model parallel review against CHECKLISTS.md)
+=======
+      │   ├── ci.py              ← CI trigger and monitoring (GitHub Actions API)
+>>>>>>> theirs
       │   ├── review_helpers.py  ← Shared review helpers (section loader, file packs, intent)
       │   └── scope_review.py   ← Blocking scope reviewer (opus, fail-closed)
-      └── compat.py            ← Cross-platform process/path/locking helpers
+      └── platform_layer.py    ← Cross-platform process/path/locking helpers
+
+# Build & CI (not part of runtime)
+.github/workflows/ci.yml     ← Three-tier CI (quick/full/release)
+build.sh                      ← macOS build (PyInstaller → .dmg)
+build_linux.sh                ← Linux build (PyInstaller → .tar.gz)
+build_windows.ps1             ← Windows build (PyInstaller → .zip)
+Dockerfile                    ← Docker image (web UI runtime)
 ```
 
 ### Two-process model
@@ -859,6 +874,24 @@ errors surface via the same observability path.
 - **Queue semantics**: `request_deep_self_review` tool → `deep_self_review_request` event → `queue_deep_self_review_task` → supervisor assigns to worker → `handle_task` branches on `task_type == "deep_self_review"`.
 - **Slash command**: `/review` triggers a deep self-review.
 
+### CI trigger tool (tools/ci.py)
+
+- **`run_ci_tests`**: push current branch to GitHub and trigger the full CI matrix
+  (Ubuntu + Windows + macOS) via `workflow_dispatch`.
+- Uses **GitHub REST API** directly (`urllib.request`) — no `gh` CLI dependency.
+- **Parameters**: `wait` (bool, default true — poll for results), `timeout_minutes` (1-30, default 15).
+- **Requires**: `GITHUB_TOKEN` + `GITHUB_REPO` configured in Settings → Integrations.
+- **Non-core tool**: available via `enable_tools("run_ci_tests")`, not loaded by default.
+- **Workflow**: push branch → find `ci.yml` workflow ID → trigger `workflow_dispatch` →
+  poll every 30s → return pass/fail with per-OS failure details and log tails.
+- **Failure reporting**: on CI failure, fetches failed job list, identifies which OS failed,
+  downloads job logs (last 5000 chars), and returns structured output.
+- **Progress emission**: emits progress events to UI during push, trigger, and polling phases.
+- **Use case**: agent triggers CI after platform-sensitive changes (process management,
+  file locking, subprocess flags, new tool with native dependencies) to verify cross-platform
+  compatibility before releasing. Not intended for every commit — agent decides when to run
+  based on change characteristics.
+
 ---
 
 ## 7. Configuration (ouroboros/config.py)
@@ -935,6 +968,43 @@ Settings file: `~/Ouroboros/data/settings.json`. File-locked for concurrent acce
 
 `safe_restart()` does `git checkout -f ouroboros` + `git reset --hard` on the repo.
 Uncommitted changes are rescued to `~/Ouroboros/data/archive/rescue/` before reset.
+
+---
+
+## 8.1 CI/CD Pipeline (`.github/workflows/ci.yml`)
+
+Three-tier GitHub Actions workflow:
+
+| Tier | Trigger | What runs | Time |
+|------|---------|-----------|------|
+| Quick | Push to `ouroboros` (code paths only) | Ubuntu-only: `pytest` | ~1 min |
+| Full | Push to `ouroboros-stable`, manual (`workflow_dispatch`), or tag `v*` | Matrix: Ubuntu + Windows + macOS: `pytest` | ~5 min |
+| Build | Tag `v*` (after full-test passes) | Matrix: PyInstaller build → `.dmg` / `.tar.gz` / `.zip` + GitHub Release | ~15 min |
+
+Path filters for branch pushes: `ouroboros/**`, `supervisor/**`, `server.py`, `tests/**`,
+`web/**`, `requirements.txt`, `pyproject.toml`, `.github/workflows/**`, `build.sh`,
+`build_linux.sh`, `build_windows.ps1`, `Dockerfile`, `VERSION`, `README.md`.
+Tag pushes (`v*`) always fire regardless of paths.
+
+### Build scripts
+
+| Script | Platform | Output |
+|--------|----------|--------|
+| `build.sh` | macOS | `dist/Ouroboros-{VERSION}-macos.dmg` (optional signing + notarization) |
+| `build_linux.sh` | Linux | `dist/Ouroboros-linux-x86_64.tar.gz` |
+| `build_windows.ps1` | Windows | `dist/Ouroboros-windows-x64.zip` |
+
+All three use PyInstaller with `server.py` as entry point. Hidden imports cover
+starlette, uvicorn, websockets, dulwich, huggingface_hub. Data bundles include
+`ouroboros/`, `supervisor/`, `web/`, `prompts/`, `docs/`, `assets/`, `BIBLE.md`,
+`README.md`, `VERSION`, `pyproject.toml`.
+
+### Docker (`Dockerfile`)
+
+```
+python:3.10-slim + git → pip install requirements → python server.py
+Binds 0.0.0.0:8765, sets OUROBOROS_FILE_BROWSER_DEFAULT=/app.
+```
 
 ---
 

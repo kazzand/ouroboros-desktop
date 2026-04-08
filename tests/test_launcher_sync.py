@@ -62,10 +62,15 @@ def test_sync_bundle_managed_paths_overwrites_existing_managed_files(monkeypatch
     assert (repo_dir / "server.py").read_text(encoding="utf-8") == "new-server\n"
 
 
+<<<<<<< ours
 def test_sync_existing_repo_calls_core_and_commit(monkeypatch, tmp_path):
     """sync_existing_repo_from_bundle only syncs core files and commits them.
     Full bundle overwrite paths (managed paths, dirty-check, backup, version sync)
     must NOT be invoked — agent self-modifications must not be clobbered."""
+=======
+def test_sync_existing_repo_calls_core_then_commit(monkeypatch, tmp_path):
+    """sync_existing_repo_from_bundle calls sync_core_files then commit_synced_files."""
+>>>>>>> theirs
     bootstrap = _reload_bootstrap()
     bundle_dir = tmp_path / "bundle"
     repo_dir = tmp_path / "repo"
@@ -74,6 +79,7 @@ def test_sync_existing_repo_calls_core_and_commit(monkeypatch, tmp_path):
 
     calls = []
     ctx = _make_context(bundle_dir, repo_dir)
+<<<<<<< ours
 
     monkeypatch.setattr(bootstrap, "sync_core_files", lambda context: calls.append("core"))
     monkeypatch.setattr(bootstrap, "commit_synced_files", lambda context: calls.append("commit-safety"))
@@ -88,6 +94,10 @@ def test_sync_existing_repo_calls_core_and_commit(monkeypatch, tmp_path):
                "create_bundle_backup_branch", "commit_bundle_sync"):
         if hasattr(bootstrap, fn):
             monkeypatch.setattr(bootstrap, fn, _should_not_be_called(fn))
+=======
+    monkeypatch.setattr(bootstrap, "sync_core_files", lambda context: calls.append("core"))
+    monkeypatch.setattr(bootstrap, "commit_synced_files", lambda context: calls.append("commit-safety"))
+>>>>>>> theirs
 
     bootstrap.sync_existing_repo_from_bundle(ctx)
 
