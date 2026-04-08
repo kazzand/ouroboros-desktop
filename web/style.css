@@ -1261,9 +1261,7 @@ body {
     left: 0;
     right: 0;
     z-index: 5;
-    background: linear-gradient(0deg, rgba(13, 11, 15, 0.88) 60%, rgba(13, 11, 15, 0.0) 100%);
-    backdrop-filter: blur(12px);
-    -webkit-backdrop-filter: blur(12px);
+    background: linear-gradient(0deg, rgba(13, 11, 15, 0.72) 30%, rgba(13, 11, 15, 0.0) 100%);
 }
 
 .chat-input-wrap {
@@ -1363,9 +1361,11 @@ body {
     flex: 1;
     padding: 10px 52px 10px 42px;
     border-radius: 24px;
-    border: 1px solid rgba(201, 53, 69, 0.12);
-    background: rgba(26, 21, 32, 0.75);
-    backdrop-filter: blur(8px);
+    border: 1px solid rgba(255, 255, 255, 0.09);
+    background: rgba(26, 21, 32, 0.62);
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
+    box-shadow: 0 4px 24px rgba(0, 0, 0, 0.22), inset 0 1px 0 rgba(255, 255, 255, 0.04);
     color: var(--text-primary);
     font-size: 15px;
     font-family: inherit;
@@ -1373,11 +1373,12 @@ body {
     resize: none;
     min-height: 42px;
     max-height: 120px;
-    transition: border-color 0.2s, box-shadow 0.2s;
+    transition: border-color 0.2s, box-shadow 0.2s, background 0.2s;
 }
 #chat-input:focus {
     border-color: rgba(232, 93, 111, 0.4);
-    box-shadow: 0 0 0 3px rgba(201, 53, 69, 0.10);
+    background: rgba(26, 21, 32, 0.72);
+    box-shadow: 0 4px 24px rgba(0, 0, 0, 0.22), inset 0 1px 0 rgba(255, 255, 255, 0.04), 0 0 0 3px rgba(201, 53, 69, 0.10);
 }
 #chat-input::placeholder { color: var(--text-muted); }
 

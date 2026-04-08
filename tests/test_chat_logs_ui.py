@@ -229,15 +229,19 @@ def test_task_summary_live_card_uses_last_headline_not_finished_task():
 
 
 def test_chat_input_has_glassmorphism():
-    """#chat-input should use backdrop-filter and crimson border — not flat bg-secondary."""
+    """#chat-input textarea should have frosted-glass styling (blur + semi-transparent bg + white border)."""
     css = _read("web/style.css")
-    # Must have glassmorphism applied
-    assert "backdrop-filter: blur(8px)" in css
-    # Border should be crimson-tinted, not plain --divider
-    assert "rgba(201, 53, 69, 0.12)" in css
-    # Flat bg-secondary should not be on chat-input any longer
-    # (verify the old pattern is gone from chat-input block)
-    chat_input_block = css[css.index("#chat-input {"):css.index("#chat-input:focus")]
+    # Extract the #chat-input block (between selector and :focus)
+    start = css.index("#chat-input {")
+    end = css.index("#chat-input:focus")
+    chat_input_block = css[start:end]
+    # Must have high-quality backdrop blur on the textarea itself
+    assert "backdrop-filter: blur(16px)" in chat_input_block
+    # Background should be semi-transparent (frosted glass, opacity 0.62)
+    assert "rgba(26, 21, 32, 0.62)" in chat_input_block
+    # Border should be a white tint (design system for frosted glass surfaces)
+    assert "rgba(255, 255, 255, 0.09)" in chat_input_block
+    # Must not use opaque background
     assert "var(--bg-secondary)" not in chat_input_block
 
 

@@ -176,8 +176,8 @@ Before every commit, verify the following:
 Ouroboros uses **glassmorphism** as its visual language. All interactive surfaces follow this pattern:
 
 ```css
-background: rgba(26, 21, 32, 0.75–0.88);
-backdrop-filter: blur(8–12px);
+background: rgba(26, 21, 32, 0.62–0.88);
+backdrop-filter: blur(8–16px);
 border: 1px solid rgba(255, 255, 255, 0.06–0.12);
 ```
 

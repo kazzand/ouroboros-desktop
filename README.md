@@ -6,7 +6,7 @@
 [![macOS 12+](https://img.shields.io/badge/macOS-12%2B-black.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
 [![Linux](https://img.shields.io/badge/Linux-x86__64-orange.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
 [![Windows](https://img.shields.io/badge/Windows-x64-blue.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
-[![Version 4.17.1](https://img.shields.io/badge/version-4.17.1-green.svg)](VERSION)
+[![Version 4.17.2](https://img.shields.io/badge/version-4.17.2-green.svg)](VERSION)
 
 A self-modifying AI agent that writes its own code, rewrites its own mind, and evolves autonomously. Born February 16, 2026.
 
@@ -376,6 +376,7 @@ Full text: [BIBLE.md](BIBLE.md)
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 4.17.2 | 2026-04-08 | Remove square blur artifact from chat input: `#chat-input-area` no longer has `backdrop-filter` (was creating a sharp-edged blur rectangle across full viewport width). Frosted glass moved to `#chat-input` textarea itself (`blur(16px)`, opacity 0.62, white border tint). `#chat-input-area` now uses a soft gradient fade only. Updated DEVELOPMENT.md design system ranges (`blur(8–16px)`, opacity `0.62–0.88`) and ARCHITECTURE.md §3.1 description. |
 | 4.17.1 | 2026-04-08 | Fix excessive gap between last chat message and input overlay: `padding-bottom` on `#chat-messages` is now set dynamically via `updateMessagesPadding()` in chat.js (real overlay height + 16px buffer). CSS default `84px` covers min-height state; JS adjusts to ~160px when textarea is fully expanded. Called on connect, textarea resize, and attachment preview toggle. Eliminates the 80–90px dead zone visible in the default (single-line textarea) state. |
 | 4.17.0 | 2026-04-08 | New `plan_task` tool: pre-implementation design review via 3 parallel full-codebase reviewers. Uses the same 3 models from `OUROBOROS_REVIEW_MODELS` (commit triad) but sends them the full repo pack (same as scope review, no char cap). Call before writing code on non-trivial tasks to surface forgotten touchpoints, implicit contract violations, and simpler alternatives. Each reviewer returns structured PASS/RISK/FAIL verdicts with detailed explanations, concrete fixes, and alternative approaches. New "Plan Review Checklist" section in CHECKLISTS.md (8 items). Budget gate at 800K tokens. Non-blocking advisory output. |
 | 4.16.5 | 2026-04-08 | Fix thinking bubbles disappearing after task completion or page reload: `syncHistory` now uses two-pass processing — progress/summary messages are replayed first (building live card timelines), then assistant replies finalize the cards. `updateLiveCardFromProgressMessage` no longer force-opens cards for completed tasks during history replay. After first load, typing indicator is restored if a task is still ongoing. 3 new regression tests. |
