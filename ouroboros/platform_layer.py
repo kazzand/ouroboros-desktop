@@ -96,8 +96,7 @@ def pid_lock_release(path: str) -> None:
 def file_lock_exclusive(fd: int) -> None:
     """Acquire an exclusive (write) lock on a file descriptor. Blocks."""
     if IS_WINDOWS:
-        import msvcrt
-        msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
+        _win32_lock(fd, exclusive=True, blocking=True)
     else:
         import fcntl
         fcntl.flock(fd, fcntl.LOCK_EX)
@@ -106,8 +105,7 @@ def file_lock_exclusive(fd: int) -> None:
 def file_lock_shared(fd: int) -> None:
     """Acquire a shared (read) lock on a file descriptor. Blocks."""
     if IS_WINDOWS:
-        import msvcrt
-        msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
+        _win32_lock(fd, exclusive=False, blocking=True)
     else:
         import fcntl
         fcntl.flock(fd, fcntl.LOCK_SH)
@@ -116,8 +114,7 @@ def file_lock_shared(fd: int) -> None:
 def file_lock_exclusive_nb(fd: int) -> None:
     """Try to acquire an exclusive lock, non-blocking. Raises OSError on failure."""
     if IS_WINDOWS:
-        import msvcrt
-        msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+        _win32_lock(fd, exclusive=True, blocking=False)
     else:
         import fcntl
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -126,14 +123,95 @@ def file_lock_exclusive_nb(fd: int) -> None:
 def file_unlock(fd: int) -> None:
     """Release a file lock."""
     if IS_WINDOWS:
-        import msvcrt
-        try:
-            msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
-        except OSError:
-            pass
+        _win32_unlock(fd)
     else:
         import fcntl
         fcntl.flock(fd, fcntl.LOCK_UN)
+
+
+# ---------------------------------------------------------------------------
+# Windows file locking via LockFileEx / UnlockFileEx (ctypes)
+#
+# msvcrt.locking() is a *byte-range* lock that fails on empty files (0 bytes).
+# LockFileEx locks a range that can extend beyond the current file size,
+# which makes it work identically to fcntl.flock() on Unix.
+# ---------------------------------------------------------------------------
+
+# Per-fd OVERLAPPED storage so unlock can find the right structure.
+_win32_overlapped: dict = {}
+
+
+def _win32_lock(fd: int, *, exclusive: bool = True, blocking: bool = True) -> None:
+    """Lock a file descriptor using Win32 LockFileEx. Works on empty files."""
+    import ctypes
+    from ctypes import wintypes
+    import msvcrt as _msvcrt
+
+    _LOCKFILE_FAIL_IMMEDIATELY = 0x00000001
+    _LOCKFILE_EXCLUSIVE_LOCK = 0x00000002
+
+    class OVERLAPPED(ctypes.Structure):
+        _fields_ = [
+            ("Internal", wintypes.ULONG_PTR),
+            ("InternalHigh", wintypes.ULONG_PTR),
+            ("Offset", wintypes.DWORD),
+            ("OffsetHigh", wintypes.DWORD),
+            ("hEvent", wintypes.HANDLE),
+        ]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.LockFileEx.argtypes = [
+        wintypes.HANDLE, wintypes.DWORD, wintypes.DWORD,
+        wintypes.DWORD, wintypes.DWORD, ctypes.POINTER(OVERLAPPED),
+    ]
+    kernel32.LockFileEx.restype = wintypes.BOOL
+
+    hfile = _msvcrt.get_osfhandle(fd)
+    flags = 0
+    if exclusive:
+        flags |= _LOCKFILE_EXCLUSIVE_LOCK
+    if not blocking:
+        flags |= _LOCKFILE_FAIL_IMMEDIATELY
+
+    ov = OVERLAPPED()
+    # Lock a huge range starting at offset 0 — standard Win32 "whole file" pattern.
+    if not kernel32.LockFileEx(hfile, flags, 0, 0xFFFFFFFF, 0xFFFFFFFF, ctypes.byref(ov)):
+        err = ctypes.get_last_error()
+        raise OSError(f"LockFileEx failed (error {err})")
+
+    _win32_overlapped[fd] = (hfile, ov)
+
+
+def _win32_unlock(fd: int) -> None:
+    """Unlock a file descriptor previously locked by _win32_lock."""
+    import ctypes
+    from ctypes import wintypes
+
+    entry = _win32_overlapped.pop(fd, None)
+    if entry is None:
+        return
+
+    class OVERLAPPED(ctypes.Structure):
+        _fields_ = [
+            ("Internal", wintypes.ULONG_PTR),
+            ("InternalHigh", wintypes.ULONG_PTR),
+            ("Offset", wintypes.DWORD),
+            ("OffsetHigh", wintypes.DWORD),
+            ("hEvent", wintypes.HANDLE),
+        ]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.UnlockFileEx.argtypes = [
+        wintypes.HANDLE, wintypes.DWORD,
+        wintypes.DWORD, wintypes.DWORD, ctypes.POINTER(OVERLAPPED),
+    ]
+    kernel32.UnlockFileEx.restype = wintypes.BOOL
+
+    hfile, ov = entry
+    try:
+        kernel32.UnlockFileEx(hfile, 0, 0xFFFFFFFF, 0xFFFFFFFF, ctypes.byref(ov))
+    except OSError:
+        pass
 
 
 # ---------------------------------------------------------------------------

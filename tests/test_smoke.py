@@ -241,7 +241,7 @@ def test_memory_identity():
         mem = Memory(drive_root=pathlib.Path(tmp))
         # Write identity file directly (identity_path is a method)
         mem.identity_path().parent.mkdir(parents=True, exist_ok=True)
-        mem.identity_path().write_text("I am Ouroboros")
+        mem.identity_path().write_text("I am Ouroboros", encoding="utf-8")
         content = mem.load_identity()
         assert "Ouroboros" in content
 

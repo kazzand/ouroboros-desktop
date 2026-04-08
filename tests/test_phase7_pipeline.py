@@ -55,7 +55,7 @@ def _make_ctx(tmp_path):
     subprocess.run(["git", "init"], cwd=str(repo), capture_output=True)
     subprocess.run(["git", "config", "user.name", "Test"], cwd=str(repo), capture_output=True)
     subprocess.run(["git", "config", "user.email", "t@t"], cwd=str(repo), capture_output=True)
-    (repo / "dummy.txt").write_text("init")
+    (repo / "dummy.txt").write_text("init", encoding="utf-8")
     subprocess.run(["git", "add", "-A"], cwd=str(repo), capture_output=True)
     subprocess.run(["git", "commit", "-m", "init"], cwd=str(repo), capture_output=True)
     subprocess.run(["git", "branch", "-M", "ouroboros"], cwd=str(repo), capture_output=True)
