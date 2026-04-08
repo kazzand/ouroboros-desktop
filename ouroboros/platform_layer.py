@@ -50,8 +50,7 @@ def pid_lock_acquire(path: str) -> bool:
     try:
         _lock_fd = open(path, "w")
         if IS_WINDOWS:
-            import msvcrt
-            msvcrt.locking(_lock_fd.fileno(), msvcrt.LK_NBLCK, 1)
+            _win32_lock(_lock_fd.fileno(), exclusive=True, blocking=False)
         else:
             import fcntl
             fcntl.flock(_lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -67,9 +66,8 @@ def pid_lock_release(path: str) -> None:
     global _lock_fd
     if _lock_fd is not None:
         if IS_WINDOWS:
-            import msvcrt
             try:
-                msvcrt.locking(_lock_fd.fileno(), msvcrt.LK_UNLCK, 1)
+                _win32_unlock(_lock_fd.fileno())
             except Exception:
                 pass
         else:
