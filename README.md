@@ -6,7 +6,7 @@
 [![macOS 12+](https://img.shields.io/badge/macOS-12%2B-black.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
 [![Linux](https://img.shields.io/badge/Linux-x86__64-orange.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
 [![Windows](https://img.shields.io/badge/Windows-x64-blue.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
-[![Version 4.13.1](https://img.shields.io/badge/version-4.13.1-green.svg)](VERSION)
+[![Version 4.13.2](https://img.shields.io/badge/version-4.13.2-green.svg)](VERSION)
 
 A self-modifying AI agent that writes its own code, rewrites its own mind, and evolves autonomously. Born February 16, 2026.
 
@@ -374,6 +374,7 @@ Full text: [BIBLE.md](BIBLE.md)
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 4.13.2 | 2026-04-08 | Windows CI compatibility: replace `msvcrt.locking` with `LockFileEx`/`UnlockFileEx` via ctypes for proper empty-file locking on Windows; add `encoding="utf-8"` to all `write_text()` calls across 14 test files; fix `json.dumps(encoding=...)` Python 2 remnant in 2 test files. 863 tests pass (0 failures). |
 | 4.13.1 | 2026-04-06 | CI tool hardening: detached HEAD guard, remote-vs-GITHUB_REPO mismatch check (fail-closed for non-GitHub remotes), URLError/TimeoutError/OSError handling in HTTP layer, workflow-scoped polling, dotted repo name support, redundant API call elimination. 25 tests (6 new). |
 | 4.13.0 | 2026-04-06 | `run_ci_tests` tool: push to GitHub and trigger full CI matrix (Ubuntu + Windows + macOS) via GitHub Actions `workflow_dispatch`. Polls for results, downloads failure logs with per-OS breakdowns. Agent decides when to run based on change type (platform-sensitive vs docs-only). Requires `GITHUB_TOKEN` + `GITHUB_REPO` in Settings. Available as an extra tool via `enable_tools`. 19 new tests. |
 | 4.12.0 | 2026-04-05 | CI/CD and build infrastructure: three-tier GitHub Actions workflow (quick Ubuntu tests on every push, full 3-OS matrix on stable/manual, build+release on tags); PyInstaller-based build scripts for macOS (`build.sh` → `.dmg`), Linux (`build_linux.sh` → `.tar.gz`), and Windows (`build_windows.ps1` → `.zip`); Dockerfile for web UI runtime; `pyinstaller` added as optional `[build]` dependency. |

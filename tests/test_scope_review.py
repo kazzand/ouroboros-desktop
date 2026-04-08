@@ -167,10 +167,10 @@ class TestScopeFailClosed:
         import subprocess
         subprocess.run(["git", "init"], cwd=str(tmp_path), capture_output=True)
         (tmp_path / "docs").mkdir(exist_ok=True)
-        (tmp_path / "docs" / "CHECKLISTS.md").write_text("## Intent / Scope Review Checklist\n\nplaceholder\n")
-        (tmp_path / "docs" / "DEVELOPMENT.md").write_text("dev guide\n")
+        (tmp_path / "docs" / "CHECKLISTS.md").write_text("## Intent / Scope Review Checklist\n\nplaceholder\n", encoding="utf-8")
+        (tmp_path / "docs" / "DEVELOPMENT.md").write_text("dev guide\n", encoding="utf-8")
         # Commit a file, then stage its deletion
-        (tmp_path / "gone.py").write_text("CONTENT_BEFORE_DELETION")
+        (tmp_path / "gone.py").write_text("CONTENT_BEFORE_DELETION", encoding="utf-8")
         subprocess.run(["git", "add", "gone.py"], cwd=str(tmp_path), capture_output=True)
         subprocess.run(
             ["git", "-c", "user.email=t@t", "-c", "user.name=T",
@@ -194,9 +194,9 @@ class TestScopeFailClosed:
         import subprocess
         subprocess.run(["git", "init"], cwd=str(tmp_path), capture_output=True)
         (tmp_path / "docs").mkdir(exist_ok=True)
-        (tmp_path / "docs" / "CHECKLISTS.md").write_text("## Intent / Scope Review Checklist\n\nplaceholder\n")
-        (tmp_path / "docs" / "DEVELOPMENT.md").write_text("dev guide\n")
-        (tmp_path / "good.py").write_text("print('ok')")
+        (tmp_path / "docs" / "CHECKLISTS.md").write_text("## Intent / Scope Review Checklist\n\nplaceholder\n", encoding="utf-8")
+        (tmp_path / "docs" / "DEVELOPMENT.md").write_text("dev guide\n", encoding="utf-8")
+        (tmp_path / "good.py").write_text("print('ok')", encoding="utf-8")
         (tmp_path / "image.png").write_bytes(b"\x89PNG\r\n" + b"\x00" * 100)
         subprocess.run(["git", "add", "."], cwd=str(tmp_path), capture_output=True)
         subprocess.run(
@@ -204,7 +204,7 @@ class TestScopeFailClosed:
             cwd=str(tmp_path), capture_output=True,
         )
         # Stage both files
-        (tmp_path / "good.py").write_text("print('v2')")
+        (tmp_path / "good.py").write_text("print('v2')", encoding="utf-8")
         (tmp_path / "image.png").write_bytes(b"\x89PNG\r\n" + b"\x00" * 200)
         subprocess.run(["git", "add", "."], cwd=str(tmp_path), capture_output=True)
 
@@ -218,15 +218,15 @@ class TestScopeFailClosed:
         import subprocess
         subprocess.run(["git", "init"], cwd=str(tmp_path), capture_output=True)
         (tmp_path / "docs").mkdir(exist_ok=True)
-        (tmp_path / "docs" / "CHECKLISTS.md").write_text("## Intent / Scope Review Checklist\n\nplaceholder\n")
-        (tmp_path / "docs" / "DEVELOPMENT.md").write_text("dev guide\n")
-        (tmp_path / "a.py").write_text("aaa")
+        (tmp_path / "docs" / "CHECKLISTS.md").write_text("## Intent / Scope Review Checklist\n\nplaceholder\n", encoding="utf-8")
+        (tmp_path / "docs" / "DEVELOPMENT.md").write_text("dev guide\n", encoding="utf-8")
+        (tmp_path / "a.py").write_text("aaa", encoding="utf-8")
         subprocess.run(["git", "add", "."], cwd=str(tmp_path), capture_output=True)
         subprocess.run(
             ["git", "-c", "user.email=test@ouroboros", "-c", "user.name=TestBot", "commit", "-m", "init"],
             cwd=str(tmp_path), capture_output=True,
         )
-        (tmp_path / "a.py").write_text("bbb")
+        (tmp_path / "a.py").write_text("bbb", encoding="utf-8")
         subprocess.run(["git", "add", "."], cwd=str(tmp_path), capture_output=True)
 
         mod = _get_module("ouroboros.tools.scope_review")
@@ -243,16 +243,16 @@ class TestRunScopeReviewFailClosed:
         import subprocess
         subprocess.run(["git", "init"], cwd=str(tmp_path), capture_output=True)
         (tmp_path / "docs").mkdir(exist_ok=True)
-        (tmp_path / "docs" / "CHECKLISTS.md").write_text("## Intent / Scope Review Checklist\n\nplaceholder\n")
-        (tmp_path / "docs" / "DEVELOPMENT.md").write_text("dev guide\n")
-        (tmp_path / "ok.py").write_text("print(1)")
+        (tmp_path / "docs" / "CHECKLISTS.md").write_text("## Intent / Scope Review Checklist\n\nplaceholder\n", encoding="utf-8")
+        (tmp_path / "docs" / "DEVELOPMENT.md").write_text("dev guide\n", encoding="utf-8")
+        (tmp_path / "ok.py").write_text("print(1)", encoding="utf-8")
         (tmp_path / "bin.png").write_bytes(b"\x89PNG" + b"\x00" * 200)
         subprocess.run(["git", "add", "."], cwd=str(tmp_path), capture_output=True)
         subprocess.run(
             ["git", "-c", "user.email=test@ouroboros", "-c", "user.name=TestBot", "commit", "-m", "init"],
             cwd=str(tmp_path), capture_output=True,
         )
-        (tmp_path / "ok.py").write_text("print(2)")
+        (tmp_path / "ok.py").write_text("print(2)", encoding="utf-8")
         (tmp_path / "bin.png").write_bytes(b"\x89PNG" + b"\x00" * 300)
         subprocess.run(["git", "add", "."], cwd=str(tmp_path), capture_output=True)
 
@@ -279,9 +279,9 @@ class TestRunScopeReviewFailClosed:
         import subprocess
         subprocess.run(["git", "init"], cwd=str(tmp_path), capture_output=True)
         (tmp_path / "docs").mkdir(exist_ok=True)
-        (tmp_path / "docs" / "CHECKLISTS.md").write_text("## Intent / Scope Review Checklist\n\nplaceholder\n")
-        (tmp_path / "docs" / "DEVELOPMENT.md").write_text("dev guide\n")
-        (tmp_path / "gone.py").write_text("CONTENT_X")
+        (tmp_path / "docs" / "CHECKLISTS.md").write_text("## Intent / Scope Review Checklist\n\nplaceholder\n", encoding="utf-8")
+        (tmp_path / "docs" / "DEVELOPMENT.md").write_text("dev guide\n", encoding="utf-8")
+        (tmp_path / "gone.py").write_text("CONTENT_X", encoding="utf-8")
         subprocess.run(["git", "add", "."], cwd=str(tmp_path), capture_output=True)
         subprocess.run(
             ["git", "-c", "user.email=t@t", "-c", "user.name=T",
@@ -609,8 +609,8 @@ class TestHeadSnapshotSection:
         (tmp_path / "docs").mkdir(exist_ok=True)
         (tmp_path / "docs" / "CHECKLISTS.md").write_text(
             "## Intent / Scope Review Checklist\n\nplaceholder\n"
-        )
-        (tmp_path / "docs" / "DEVELOPMENT.md").write_text("dev guide\n")
+        , encoding="utf-8")
+        (tmp_path / "docs" / "DEVELOPMENT.md").write_text("dev guide\n", encoding="utf-8")
         (tmp_path / "a.py").write_text("ORIGINAL", encoding="utf-8")
         subprocess.run(["git", "add", "."], cwd=str(tmp_path), capture_output=True)
         self._git_commit(tmp_path, "init")
@@ -643,8 +643,8 @@ class TestHeadSnapshotSection:
         (tmp_path / "docs").mkdir(exist_ok=True)
         (tmp_path / "docs" / "CHECKLISTS.md").write_text(
             "## Intent / Scope Review Checklist\n\nplaceholder\n"
-        )
-        (tmp_path / "docs" / "DEVELOPMENT.md").write_text("dev guide\n")
+        , encoding="utf-8")
+        (tmp_path / "docs" / "DEVELOPMENT.md").write_text("dev guide\n", encoding="utf-8")
         (tmp_path / "to_delete.py").write_text("CONTENT_TO_DELETE", encoding="utf-8")
         subprocess.run(["git", "add", "."], cwd=str(tmp_path), capture_output=True)
         subprocess.run(
@@ -671,8 +671,8 @@ class TestHeadSnapshotSection:
         (tmp_path / "docs").mkdir(exist_ok=True)
         (tmp_path / "docs" / "CHECKLISTS.md").write_text(
             "## Intent / Scope Review Checklist\n\nplaceholder\n"
-        )
-        (tmp_path / "docs" / "DEVELOPMENT.md").write_text("dev guide\n")
+        , encoding="utf-8")
+        (tmp_path / "docs" / "DEVELOPMENT.md").write_text("dev guide\n", encoding="utf-8")
         (tmp_path / "old_name.py").write_text("ORIGINAL_RENAME_CONTENT", encoding="utf-8")
         subprocess.run(["git", "add", "."], cwd=str(tmp_path), capture_output=True)
         subprocess.run(

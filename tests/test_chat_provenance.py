@@ -32,7 +32,7 @@ def test_chat_history_marks_system_entries(tmp_path):
             "direction": "system",
             "type": "task_summary",
             "text": "Reflection from the previous task.",
-        }) + "\n",
+        }, ensure_ascii=False) + "\n",
         encoding="utf-8",
     )
 

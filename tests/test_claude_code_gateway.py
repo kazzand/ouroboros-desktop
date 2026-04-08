@@ -202,9 +202,9 @@ class TestReadonlyGuard:
 
 class TestProjectContext:
     def test_loads_existing_docs(self, tmp_path):
-        (tmp_path / "BIBLE.md").write_text("# Constitution")
+        (tmp_path / "BIBLE.md").write_text("# Constitution", encoding="utf-8")
         (tmp_path / "docs").mkdir()
-        (tmp_path / "docs" / "DEVELOPMENT.md").write_text("# Dev guide")
+        (tmp_path / "docs" / "DEVELOPMENT.md").write_text("# Dev guide", encoding="utf-8")
         ctx = _load_project_context(tmp_path)
         assert "CONSTITUTION" in ctx
         assert "DEVELOPMENT GUIDE" in ctx
@@ -214,7 +214,7 @@ class TestProjectContext:
         assert ctx == ""  # no docs, empty context
 
     def test_truncates_large_docs(self, tmp_path):
-        (tmp_path / "BIBLE.md").write_text("x" * 100_000)
+        (tmp_path / "BIBLE.md").write_text("x" * 100_000, encoding="utf-8")
         ctx = _load_project_context(tmp_path)
         assert "truncated" in ctx.lower()
 

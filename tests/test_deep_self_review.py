@@ -20,8 +20,8 @@ def tmp_repo(tmp_path):
     """Create a minimal git repo with tracked files."""
     repo = tmp_path / "repo"
     repo.mkdir()
-    (repo / "main.py").write_text("print('hello')\n")
-    (repo / "lib.py").write_text("def add(a, b): return a + b\n")
+    (repo / "main.py").write_text("print('hello')\n", encoding="utf-8")
+    (repo / "lib.py").write_text("def add(a, b): return a + b\n", encoding="utf-8")
     return repo
 
 
@@ -32,11 +32,11 @@ def tmp_drive(tmp_path):
     drive.mkdir()
     mem = drive / "memory"
     mem.mkdir()
-    (mem / "identity.md").write_text("I am Ouroboros.\n")
-    (mem / "scratchpad.md").write_text("Working notes.\n")
+    (mem / "identity.md").write_text("I am Ouroboros.\n", encoding="utf-8")
+    (mem / "scratchpad.md").write_text("Working notes.\n", encoding="utf-8")
     know = mem / "knowledge"
     know.mkdir()
-    (know / "patterns.md").write_text("## Patterns\n- Error class A\n")
+    (know / "patterns.md").write_text("## Patterns\n- Error class A\n", encoding="utf-8")
     return drive
 
 
