@@ -93,6 +93,22 @@ Ouroboros repository.
   concrete stale artifact is identified (specific file, line, or symbol).
   If no concrete staleness is found, write verdict PASS with a short reason.
 
+### Critical threshold rule (applies to ALL items)
+
+Before marking any item CRITICAL you MUST be able to answer YES to ALL of:
+1. I can name the **exact file, symbol, function, test, or config path** in this
+   repository that makes this problem live RIGHT NOW.
+2. That artifact actually appears in the diff or touched-file context I have been given
+   (not just in a hypothetical future scenario or external environment).
+3. The fix requires a **change to this diff** — not a follow-up task or speculative guard.
+
+If you cannot satisfy all three, use **advisory**, not critical.
+
+One root cause = one FAIL entry. Do NOT split one underlying problem into multiple
+FAIL items that all require the same change. Do NOT hold an obligation open by
+reformulating a fixed concrete issue into a broader future-risk variant — if the
+named artifact is fixed, mark PASS; raise a new advisory if a broader concern remains.
+
 ---
 
 ## Plan Review Checklist

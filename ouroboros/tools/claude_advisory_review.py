@@ -45,6 +45,7 @@ from ouroboros.tools.review_helpers import (
     load_checklist_section,
     build_goal_section,
     build_scope_section,
+    CRITICAL_FINDING_CALIBRATION,
     get_advisory_runtime_diagnostics as _get_runtime_diagnostics,
     format_advisory_sdk_error as _format_advisory_error,
 )
@@ -214,6 +215,8 @@ def _build_advisory_prompt(
             f"\n*(Inline pack contains omission notes for {len(omitted_paths)} path(s): {preview})*\n"
         )
 
+    critical_calibration = CRITICAL_FINDING_CALIBRATION  # noqa: F841 — used in f-string below
+
     prompt = f"""\
 You are performing a pre-commit review of an Ouroboros self-modifying AI agent codebase.
 
@@ -238,6 +241,10 @@ You are performing a pre-commit review of an Ouroboros self-modifying AI agent c
 - development_compliance (item 2): naming, entity type rules, module size, no ad-hoc LLM calls,
   no hardcoded [:N] truncation of cognitive artifacts — all CRITICAL when violated.
 - self_consistency (item 13): if a concrete stale artifact exists (specific file + line), CRITICAL.
+
+## Critical finding calibration (shared with triad and scope reviewers)
+
+{critical_calibration}
 
 ## Output format
 Return ONLY a JSON array. Each element:
@@ -657,6 +664,37 @@ def _next_step_guidance(latest: Optional["AdvisoryRunRecord"], state: "AdvisoryR
     )
 
 
+def _check_worktree_version_sync(repo_dir: pathlib.Path) -> str:
+    """Worktree version-sync preflight for advisory path (non-fatal, non-blocking).
+
+    Reads VERSION, pyproject.toml, README badge, and ARCHITECTURE.md header from
+    the worktree (not staged — advisory runs before git add). Returns a warning
+    string when they disagree, empty string when in sync or VERSION is absent.
+    """
+    try:
+        version_path = repo_dir / "VERSION"
+        if not version_path.exists():
+            return ""
+        version_str = version_path.read_text(encoding="utf-8").strip()
+        if not version_str or not re.match(r"^\d+\.\d+\.\d+$", version_str):
+            return ""
+        desync = []
+        pyproject = repo_dir / "pyproject.toml"
+        if pyproject.exists() and f'version = "{version_str}"' not in pyproject.read_text(encoding="utf-8"):
+            desync.append("pyproject.toml")
+        readme = repo_dir / "README.md"
+        if readme.exists() and f"version-{version_str}-" not in readme.read_text(encoding="utf-8"):
+            desync.append("README.md badge")
+        arch = repo_dir / "docs" / "ARCHITECTURE.md"
+        if arch.exists() and f"# Ouroboros v{version_str}" not in arch.read_text(encoding="utf-8"):
+            desync.append("ARCHITECTURE.md header")
+        if desync:
+            return f"VERSION={version_str} but {', '.join(desync)} differ. Sync version carriers before committing."
+    except Exception:
+        pass
+    return ""
+
+
 # -- Tool handlers --
 
 def _handle_advisory_pre_review(
@@ -722,6 +760,14 @@ def _handle_advisory_pre_review(
                 "Fix the error and retry, or use skip_advisory_pre_review=True to bypass (will be audited)."
             ),
         }, ensure_ascii=False, indent=2)
+
+    # Cheap deterministic version-sync check before expensive SDK call.
+    # Reads worktree content (advisory runs before git add, so no staged index).
+    # Non-fatal: a warning note is prepended to the advisory prompt context but
+    # does not abort the advisory run.
+    version_sync_warning = _check_worktree_version_sync(repo_dir)
+    if version_sync_warning:
+        ctx.emit_progress_fn(f"⚠️ Advisory preflight: {version_sync_warning}")
 
     items, raw_result = _run_claude_advisory(repo_dir, commit_message, ctx, goal=goal, scope=scope, paths=paths, drive_root=drive_root)
 

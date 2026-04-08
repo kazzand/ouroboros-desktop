@@ -31,6 +31,7 @@ from ouroboros.tools.review_helpers import (
     build_scope_section,
     build_touched_file_pack,
     load_checklist_section,
+    CRITICAL_FINDING_CALIBRATION,
 )
 from ouroboros.utils import run_cmd, utc_now_iso, append_jsonl, estimate_tokens
 
@@ -275,6 +276,7 @@ def _build_scope_prompt(
     goal_section = build_goal_section(goal, scope, commit_message)
     scope_section = build_scope_section(scope)
     dev_guide = _load_dev_guide(repo_dir)
+    critical_calibration = CRITICAL_FINDING_CALIBRATION  # noqa: F841 — used in f-string below
     rebuttal_section = (
         f"\n## Developer's rebuttal to previous review feedback\n\n{review_rebuttal}\n\n"
         "Reconsider previous FAIL verdict(s) in light of this argument.\n"
@@ -356,6 +358,8 @@ Severity rules:
 - Use "critical" only when you can cite a concrete missing file, symbol, test, prompt, doc, config, or sibling path and explain why the transformation is incomplete or inconsistent.
 - If you cannot point to an exact touchpoint, use "advisory".
 - Scope affects only unchanged legacy code outside the diff. The diff itself is always fully reviewable.
+
+{critical_calibration}
 
 {scope_checklist}
 {scope_section}

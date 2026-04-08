@@ -65,6 +65,34 @@ _JSON_SECRET_RE = re.compile(
 )
 
 
+# ---------------------------------------------------------------------------
+# Shared reviewer calibration text (DRY — injected into triad, scope, advisory prompts)
+# ---------------------------------------------------------------------------
+
+CRITICAL_FINDING_CALIBRATION = """\
+## Critical severity threshold — READ BEFORE MARKING ANY FINDING CRITICAL
+
+Before marking any finding CRITICAL you MUST:
+1. Name the **exact file, symbol, function, test, or config path** in this repo
+   that makes the problem live RIGHT NOW (not hypothetically in the future).
+2. Confirm this artifact actually exists in the repo context you have been given.
+3. If the concern depends on a hypothetical plugin, future integration, custom
+   environment, fixture, or finalizer that does NOT appear in this repo's
+   codebase — mark it **advisory**, not critical.
+4. One root cause = one FAIL entry. Do NOT split one problem into multiple FAIL
+   items that all require the same fix.
+5. If a previous CRITICAL finding was concretely fixed and only a broader
+   future-risk variant remains, mark that broader concern **advisory**.
+   Do NOT hold an obligation open by reformulating a fixed concrete issue into
+   a more abstract version.
+6. Pre-existing gaps that exist entirely outside the touched area are advisory
+   unless this diff directly depends on them or introduces a regression.
+
+When in doubt: use "advisory". Reserve "critical" for clear, concrete,
+repo-local, reachable defects.
+"""
+
+
 def redact_prompt_secrets(text: str) -> tuple[str, bool]:
     """Redact secret-like values before prompt injection."""
     if not isinstance(text, str) or not text:

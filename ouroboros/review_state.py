@@ -396,45 +396,50 @@ class AdvisoryReviewState:
         return hashlib.sha256(key.encode()).hexdigest()[:12]
 
     def _update_obligations_from_attempt(self, attempt: CommitAttemptRecord) -> List[str]:
-        """Extract critical findings from a blocked attempt and merge them into obligations."""
+        """Merge critical findings into open obligations. Same-item findings (e.g. two
+        code_quality issues) are grouped and their reasons joined to prevent the
+        moving-target overwrite problem.
+        """
         if not attempt.critical_findings:
             return []
+        grouped: dict = {}; grouped_severity: dict = {}; grouped_item_name: dict = {}
+        for f in attempt.critical_findings:
+            if not isinstance(f, dict): continue
+            if str(f.get("verdict", "")).upper() != "FAIL": continue
+            if str(f.get("severity", "")).lower() != "critical": continue
+            item = str(f.get("item", "unknown"))
+            k = item.lower()
+            grouped.setdefault(k, []).append(str(f.get("reason", "")))
+            grouped_severity.setdefault(k, str(f.get("severity", "critical")))
+            grouped_item_name.setdefault(k, item)
 
-        existing_by_item = {
-            ob.item.lower(): ob
-            for ob in self.get_open_obligations(repo_key=attempt.repo_key)
-        }
-        touched_ids: List[str] = []
-        for finding in attempt.critical_findings:
-            if not isinstance(finding, dict):
-                continue
-            if str(finding.get("verdict", "")).upper() != "FAIL":
-                continue
-            if str(finding.get("severity", "")).lower() != "critical":
-                continue
-            item = str(finding.get("item", "unknown"))
-            reason = str(finding.get("reason", ""))
-            item_key = item.lower()
-            if item_key in existing_by_item:
-                ob = existing_by_item[item_key]
-                ob.reason = reason
+        existing = {ob.item.lower(): ob for ob in self.get_open_obligations(repo_key=attempt.repo_key)}
+        touched_ids = []
+        for k, reasons in grouped.items():
+            combined = " | ".join(dict.fromkeys(r for r in reasons if r))
+            if k in existing:
+                ob = existing[k]
+                # Per-segment dedup prevents "A | A | B" inflation on retries.
+                prev = [s.strip() for s in (ob.reason or "").split(" | ") if s.strip()]
+                extra = [s.strip() for s in combined.split(" | ") if s.strip() and s.strip() not in set(prev)]
+                ob.reason = " | ".join(prev + extra) if (prev or extra) else (combined or ob.reason)
                 ob.source_attempt_ts = attempt.ts
-                ob.source_attempt_msg = attempt.commit_message  # full message — no [:200] truncation
+                ob.source_attempt_msg = attempt.commit_message
                 touched_ids.append(ob.obligation_id)
             else:
-                ob_id = self._make_obligation_id(item, reason)
+                ob_id = self._make_obligation_id(grouped_item_name[k], combined)
                 new_ob = ObligationItem(
                     obligation_id=ob_id,
-                    item=item,
-                    severity=str(finding.get("severity", "critical")),
-                    reason=reason,
+                    item=grouped_item_name[k],
+                    severity=grouped_severity[k],
+                    reason=combined,
                     source_attempt_ts=attempt.ts,
-                    source_attempt_msg=attempt.commit_message,  # full message — no [:200] truncation
+                    source_attempt_msg=attempt.commit_message,
                     status="still_open",
                     repo_key=attempt.repo_key,
                 )
                 self.open_obligations.append(new_ob)
-                existing_by_item[item_key] = new_ob
+                existing[k] = new_ob
                 touched_ids.append(ob_id)
         return touched_ids
 

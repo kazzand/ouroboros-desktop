@@ -1,4 +1,4 @@
-# Ouroboros v4.17.5 — Architecture & Reference
+# Ouroboros v4.17.6 — Architecture & Reference
 
 This document describes every component, page, button, API endpoint, and data flow.
 It is the single source of truth for how the system works. Keep it updated.
@@ -569,6 +569,47 @@ backward compatibility but is not the runtime authority.
   `.git/credentials`. `migrate_remote_credentials()` migrates legacy token-in-URL origins.
   Both are wired at startup and on settings save.
 
+### Deterministic preflight checks (`_preflight_check` in `ouroboros/tools/review.py`)
+
+Run before the expensive LLM review on every `repo_commit`. All 8 checks are
+non-fatal on exception (LLM reviewers catch anything that slips through).
+
+| # | Check | Triggers | Action |
+|---|-------|----------|--------|
+| 1 | `version_readme_sync` | VERSION staged but README.md not staged | Block |
+| 2 | `version_in_commit` | Commit message has version pattern but VERSION not staged | Block |
+| 3 | `tests_affected` | `.py` files in `ouroboros/`/`supervisor/` changed without staged tests | Block |
+| 4 | `architecture_doc` | New `.py` in `ouroboros/`/`supervisor/` but `ARCHITECTURE.md` not staged | Block |
+| 5 | `version_values_match` | VERSION staged: pyproject.toml, README badge, ARCHITECTURE.md header in staged index must all match VERSION value | Block on mismatch |
+| 6 | `readme_changelog_row` | VERSION staged: staged README.md changelog must have a table row for the new version | Block if missing |
+| 7 | (reserved) | — | — |
+| 8 | `conftest_no_tests` | `conftest.py` staged with `test_*` functions (AST parse of staged content, not regex/worktree read) | Block with move hint |
+
+### Reviewer calibration (`CRITICAL_FINDING_CALIBRATION` in `ouroboros/tools/review_helpers.py`)
+
+A shared calibration text block injected into triad reviewer prompts (`review.py`),
+scope reviewer prompt (`scope_review.py`), and advisory reviewer prompt
+(`claude_advisory_review.py`). A parallel condensed "Critical threshold rule"
+subsection in `docs/CHECKLISTS.md` provides a summary for the checklist's own context.
+Enforces: (1) exact repo-local artifact required before CRITICAL; (2) hypothetical/
+plugin/env concerns → advisory; (3) one root cause = one FAIL; (4) do not hold
+obligation open by abstracting a fixed concrete issue.
+
+### Obligation grouping (P3, `ouroboros/review_state.py::_update_obligations_from_attempt`)
+
+Multiple critical findings with the same `item` (e.g. two distinct `code_quality`
+issues in the same blocked attempt) are now **grouped into a single obligation** with
+their reasons joined by ` | `. This prevents the "moving-target" overwrite problem
+where repeated blocked commits rotated what was visible without resolving anything.
+Item-level keying is preserved so `_resolve_matching_obligations` continues to work
+via `item.lower()` matching.
+
+### Self-verification template (P2, `ouroboros/tools/review.py::_build_critical_block_message`)
+
+From attempt ≥ 2, blocked commit messages include a structured self-verification
+table requiring the agent to map each open finding to a status, evidence, and note
+before calling `repo_commit` again. Suppresses the "blind retry" pattern.
+
 ### Safety system (safety.py + registry.py)
 
 Multi-layer security:
@@ -707,6 +748,12 @@ errors surface via the same observability path.
 
 #### Advisory pre-review gate
 
+- **Worktree version-sync preflight**: `_check_worktree_version_sync` runs before the
+  expensive SDK call. Reads VERSION, pyproject.toml, README badge, and ARCHITECTURE.md
+  header from the worktree (not staged index — advisory runs before `git add`). If they
+  disagree, a warning is emitted via `emit_progress_fn` and the advisory continues.
+  Non-fatal and non-blocking; the staged-index equivalent in `repo_commit` preflight is
+  the authoritative gate.
 - **`advisory_pre_review`** tool: runs a read-only Claude Agent SDK review of the current
   worktree BEFORE `repo_commit`. Permitted tools: `Read`, `Grep`, `Glob` only (no Edit/Bash).
   Model resolved via `resolve_claude_code_model()` — respects `CLAUDE_CODE_MODEL` setting,

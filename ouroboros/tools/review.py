@@ -56,6 +56,7 @@ from ouroboros.tools.review_helpers import (
     load_checklist_section as _load_checklist_section_precise,
     build_touched_file_pack,
     build_goal_section,
+    CRITICAL_FINDING_CALIBRATION,
 )
 
 
@@ -343,6 +344,8 @@ _REVIEW_PROMPT_TEMPLATE = """\
 - For every FAIL, include a concrete how-to-fix suggestion so the developer knows exactly
   what change is needed.
 
+{critical_calibration}
+
 You must produce a JSON array. Each element has:
 - "item"
 - "verdict": "PASS" or "FAIL"
@@ -397,6 +400,25 @@ def _parse_review_json(raw: str) -> Optional[list]:
     return None
 
 
+def _git_show_staged(repo_dir, path: str) -> str:
+    """Return the staged (index) content of *path* via `git show :PATH`.
+
+    Returns empty string on any error (file not staged, git unavailable, etc.).
+    """
+    import subprocess
+    try:
+        result = subprocess.run(
+            ["git", "show", f":{path}"],
+            cwd=str(repo_dir),
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        return result.stdout if result.returncode == 0 else ""
+    except Exception:
+        return ""
+
+
 def _preflight_check(commit_message: str, staged_files: str,
                      repo_dir) -> Optional[str]:
     """Deterministic pre-review sanity check — catches common mismatches
@@ -407,6 +429,11 @@ def _preflight_check(commit_message: str, staged_files: str,
       2. Commit message references a version but VERSION file not staged
       3. Python code in ouroboros/ or supervisor/ changed but no tests/ files staged
       4. New files added in ouroboros/ or supervisor/ but ARCHITECTURE.md not staged
+      5. VERSION staged: all version carriers (pyproject.toml, README badge,
+         ARCHITECTURE.md header) in the staged index must match VERSION value
+      6. VERSION staged: staged README.md changelog must have a row for the new version
+      7. (reserved — not implemented)
+      8. conftest.py staged: block if it contains test_ functions (should be in test_*.py)
     """
     import re
 
@@ -516,6 +543,86 @@ def _preflight_check(commit_message: str, staged_files: str,
             f"  New files: {new_logic_files[:5]}\n"
             f"  Currently staged: {', '.join(sorted(staged_set)) or '(none)'}"
         )
+
+    # Check 5: If VERSION is staged (non-deleted), verify that pyproject.toml,
+    # README.md badge, and ARCHITECTURE.md header in the staged index all carry
+    # the same version string. Uses `git show :PATH` to read staged content
+    # rather than the worktree, so partially staged changes are handled correctly.
+    if version_staged:
+        try:
+            version_str = _git_show_staged(repo_dir, "VERSION").strip()
+            if version_str and re.match(r'^\d+\.\d+\.\d+$', version_str):
+                desync = []
+                pyproject_text = _git_show_staged(repo_dir, "pyproject.toml")
+                if pyproject_text and f'version = "{version_str}"' not in pyproject_text:
+                    desync.append(f"pyproject.toml (expected version = \"{version_str}\")")
+                readme_text = _git_show_staged(repo_dir, "README.md")
+                if readme_text and f"version-{version_str}-" not in readme_text:
+                    desync.append(f"README.md badge (expected version-{version_str}-)")
+                arch_text = _git_show_staged(repo_dir, "docs/ARCHITECTURE.md")
+                if arch_text and f"# Ouroboros v{version_str}" not in arch_text:
+                    desync.append(f"docs/ARCHITECTURE.md header (expected # Ouroboros v{version_str})")
+                if desync:
+                    return (
+                        f"⚠️ PREFLIGHT_BLOCKED: VERSION file says {version_str} but "
+                        "the following staged files have a different version value:\n"
+                        + "".join(f"  - {d}\n" for d in desync)
+                        + "Update all version references to match VERSION before committing.\n"
+                        f"  Currently staged: {', '.join(sorted(staged_set)) or '(none)'}"
+                    )
+        except Exception:
+            pass  # Non-fatal: LLM reviewers handle version sync
+
+    # Check 6: If VERSION is staged, verify the staged README.md changelog
+    # contains a row for the new version (structural presence check only).
+    if version_staged:
+        try:
+            version_str = _git_show_staged(repo_dir, "VERSION").strip()
+            if version_str and re.match(r'^\d+\.\d+\.\d+$', version_str):
+                readme_text = _git_show_staged(repo_dir, "README.md")
+                if readme_text and not re.search(r'\|\s*' + re.escape(version_str) + r'\s*\|', readme_text):
+                    return (
+                        f"⚠️ PREFLIGHT_BLOCKED: VERSION is {version_str} but README.md "
+                        "changelog has no table row for this version.\n"
+                        "  Add a changelog entry in the Version History table in README.md.\n"
+                        f"  Currently staged: {', '.join(sorted(staged_set)) or '(none)'}"
+                    )
+        except Exception:
+            pass  # Non-fatal
+
+    # Check 7 (not implemented — advisory check reserved for future use)
+
+    # Check 8: if any conftest.py in active_staged contains collectable test functions,
+    # block with an explicit message to move them to test_*.py files.
+    # Reads staged content via git show to validate what will actually be committed.
+    conftest_files = [f for f in active_staged if pathlib.Path(f).name == "conftest.py"]
+    if conftest_files:
+        import ast as _ast
+        for cf in conftest_files:
+            try:
+                cf_text = _git_show_staged(repo_dir, cf)
+                if not cf_text:
+                    continue
+                tree = _ast.parse(cf_text, filename=cf)
+                # Only scan module-level functions — nested helpers inside fixtures
+                # are not collected by pytest and must not trigger this check.
+                test_fns = [
+                    node.name for node in tree.body
+                    if isinstance(node, (_ast.FunctionDef, _ast.AsyncFunctionDef))
+                    and node.name.startswith("test_")
+                ]
+                if test_fns:
+                    shown = test_fns[:5]
+                    omission = f" (⚠️ showing first 5 of {len(test_fns)})" if len(test_fns) > 5 else ""
+                    return (
+                        f"⚠️ PREFLIGHT_BLOCKED: {cf} contains test functions: "
+                        f"{shown}{omission}.\n"
+                        "  conftest.py is for fixtures/hooks only. Move test_ functions "
+                        "to a test_*.py file so pytest can discover them properly.\n"
+                        f"  Currently staged: {', '.join(sorted(staged_set)) or '(none)'}"
+                    )
+            except Exception:
+                pass  # Non-fatal: AST parse failure or git error, skip this file
 
     return None
 
@@ -723,6 +830,28 @@ def _build_critical_block_message(
 
     iteration_note = f" (attempt {ctx._review_iteration_count})"
 
+    # Structured self-verification template — appears from attempt 2 onwards.
+    # Forces the agent to explicitly map each finding to evidence before retrying.
+    self_verify_hint = ""
+    if ctx._review_iteration_count >= 2:
+        all_findings = list(getattr(ctx, '_last_review_critical_findings', []) or []) or list(critical_fails)
+        finding_lines = "\n".join(
+            f"  - Finding: {f.get('item', '?') if isinstance(f, dict) else f}"
+            for f in all_findings
+        )
+        if not finding_lines:
+            finding_lines = "  (no findings captured — check review output above)"
+        self_verify_hint = (
+            "\n\n⚠️ Self-verification required before next repo_commit:\n"
+            "For EACH finding listed above, explicitly state:\n"
+            "  Finding: [item name]\n"
+            "  Status: addressed / rebutted / pending\n"
+            "  Evidence: [file:line or symbol or test name]\n"
+            "  Note: [one sentence]\n\n"
+            "Do NOT call repo_commit until this table is filled in your response.\n"
+            f"Open findings:\n{finding_lines}"
+        )
+
     soft_hint = ""
     if ctx._review_iteration_count >= 5:
         soft_hint = (
@@ -748,6 +877,7 @@ def _build_critical_block_message(
             if advisory_entries else ""
         )
         + errored_note
+        + self_verify_hint
         + soft_hint
     )
 
@@ -879,6 +1009,7 @@ def _run_unified_review(ctx: ToolContext, commit_message: str,
 
     prompt = _REVIEW_PROMPT_TEMPLATE.format(
         preamble=_REVIEW_PREAMBLE,
+        critical_calibration=CRITICAL_FINDING_CALIBRATION,
         checklist_section=checklist_section,
         goal_section=goal_section,
         dev_guide_text=dev_guide_text or "(DEVELOPMENT.md not found)",
