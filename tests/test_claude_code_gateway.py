@@ -541,7 +541,7 @@ class TestSDKStatusPayload:
     def test_status_payload_reflects_sdk_installed_with_key(self, monkeypatch):
         """When SDK is importable and API key set, status is ready."""
         import importlib.metadata
-        from ouroboros.compat import ClaudeRuntimeState
+        from ouroboros.platform_layer import ClaudeRuntimeState
 
         def mock_resolve():
             return ClaudeRuntimeState(
@@ -555,7 +555,7 @@ class TestSDKStatusPayload:
                 ready=True,
             )
 
-        monkeypatch.setattr("ouroboros.compat.resolve_claude_runtime", mock_resolve)
+        monkeypatch.setattr("ouroboros.platform_layer.resolve_claude_runtime", mock_resolve)
 
         import server as server_mod
         payload = server_mod._claude_code_status_payload()
@@ -570,12 +570,12 @@ class TestSDKStatusPayload:
 
     def test_status_payload_reflects_sdk_missing(self, monkeypatch):
         """When SDK is not installed, status is missing."""
-        from ouroboros.compat import ClaudeRuntimeState
+        from ouroboros.platform_layer import ClaudeRuntimeState
 
         def mock_resolve():
             return ClaudeRuntimeState()
 
-        monkeypatch.setattr("ouroboros.compat.resolve_claude_runtime", mock_resolve)
+        monkeypatch.setattr("ouroboros.platform_layer.resolve_claude_runtime", mock_resolve)
 
         import server as server_mod
         payload = server_mod._claude_code_status_payload()
@@ -588,7 +588,7 @@ class TestSDKStatusPayload:
 
     def test_status_payload_no_api_key(self, monkeypatch):
         """When SDK present but ANTHROPIC_API_KEY not set, status is no_api_key."""
-        from ouroboros.compat import ClaudeRuntimeState
+        from ouroboros.platform_layer import ClaudeRuntimeState
 
         def mock_resolve():
             return ClaudeRuntimeState(
@@ -600,7 +600,7 @@ class TestSDKStatusPayload:
                 ready=False,
             )
 
-        monkeypatch.setattr("ouroboros.compat.resolve_claude_runtime", mock_resolve)
+        monkeypatch.setattr("ouroboros.platform_layer.resolve_claude_runtime", mock_resolve)
 
         import server as server_mod
         payload = server_mod._claude_code_status_payload()
@@ -612,7 +612,7 @@ class TestSDKStatusPayload:
 
     def test_status_payload_includes_runtime_fields(self, monkeypatch):
         """Payload includes app_managed, legacy_detected, cli fields."""
-        from ouroboros.compat import ClaudeRuntimeState
+        from ouroboros.platform_layer import ClaudeRuntimeState
 
         def mock_resolve():
             return ClaudeRuntimeState(
@@ -626,7 +626,7 @@ class TestSDKStatusPayload:
                 ready=True,
             )
 
-        monkeypatch.setattr("ouroboros.compat.resolve_claude_runtime", mock_resolve)
+        monkeypatch.setattr("ouroboros.platform_layer.resolve_claude_runtime", mock_resolve)
 
         import server as server_mod
         payload = server_mod._claude_code_status_payload()
@@ -644,10 +644,10 @@ class TestSDKStatusPayload:
 # ---------------------------------------------------------------------------
 
 class TestClaudeRuntimeResolution:
-    """Verify the runtime resolver in ouroboros.compat."""
+    """Verify the runtime resolver in ouroboros.platform_layer."""
 
     def test_runtime_state_dataclass_defaults(self):
-        from ouroboros.compat import ClaudeRuntimeState
+        from ouroboros.platform_layer import ClaudeRuntimeState
         state = ClaudeRuntimeState()
         assert state.app_managed is False
         assert state.sdk_version == ""
@@ -656,7 +656,7 @@ class TestClaudeRuntimeResolution:
         assert state.status_label() == "missing"
 
     def test_runtime_state_status_labels(self):
-        from ouroboros.compat import ClaudeRuntimeState
+        from ouroboros.platform_layer import ClaudeRuntimeState
 
         assert ClaudeRuntimeState(sdk_version="1.0", cli_path="/x", api_key_set=True, ready=True).status_label() == "ready"
         assert ClaudeRuntimeState(sdk_version="1.0", cli_path="/x", api_key_set=False).status_label() == "no_api_key"
@@ -666,7 +666,7 @@ class TestClaudeRuntimeResolution:
 
     def test_resolve_claude_runtime_returns_state(self, monkeypatch):
         """resolve_claude_runtime returns a ClaudeRuntimeState regardless of SDK presence."""
-        from ouroboros.compat import resolve_claude_runtime, ClaudeRuntimeState
+        from ouroboros.platform_layer import resolve_claude_runtime, ClaudeRuntimeState
         state = resolve_claude_runtime()
         assert isinstance(state, ClaudeRuntimeState)
         assert isinstance(state.interpreter_path, str)
@@ -674,13 +674,13 @@ class TestClaudeRuntimeResolution:
 
     def test_legacy_detection_non_app_path(self):
         """SDK installed outside python-standalone is classified as legacy."""
-        from ouroboros.compat import _detect_legacy_user_site_sdk
+        from ouroboros.platform_layer import _detect_legacy_user_site_sdk
         detected, path, ver = _detect_legacy_user_site_sdk()
         assert isinstance(detected, bool)
 
     def test_find_bundled_cli_nonexistent_path(self):
         """_find_bundled_cli returns None for a non-existent SDK path."""
-        from ouroboros.compat import _find_bundled_cli
+        from ouroboros.platform_layer import _find_bundled_cli
         assert _find_bundled_cli("/nonexistent/path") is None
 
 

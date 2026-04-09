@@ -139,10 +139,10 @@ def test_get_runtime_diagnostics_never_raises():
 def test_get_runtime_diagnostics_reads_runtime_state_attributes(monkeypatch):
     """Runtime diagnostics must read cli_path/cli_version from ClaudeRuntimeState attributes."""
     adv_mod = _get_advisory_module()
-    from ouroboros.compat import ClaudeRuntimeState
+    from ouroboros.platform_layer import ClaudeRuntimeState
 
     monkeypatch.setattr(
-        "ouroboros.compat.resolve_claude_runtime",
+        "ouroboros.platform_layer.resolve_claude_runtime",
         lambda: ClaudeRuntimeState(
             cli_path="/app/claude",
             cli_version="2.1.92",

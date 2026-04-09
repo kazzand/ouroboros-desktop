@@ -804,7 +804,7 @@ def get_advisory_runtime_diagnostics(model: str, prompt_chars: int,
 
     # CLI version and path via compat resolver
     try:
-        from ouroboros.compat import resolve_claude_runtime
+        from ouroboros.platform_layer import resolve_claude_runtime
         rt = resolve_claude_runtime()
         diag["cli_version"] = getattr(rt, "cli_version", "") or "(unavailable)"
         diag["cli_path"] = getattr(rt, "cli_path", "") or "(unavailable)"
