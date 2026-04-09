@@ -107,10 +107,20 @@ jobs:
           pip install -r requirements.txt
           pip install pyinstaller
 
+      # —— Download embedded Python interpreter ——
+      - name: Download python-standalone (macOS/Linux)
+        if: matrix.os != 'windows-latest'
+        run: bash scripts/download_python_standalone.sh
+
+      - name: Download python-standalone (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: .\scripts\download_python_standalone.ps1
+
       # —— macOS build ——
       - name: Build macOS app
         if: matrix.os == 'macos-latest'
-        run: bash build.sh
+        run: OUROBOROS_SIGN=0 bash build.sh
 
       # —— Linux build ——
       - name: Build Linux binary
