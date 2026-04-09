@@ -234,6 +234,11 @@ def test_blocking_history_capped_at_max(tmp_path):
                 "item": f"item_{i}", "reason": f"reason {i}", "model": "m",
             }],
         )
+        # Give each attempt a unique task_id so _attempt_identity_tuple
+        # produces distinct keys even when timestamps collide (Windows
+        # datetime.now() has ~15ms granularity — a tight loop can produce
+        # duplicate timestamps).
+        attempt.task_id = f"cap_test_{i}"
         state.add_blocking_attempt(attempt)
     assert len(state.blocking_history) == _MAX_BLOCKING_HISTORY
 
