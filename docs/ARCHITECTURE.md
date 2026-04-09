@@ -1,4 +1,4 @@
-# Ouroboros v4.18.0 — Architecture & Reference
+# Ouroboros v4.18.1 — Architecture & Reference
 
 This document describes every component, page, button, API endpoint, and data flow.
 It is the single source of truth for how the system works. Keep it updated.
@@ -514,7 +514,7 @@ backward compatibility but is not the runtime authority.
   still running" states for commit operations.
 - Context compaction kicks in after round 8 (summarizes old tool results)
 
-### Claude runtime (gateways/claude_code.py + compat.py)
+### Claude runtime (gateways/claude_code.py + platform_layer.py)
 
 - **App-managed runtime**: the app bundle owns a pinned `claude-agent-sdk` + bundled
   Claude CLI baseline. The SDK's own bundled-CLI-first resolution is preserved — the

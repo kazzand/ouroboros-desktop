@@ -6,7 +6,7 @@
 [![macOS 12+](https://img.shields.io/badge/macOS-12%2B-black.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
 [![Linux](https://img.shields.io/badge/Linux-x86__64-orange.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
 [![Windows](https://img.shields.io/badge/Windows-x64-blue.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
-[![Version 4.18.0](https://img.shields.io/badge/version-4.18.0-green.svg)](VERSION)
+[![Version 4.18.1](https://img.shields.io/badge/version-4.18.1-green.svg)](VERSION)
 
 A self-modifying AI agent that writes its own code, rewrites its own mind, and evolves autonomously. Born February 16, 2026.
 
@@ -379,6 +379,7 @@ Full text: [BIBLE.md](BIBLE.md)
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 4.18.1 | 2026-04-09 | Fix Windows build crash: `launcher.py` imported from deleted `ouroboros.compat` instead of `ouroboros.platform_layer`; fix stale `compat.py` reference in ARCHITECTURE.md section header. |
 | 4.18.0 | 2026-04-09 | CI tool and cross-platform hardening (merged from fork): detached HEAD guard, remote mismatch check, network error handling, workflow-scoped polling, dotted repo support; Windows CI compatibility (UTF-8 encoding, LockFileEx extension, OVERLAPPED caching, c_void_p fix); cross-platform path normalization for safety-critical checks; PurePosixPath cross-flavour fix for Python 3.13+. |
 | 4.17.9 | 2026-04-09 | Cross-platform CI/CD infrastructure merged from fork: three-tier GitHub Actions workflow (push/stable/tag), PyInstaller build scripts for macOS/Linux/Windows, Dockerfile, `run_ci_tests` tool, `platform_layer.py` rename with LockFileEx/UnlockFileEx Windows fix, AST platform guard, cross-platform path normalization. 864 tests passing on all 3 OS. |
 | 4.17.8 | 2026-04-09 | Stable main-promotion cut: public `4.12`-`4.17` review-stack hardening lands in `main`, including advisory/commit continuity and obligation tracking fixes, the `plan_task` design-review tool, review fidelity/evidence/status improvements, Cloud.ru onboarding, chat upload + vision/runtime polish, and restored tracked Linux/Windows packaging entrypoints alongside the unsigned macOS DMG path. |
