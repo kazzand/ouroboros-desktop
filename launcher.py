@@ -24,7 +24,7 @@ import threading
 import time
 from typing import Optional
 
-from ouroboros.compat import (
+from ouroboros.platform_layer import (
     IS_WINDOWS,
     IS_MACOS,
     embedded_python_candidates,

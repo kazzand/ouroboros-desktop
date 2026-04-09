@@ -524,7 +524,7 @@ backward compatibility but is not the runtime authority.
   `ClaudeAgentOptions`. Raw CLI stderr is stored in a ring buffer and surfaced in
   `ClaudeCodeResult.stderr_tail` on failure, eliminating the old "Check stderr output
   for details" blind spot.
-- **Runtime resolver** (`ouroboros.compat.resolve_claude_runtime`): deterministic
+- **Runtime resolver** (`ouroboros.platform_layer.resolve_claude_runtime`): deterministic
   snapshot of SDK version, CLI path/version, app-managed vs legacy status, API key
   readiness. Used by the status API, install/repair endpoint, and gateway diagnostics.
 - **Legacy detection**: SDK installed outside `python-standalone` (e.g. user-site in
