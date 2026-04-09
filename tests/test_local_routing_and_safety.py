@@ -132,7 +132,7 @@ def test_repo_commit_is_deterministically_whitelisted():
 def _safety_supports_python_m_pytest() -> bool:
     """Check if the current safety.py has the python -m pytest whitelist rule."""
     from ouroboros.safety import _is_whitelisted
-    return _is_whitelisted("run_shell", {"cmd": ["python", "-m", "pytest"]})
+    return _is_whitelisted("run_shell", {"cmd": ["python3", "-m", "pytest"]})
 
 
 @pytest.mark.skipif(
