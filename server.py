@@ -1044,6 +1044,7 @@ async def lifespan(app):
     settings, provider_defaults_changed, _provider_default_keys = apply_runtime_provider_defaults(load_settings())
     if provider_defaults_changed:
         save_settings(settings)
+    _apply_settings_to_env(settings)
     has_local = has_local_routing(settings)
 
     if has_supervisor_provider(settings):

@@ -76,6 +76,55 @@ def test_check_uncommitted_changes_skips_auto_rescue_outside_launcher(monkeypatc
     assert calls == [["git", "status", "--porcelain"]]
 
 
+def test_lifespan_calls_apply_settings_to_env_before_supervisor(monkeypatch):
+    """apply_settings_to_env must be called in server lifespan before _start_supervisor_if_needed.
+
+    Regression test for: ANTHROPIC_API_KEY from settings.json not visible to
+    resolve_claude_runtime at server startup because apply_settings_to_env was
+    only called inside the _run_supervisor background thread.
+    """
+    import ast
+    import pathlib
+
+    server_src = (pathlib.Path(__file__).parent.parent / "server.py").read_text(encoding="utf-8")
+    tree = ast.parse(server_src)
+
+    # Find the async lifespan function
+    lifespan_fn = None
+    for node in ast.walk(tree):
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == "lifespan":
+            lifespan_fn = node
+            break
+    assert lifespan_fn is not None, "lifespan async function not found in server.py"
+
+    # Collect (lineno, name) for every Call node anywhere inside the lifespan,
+    # sorted by source line so the ordering check is meaningful.
+    calls_by_line = []
+    for node in ast.walk(lifespan_fn):
+        if isinstance(node, ast.Call):
+            fn = node.func
+            if isinstance(fn, ast.Name):
+                calls_by_line.append((node.lineno, fn.id))
+            elif isinstance(fn, ast.Attribute):
+                calls_by_line.append((node.lineno, fn.attr))
+    calls_by_line.sort()
+    call_names = [name for _, name in calls_by_line]
+
+    assert "_apply_settings_to_env" in call_names, (
+        "_apply_settings_to_env must be called inside lifespan"
+    )
+    assert "_start_supervisor_if_needed" in call_names, (
+        "_start_supervisor_if_needed must be called inside lifespan"
+    )
+
+    env_line = next(ln for ln, name in calls_by_line if name == "_apply_settings_to_env")
+    supervisor_line = next(ln for ln, name in calls_by_line if name == "_start_supervisor_if_needed")
+    assert env_line < supervisor_line, (
+        f"_apply_settings_to_env (line {env_line}) must appear before "
+        f"_start_supervisor_if_needed (line {supervisor_line}) in lifespan"
+    )
+
+
 def test_check_uncommitted_changes_auto_rescue_when_launcher_managed(monkeypatch, tmp_path):
     env = types.SimpleNamespace(
         repo_dir=tmp_path,
