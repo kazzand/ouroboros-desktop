@@ -6,7 +6,7 @@
 [![macOS 12+](https://img.shields.io/badge/macOS-12%2B-black.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
 [![Linux](https://img.shields.io/badge/Linux-x86__64-orange.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
 [![Windows](https://img.shields.io/badge/Windows-x64-blue.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
-[![Version 4.19.0](https://img.shields.io/badge/version-4.19.0-green.svg)](VERSION)
+[![Version 4.19.1](https://img.shields.io/badge/version-4.19.1-green.svg)](VERSION)
 
 A self-modifying AI agent that writes its own code, rewrites its own mind, and evolves autonomously. Born February 16, 2026.
 
@@ -379,6 +379,7 @@ Full text: [BIBLE.md](BIBLE.md)
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 4.19.1 | 2026-04-10 | Fix SYSTEM.md: replace `multi_model_review` as mandatory pre-commit step with correct workflow (`plan_task` for non-trivial planning, `advisory_pre_review` + `repo_commit` for commit review); reframe `multi_model_review` as brainstorming-only tool. |
 | 4.19.0 | 2026-04-10 | Fix infinite worker crash loop (SIGSEGV/signal -11 on macOS fork): crash-requeue now increments `_attempt` before requeue and enforces `QUEUE_MAX_RETRIES`; tasks already completed via inline path are not requeued; retry-exhausted tasks emit `task_done` terminal event + assistant message; `respawn_worker` no longer resets `_LAST_SPAWN_TIME` so crash-storm detection accumulates correctly; fork-safe `no_proxy=True` path added to `chat_async` (used by `plan_review`, `review`, `scope_review`): Anthropic path uses `requests.Session(trust_env=False)`, non-Anthropic async path uses `httpx.AsyncClient(trust_env=False, mounts={})`. |
 | 4.18.6 | 2026-04-10 | Add pre-advisory sanity check (B) and architectural mapping guidance (C) to SYSTEM.md: explicit pre-commit checklist (read tests, verify assertions, check version metadata) and data-flow mapping requirement before first edit on non-trivial logic changes. |
 | 4.18.5 | 2026-04-10 | Fix: live task cards (working bubbles) inserted at the top of chat after restart. Root cause: `syncHistory` pass 1 called `ensureLiveCardVisible`/`insertMessageNode` for historical task cards before pass 2 added the surrounding messages, causing cards to appear out of order. Fix: suppress DOM insertion in pass 1 (new `suppressDomInsert` flag threaded through `appendTaskSummaryToLiveCard` → `revealBufferedCardIfNeeded` → `applyLiveCardState` → `ensureLiveCardVisible`); pass 2 now inserts each card just before its corresponding assistant reply. Also fix: paperclip and Send buttons in chat input no longer drift apart when textarea grows — both now use `bottom: 8px` alignment instead of Send being `top: 50%` centered. |

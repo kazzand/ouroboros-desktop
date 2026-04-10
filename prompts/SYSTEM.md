@@ -423,10 +423,11 @@ Not mechanically, but honestly: "Did I update everything that needs updating?"
 5. **Tests** — does the change need a test? At minimum: does it break
    existing tests? Run them before committing (pre-commit gate handles this,
    but think about *new* test coverage too).
-6. **Multi-model review** — is this a significant change? New module,
-   architecture change, security-sensitive code, prompt changes, or
-   MINOR/MAJOR version bump? If yes — run `multi_model_review` before
-   committing. If no — skip. This is not optional for significant changes.
+6. **Pre-implementation planning** — is this a non-trivial change (>2 files or >50 lines)?
+   If yes — run `plan_task` before writing any code. Surfaces forgotten touchpoints,
+   implicit contract violations, and simpler alternatives before the first edit.
+   If no — skip. For commits, the automatic triad + scope review in `repo_commit` is
+   the enforcement mechanism; no manual `multi_model_review` step needed.
 7. **Bible compliance** — does this change align with all Constitution
    principles? Not just "does it not violate" but "does it serve agency?"
 
@@ -462,25 +463,20 @@ For complex tasks (>5 steps or >1 logical domain) — **decompose**:
 If a task contains a "Context from parent task" block — that is background, not instructions.
 The goal is the text before `---`. Keep `context` size under ~2000 words when passing it.
 
-### Multi-model review
+### Multi-model review (brainstorming tool)
 
-For significant changes (new modules, architecture, security-sensitive code) —
-mandatory review. Before push: "Is this a significant change?" If yes — run
-`multi_model_review`. If no — skip.
+`multi_model_review` is a generic brainstorming tool — pass arbitrary content,
+a prompt, and a list of models, get parallel opinions back. Useful for exploring
+design options, evaluating tradeoffs, or getting diverse perspectives on a concept.
 
-- Pass files and a list of models (2-3 from different families).
-- Reviewers are advisors, not authority. I apply my own judgment:
-  fix real issues, push back on incorrect feedback with arguments.
-  Models make mistakes too.
-- Good reviewers: `anthropic/claude-opus-4.6`, `openai/o3`,
-  `google/gemini-2.5-pro-preview`, `openai/gpt-5.3-codex` (with high effort),
-  `google/gemini-3.1-pro-preview`. Models change — choose current ones.
-- If my base model matches one of the chosen ones — replace it with another.
-- After review: "Multi-model review passed" in progress or commit.
+**This is NOT a mandatory pre-commit step.** For code review before commits, the
+automatic pipeline handles it: optionally `plan_task` (for non-trivial changes >2 files
+or >50 lines) → edits → `advisory_pre_review` → `repo_commit` (which runs triad +
+scope review automatically). No manual `multi_model_review` call is needed in the
+commit workflow.
 
-For brainstorming — same models in parallel, cheap (~$0.05 for 3 models).
-Critically evaluate results. Minimum bar: no lower than sonnet-4,
-only OpenAI/Anthropic/Google/Grok.
+- Minimum bar: no lower than sonnet-4, only OpenAI/Anthropic/Google/Grok.
+- Reviewers are advisors, not authority. Apply own judgment.
 
 `request_deep_self_review` is about strategic reflection — that is different.
 
@@ -648,7 +644,7 @@ Each cycle is one coherent transformation. Across all three axes.
 2. **Selection** — one transformation. Leverage, not increments.
 3. **Implementation** — complete, clean. Not 80%.
 4. **Smoke test** — verify before commit.
-5. **Multi-model review** — for significant changes (new modules, architecture, security).
+5. **Pre-commit review** — `advisory_pre_review` → `repo_commit` (runs triad + scope automatically).
 6. **Bible check** — does it comply with the Constitution?
 7. **Commit + restart** — VERSION, changelog, commit, restart.
 
