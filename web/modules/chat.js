@@ -117,6 +117,10 @@ export function initChat({ ws, state, updateUnreadBadge }) {
         });
     });
 
+    // Set to true during syncHistory pass 1 to suppress premature DOM insertion of
+    // live cards.  Cards are inserted in pass 2 at the correct chronological position.
+    let _syncPass1Active = false;
+
     const persistedHistory = [];
     const seenMessageKeys = new Set();
     const messageKeyOrder = [];
@@ -360,7 +364,7 @@ export function initChat({ ws, state, updateUnreadBadge }) {
 
     }
 
-    function revealBufferedCardIfNeeded(taskState) {
+    function revealBufferedCardIfNeeded(taskState, { suppressDomInsert = false } = {}) {
         if (!taskState || taskState.cardVisible) return;
         if (!(taskState.forceCard || taskState.toolCalls > 1 || shouldAlwaysShowTaskCard(taskState.taskId))) {
             return;
@@ -368,11 +372,11 @@ export function initChat({ ws, state, updateUnreadBadge }) {
         taskState.cardVisible = true;
         activeLiveGroupId = taskState.taskId;
         const record = getLiveCardRecord(taskState.taskId);
-        ensureLiveCardVisible(record);
+        ensureLiveCardVisible(record, { suppressDomInsert });
         const bufferedUpdates = [...taskState.bufferedLiveUpdates];
         taskState.bufferedLiveUpdates = [];
         for (const update of bufferedUpdates) {
-            applyLiveCardState(update.summary, taskState.taskId, update.ts, update.dedupeKey);
+            applyLiveCardState(update.summary, taskState.taskId, update.ts, update.dedupeKey, { suppressDomInsert });
         }
         if (taskState.completed) {
             finishLiveCard(taskState.taskId, taskState.completedPhase || 'done');
@@ -554,8 +558,8 @@ export function initChat({ ws, state, updateUnreadBadge }) {
         setLiveCardExpanded(record, false);
     }
 
-    function ensureLiveCardVisible(record) {
-        insertMessageNode(record.root);
+    function ensureLiveCardVisible(record, { suppressDomInsert = false } = {}) {
+        if (!suppressDomInsert && !_syncPass1Active) insertMessageNode(record.root);
     }
 
     function formatLiveCardPhaseLabel(phase) {
@@ -674,7 +678,7 @@ export function initChat({ ws, state, updateUnreadBadge }) {
         }, 700);
     }
 
-    function applyLiveCardState(summary, groupId, ts, dedupeKey = '') {
+    function applyLiveCardState(summary, groupId, ts, dedupeKey = '', { suppressDomInsert = false } = {}) {
         const nextGroupId = groupId || activeLiveGroupId || 'active';
         const record = getLiveCardRecord(nextGroupId);
         const nextPhase = summary.phase || '';
@@ -683,7 +687,7 @@ export function initChat({ ws, state, updateUnreadBadge }) {
         }
 
         activeLiveGroupId = nextGroupId;
-        ensureLiveCardVisible(record);
+        ensureLiveCardVisible(record, { suppressDomInsert });
         record.updates += 1;
         const wasFinished = record.finished;
         record.finished = isTerminalTaskPhase(nextPhase);
@@ -751,7 +755,7 @@ export function initChat({ ws, state, updateUnreadBadge }) {
         } else if (timelineUpdate === 'patch-last' && lastItem) {
             patchLastTimelineItem(lastItem, record);
         }
-        insertMessageNode(record.root);
+        if (!suppressDomInsert && !_syncPass1Active) insertMessageNode(record.root);
         syncLiveCardLayout(record);
         hideTypingIndicatorOnly();
         const justFinished = record.finished && !wasFinished;
@@ -797,7 +801,7 @@ export function initChat({ ws, state, updateUnreadBadge }) {
         }
     }
 
-    function appendTaskSummaryToLiveCard(msg) {
+    function appendTaskSummaryToLiveCard(msg, { suppressDomInsert = false } = {}) {
         const taskId = msg?.task_id || activeLiveGroupId || '';
         if (!taskId) {
             finishLiveCard(taskId, 'done');
@@ -808,7 +812,7 @@ export function initChat({ ws, state, updateUnreadBadge }) {
             finishLiveCard(taskId, 'done');
             return;
         }
-        revealBufferedCardIfNeeded(taskState);
+        revealBufferedCardIfNeeded(taskState, { suppressDomInsert });
         if (!taskState.cardVisible) {
             markAssistantReply(taskId);
             return;
@@ -826,6 +830,7 @@ export function initChat({ ws, state, updateUnreadBadge }) {
             taskId,
             normalizeLogTs(msg.ts || new Date().toISOString()),
             `task_done|${taskId}`,
+            { suppressDomInsert },
         );
         finishLiveCard(taskId, 'done');
         scheduleTaskUiCleanup(taskState);
@@ -972,7 +977,12 @@ export function initChat({ ws, state, updateUnreadBadge }) {
                 // so progress bubbles are never discarded due to taskState.completed=true.
 
                 // Pass 1: progress messages and task summaries (build card timelines).
-                for (const msg of messages) {
+                // DOM insertion is SUPPRESSED here (_syncPass1Active=true blocks all
+                // ensureLiveCardVisible/insertMessageNode calls) — cards are inserted in
+                // pass 2 just before their corresponding assistant reply so the DOM order
+                // is correct.
+                _syncPass1Active = true;
+                try { for (const msg of messages) {
                     const taskId = msg.task_id || '';
                     if (!taskId) continue;
                     if (retiredTaskIds.has(taskId)) continue;
@@ -990,18 +1000,38 @@ export function initChat({ ws, state, updateUnreadBadge }) {
                             const taskState = getTaskUiState(taskId, true);
                             if (taskState) taskState.forceCard = true;
                         }
-                        appendTaskSummaryToLiveCard(msg);
+                        // suppressDomInsert=true: build the card record + timeline
+                        // in memory only; pass 2 will insert it at the right position.
+                        appendTaskSummaryToLiveCard(msg, { suppressDomInsert: true });
                     }
-                }
+                } } finally { _syncPass1Active = false; }
 
                 // Pass 2: regular messages (assistant replies, user messages, system bubbles).
                 // finishLiveCard() is called here, after the card timeline is already populated.
+                // Live cards are inserted when the FIRST message for each taskId is encountered
+                // (progress or reply), so the card appears at the correct chronological position
+                // regardless of whether the task has finished or is still ongoing.
+                const insertedCardTaskIds = new Set();
+                function insertCardIfNeeded(taskId) {
+                    if (!taskId || insertedCardTaskIds.has(taskId)) return;
+                    insertedCardTaskIds.add(taskId);
+                    const rec = liveCardRecords.get(taskId);
+                    if (rec && rec.root && !rec.root.isConnected) {
+                        insertMessageNode(rec.root);
+                    }
+                }
                 for (const msg of messages) {
                     const taskId = msg.task_id || '';
                     if (!includeUser && msg.role === 'user') continue;
-                    if (msg.is_progress) continue;
+                    if (msg.is_progress) {
+                        // Insert the card at the first progress message position so
+                        // ongoing/failed tasks also appear in the right spot.
+                        insertCardIfNeeded(taskId);
+                        continue;
+                    }
                     if (msg.system_type === 'task_summary') continue;
                     if (taskId && (msg.role === 'assistant' || msg.role === 'system')) {
+                        insertCardIfNeeded(taskId);
                         finishLiveCard(taskId);
                     }
                     addMessage(msg.text, msg.role, !!msg.markdown, msg.ts || null, false, {
@@ -1012,6 +1042,14 @@ export function initChat({ ws, state, updateUnreadBadge }) {
                         clientMessageId: msg.client_message_id || '',
                         taskId,
                     });
+                }
+                // Ensure any still-disconnected live cards (e.g. in-progress tasks with no
+                // reply yet, or background-consciousness cards) are appended at the end so
+                // they remain visible after a mid-task reload.
+                for (const [tid, rec] of liveCardRecords) {
+                    if (rec && rec.root && !rec.root.isConnected && !retiredTaskIds.has(tid)) {
+                        insertMessageNode(rec.root);
+                    }
                 }
 
                 // After first load: if there is an active in-progress task with a visible

@@ -1385,8 +1385,9 @@ body {
 .chat-send-inline {
     position: absolute;
     right: 8px;
-    top: 50%;
-    transform: translateY(-50%);
+    bottom: 8px;
+    top: auto;
+    transform: none;
     border: none;
     background: transparent;
     color: var(--accent);

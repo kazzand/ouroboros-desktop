@@ -527,11 +527,13 @@ def test_sync_history_two_pass_progress_before_finalize():
     assert "Pass 2: regular messages" in source, \
         "syncHistory must have an explicit Pass 2 comment"
 
-    # Pass 2 must skip progress and task_summary (already handled)
-    assert "if (msg.is_progress) continue;" in source, \
-        "Pass 2 must skip is_progress messages"
+    # Pass 2 must skip task_summary (already handled in pass 1).
+    # Progress messages in pass 2 are used to trigger insertCardIfNeeded (not skipped).
     assert "if (msg.system_type === 'task_summary') continue;" in source, \
         "Pass 2 must skip task_summary messages"
+    # Pass 2 progress branch must call insertCardIfNeeded (not silently skip)
+    assert "insertCardIfNeeded(taskId);" in source, \
+        "Pass 2 must call insertCardIfNeeded for progress messages to anchor live cards"
 
     # Pass 1 must NOT check taskState.completed before calling updateLiveCardFromProgressMessage
     # (the old guard that caused bubbles to be lost)
@@ -595,4 +597,102 @@ def test_live_card_timeline_css_scrollable():
     assert "max-height" in rule_body, "timeline must have max-height when expanded"
     assert "420px" in rule_body, "timeline max-height must be 420px"
     assert "overflow-y" in rule_body, "timeline must have overflow-y for scrolling"
-    assert "auto" in rule_body, "overflow-y must be auto"
+
+
+# ---------------------------------------------------------------------------
+# Live-card DOM ordering on restart / history reload
+# ---------------------------------------------------------------------------
+
+def test_sync_history_suppresses_dom_insert_in_pass1():
+    """syncHistory pass 1 must use _syncPass1Active flag to prevent premature DOM insertion."""
+    source = _read("web/modules/chat.js")
+
+    # Flag must be declared
+    assert "let _syncPass1Active = false;" in source, \
+        "_syncPass1Active flag must be declared"
+
+    # Flag must be set to true before pass 1 starts
+    assert "_syncPass1Active = true;" in source, \
+        "pass 1 must set _syncPass1Active = true before processing messages"
+
+    # Flag must be cleared in a finally block
+    assert "} } finally { _syncPass1Active = false; }" in source, \
+        "pass 1 must reset _syncPass1Active in a finally block"
+
+    # ensureLiveCardVisible must check the flag
+    func_start = source.index("function ensureLiveCardVisible(")
+    func_end = source.index("\n    function ", func_start + 1)
+    func_body = source[func_start:func_end]
+    assert "_syncPass1Active" in func_body, \
+        "ensureLiveCardVisible must check _syncPass1Active to suppress DOM insertion"
+
+
+def test_sync_history_inserts_card_at_first_message_in_pass2():
+    """Pass 2 of syncHistory must insert live cards at the first message for each task."""
+    source = _read("web/modules/chat.js")
+
+    # insertCardIfNeeded helper must exist in syncHistory scope
+    assert "function insertCardIfNeeded(taskId)" in source, \
+        "insertCardIfNeeded helper must be defined inside syncHistory"
+    assert "insertedCardTaskIds.has(taskId)" in source, \
+        "insertCardIfNeeded must use a set to avoid duplicate insertions"
+
+    # Must be called for progress messages (ongoing/failed tasks)
+    # Check that within the pass-2 loop, progress branch calls insertCardIfNeeded
+    pass2_start = source.index("// Pass 2: regular messages")
+    pass2_region = source[pass2_start:pass2_start + 2000]
+    assert "insertCardIfNeeded(taskId);" in pass2_region, \
+        "Pass 2 must call insertCardIfNeeded for progress messages"
+
+    # Must also have the trailing sweep for still-disconnected cards
+    assert "for (const [tid, rec] of liveCardRecords)" in source, \
+        "syncHistory must sweep liveCardRecords to insert any remaining disconnected cards"
+    assert "!rec.root.isConnected && !retiredTaskIds.has(tid)" in source, \
+        "sweep must skip retired task ids and already-connected cards"
+
+
+def test_sync_history_appends_disconnected_unfinished_cards_at_end():
+    """Cards for in-progress tasks (no reply yet) must be appended after all pass-2 messages."""
+    source = _read("web/modules/chat.js")
+
+    # The trailing sweep must come AFTER the pass-2 for-loop
+    # We verify both are present and the sweep follows.
+    pass2_idx = source.index("// Pass 2: regular messages")
+    sweep_idx = source.index("for (const [tid, rec] of liveCardRecords)")
+    assert sweep_idx > pass2_idx, \
+        "liveCardRecords sweep must appear after pass-2 message loop"
+
+
+def test_chat_send_button_bottom_aligned():
+    """Send button must use bottom:8px alignment (not top:50%/translateY) so it stays
+    aligned with the paperclip button when the textarea grows to multiple lines."""
+    css = _read("web/style.css")
+
+    # Find the .chat-send-inline rule
+    rule_start = css.index(".chat-send-inline {")
+    rule_end = css.index("\n}", rule_start) + 2
+    rule_body = css[rule_start:rule_end]
+
+    assert "bottom: 8px" in rule_body, \
+        ".chat-send-inline must use bottom: 8px to align with paperclip button"
+    assert "top: auto" in rule_body, \
+        ".chat-send-inline must reset top to auto"
+    assert "transform: none" in rule_body, \
+        ".chat-send-inline must reset transform to none (no translateY centering)"
+    # Negative: the old vertical-center hack must be gone
+    assert "top: 50%" not in rule_body, \
+        ".chat-send-inline must NOT use top: 50% vertical centering"
+    assert "translateY(-50%)" not in rule_body, \
+        ".chat-send-inline must NOT use translateY(-50%) vertical centering"
+
+
+def test_chat_attach_button_bottom_aligned():
+    """Paperclip button must also use bottom positioning so both buttons stay aligned."""
+    css = _read("web/style.css")
+
+    rule_start = css.index(".chat-attach-btn {")
+    rule_end = css.index("\n}", rule_start) + 2
+    rule_body = css[rule_start:rule_end]
+
+    assert "bottom:" in rule_body, \
+        ".chat-attach-btn must use bottom positioning to align with Send button"

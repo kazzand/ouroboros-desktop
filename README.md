@@ -6,7 +6,7 @@
 [![macOS 12+](https://img.shields.io/badge/macOS-12%2B-black.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
 [![Linux](https://img.shields.io/badge/Linux-x86__64-orange.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
 [![Windows](https://img.shields.io/badge/Windows-x64-blue.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
-[![Version 4.18.4](https://img.shields.io/badge/version-4.18.4-green.svg)](VERSION)
+[![Version 4.18.5](https://img.shields.io/badge/version-4.18.5-green.svg)](VERSION)
 
 A self-modifying AI agent that writes its own code, rewrites its own mind, and evolves autonomously. Born February 16, 2026.
 
@@ -379,6 +379,7 @@ Full text: [BIBLE.md](BIBLE.md)
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 4.18.5 | 2026-04-10 | Fix: live task cards (working bubbles) inserted at the top of chat after restart. Root cause: `syncHistory` pass 1 called `ensureLiveCardVisible`/`insertMessageNode` for historical task cards before pass 2 added the surrounding messages, causing cards to appear out of order. Fix: suppress DOM insertion in pass 1 (new `suppressDomInsert` flag threaded through `appendTaskSummaryToLiveCard` → `revealBufferedCardIfNeeded` → `applyLiveCardState` → `ensureLiveCardVisible`); pass 2 now inserts each card just before its corresponding assistant reply. Also fix: paperclip and Send buttons in chat input no longer drift apart when textarea grows — both now use `bottom: 8px` alignment instead of Send being `top: 50%` centered. |
 | 4.18.4 | 2026-04-10 | Fix: `ANTHROPIC_API_KEY` from `settings.json` not visible to `resolve_claude_runtime` at server startup — onboarding showed "ANTHROPIC_API_KEY is not set" even when key was configured. Root cause: `apply_settings_to_env` was only called inside the `_run_supervisor` background thread, not in the main lifespan. Fix: call `_apply_settings_to_env(settings)` in server lifespan before supervisor starts. |
 | 4.18.3 | 2026-04-10 | Post-merge release follow-up: remove the stale duplicate `ouroboros.compat` module, restore frozen packaged-tool parity for advisory/plan/rollback/CI tools, and unmask the safety/frozen-registry regression tests so future parity breaks fail loudly. |
 | 4.18.2 | 2026-04-10 | Merge PR #16 into the local `ouroboros` line: keep the local `rollback_to_target` recovery tool and land the fork's cross-platform CI/CD + build hardening (`run_ci_tests`, GitHub Actions workflow, Dockerfile, `platform_layer.py`, platform guard, Windows/Linux compatibility fixes). |
