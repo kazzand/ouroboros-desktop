@@ -518,6 +518,7 @@ def _call_scope_llm(prompt: str) -> tuple:
                         reasoning_effort=scope_effort,
                         max_tokens=_SCOPE_MAX_TOKENS,
                         temperature=0.2,
+                        no_proxy=True,
                     ),
                 ).result(timeout=180)
         except RuntimeError:
@@ -528,6 +529,7 @@ def _call_scope_llm(prompt: str) -> tuple:
                     reasoning_effort=scope_effort,
                     max_tokens=_SCOPE_MAX_TOKENS,
                     temperature=0.2,
+                    no_proxy=True,
                 )
             )
     except Exception as e:

@@ -229,6 +229,7 @@ async def _query_reviewer(
                 reasoning_effort=_PLAN_REVIEW_EFFORT,
                 max_tokens=_PLAN_REVIEW_MAX_TOKENS,
                 temperature=0.2,
+                no_proxy=True,
             )
             content = msg.get("content") or "(empty response)"
             resolved_model = str((usage or {}).get("resolved_model") or model)

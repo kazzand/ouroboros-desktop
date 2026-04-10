@@ -326,9 +326,14 @@ def _write_failure_result(task_id: str, reason: str = "Worker process crashed (c
     if not task_id:
         return
     try:
-        from ouroboros.task_results import STATUS_FAILED, load_task_result, write_task_result
+        from ouroboros.task_results import (
+            STATUS_FAILED, STATUS_COMPLETED, STATUS_REJECTED_DUPLICATE,
+            STATUS_CANCELLED, load_task_result, write_task_result,
+        )
+        # Only truly final statuses — STATUS_INTERRUPTED is NOT final (written before requeue)
+        _FINAL_STATUSES = {STATUS_COMPLETED, STATUS_FAILED, STATUS_REJECTED_DUPLICATE, STATUS_CANCELLED}
         existing = load_task_result(DRIVE_ROOT, task_id)
-        if existing and existing.get("status") in ("completed", "failed"):
+        if existing and existing.get("status") in _FINAL_STATUSES:
             return
         write_task_result(
             DRIVE_ROOT,
@@ -550,7 +555,6 @@ def _kill_survivors() -> None:
 
 
 def respawn_worker(wid: int) -> None:
-    global _LAST_SPAWN_TIME
     ctx = _get_ctx()
     in_q = ctx.Queue()
     proc = ctx.Process(target=worker_main,
@@ -558,8 +562,10 @@ def respawn_worker(wid: int) -> None:
     proc.daemon = True
     proc.start()
     WORKERS[wid] = Worker(wid=wid, proc=proc, in_q=in_q, busy_task_id=None)
-    # Give freshly respawned workers the same init grace as startup workers.
-    _LAST_SPAWN_TIME = time.time()
+    # NOTE: do NOT reset _LAST_SPAWN_TIME here — only spawn_workers() resets it.
+    # Resetting on every respawn would give a fresh 90s grace to each respawned
+    # worker, preventing crash storm detection from accumulating 3 timestamps
+    # within 60s during a rapid crash loop.
 
 
 def assign_tasks() -> None:
@@ -680,32 +686,118 @@ def ensure_workers_healthy() -> None:
                             )
                         except Exception:
                             log.debug("Failed to write failed status for %s", w.busy_task_id, exc_info=True)
-                        # Notify via message bus so the failure appears in chat
+                        # Send failure message FIRST, then task_done, to avoid ordering race:
+                        # if task_done arrives before the message, the UI closes the card
+                        # before the explanatory text is visible.
+                        chat_id = int(task.get("chat_id") or 1)
                         try:
-                            from supervisor.message_bus import get_bus
-                            bus = get_bus()
-                            if bus is not None:
-                                bus.send_message(
-                                    role="assistant",
-                                    content=(
-                                        "❌ Deep self-review failed: worker process crashed (SIGSEGV). "
-                                        "This is a known macOS fork-safety limitation. "
-                                        "Please use `/restart` and then `/review` to retry with a fresh process."
-                                    ),
-                                    chat_id=task.get("chat_id", 1),
+                            from supervisor.message_bus import get_bridge
+                            bridge = get_bridge()
+                            if bridge is not None:
+                                bridge.send_message(
+                                    chat_id,
+                                    "❌ Deep self-review failed: worker process crashed (SIGSEGV). "
+                                    "This is a known macOS fork-safety limitation. "
+                                    "Please use `/restart` and then `/review` to retry with a fresh process.",
                                 )
                         except Exception:
                             log.debug("Failed to send deep_self_review crash message", exc_info=True)
-                    else:
+                        # Emit terminal task_done AFTER the message is queued
                         try:
-                            from ouroboros.task_results import STATUS_INTERRUPTED, write_task_result
-                            write_task_result(
-                                DRIVE_ROOT, str(w.busy_task_id), STATUS_INTERRUPTED,
-                                result="Worker process died mid-task. Task will be retried.",
-                            )
+                            get_event_q().put({
+                                "type": "task_done",
+                                "task_id": str(w.busy_task_id),
+                                "chat_id": chat_id,
+                                "status": "failed",
+                            })
                         except Exception:
-                            log.debug("Failed to write interrupted status for %s", w.busy_task_id, exc_info=True)
-                        queue.enqueue_task(task, front=True)
+                            log.debug("Failed to emit task_done for deep_self_review crash %s", w.busy_task_id, exc_info=True)
+                    else:
+                        attempt = int(task.get("_attempt") or 1)
+                        # Check if this task already completed via inline/direct-chat path
+                        already_done = False
+                        try:
+                            from ouroboros.task_results import (
+                                load_task_result,
+                                STATUS_COMPLETED, STATUS_FAILED, STATUS_REJECTED_DUPLICATE,
+                                STATUS_CANCELLED,
+                            )
+                            # STATUS_INTERRUPTED is intentionally excluded: it is written
+                            # by the normal retry path BEFORE requeueing, so it is not a
+                            # true terminal state. Including it would cause the second crash
+                            # of a requeued task to be silently dropped.
+                            _TERMINAL_STATUSES = {
+                                STATUS_COMPLETED, STATUS_FAILED,
+                                STATUS_REJECTED_DUPLICATE, STATUS_CANCELLED,
+                            }
+                            existing = load_task_result(DRIVE_ROOT, str(w.busy_task_id))
+                            if existing and existing.get("status") in _TERMINAL_STATUSES:
+                                already_done = True
+                                log.info(
+                                    "Skipping requeue for task %s — already in terminal state: %s",
+                                    w.busy_task_id, existing.get("status"),
+                                )
+                        except Exception:
+                            log.debug("Failed to check existing result for %s", w.busy_task_id, exc_info=True)
+
+                        if already_done:
+                            pass  # Don't requeue — task completed via another path
+                        elif attempt > QUEUE_MAX_RETRIES:
+                            # Retry limit exhausted — mark as failed and notify
+                            log.warning(
+                                "Task %s exceeded crash retry limit (%d/%d) — marking failed",
+                                w.busy_task_id, attempt, QUEUE_MAX_RETRIES,
+                            )
+                            try:
+                                from ouroboros.task_results import STATUS_FAILED, write_task_result
+                                write_task_result(
+                                    DRIVE_ROOT, str(w.busy_task_id), STATUS_FAILED,
+                                    result=(
+                                        f"❌ Task failed after {attempt} crash(es) "
+                                        f"(signal {-exitcode if isinstance(exitcode, int) and exitcode < 0 else exitcode}). "
+                                        "Worker process crashed repeatedly — likely a platform-level issue. "
+                                        "Please try again or use a different approach."
+                                    ),
+                                )
+                            except Exception:
+                                log.debug("Failed to write failed status for %s", w.busy_task_id, exc_info=True)
+                            # Send failure message FIRST so it arrives before the card closes
+                            chat_id = int(task.get("chat_id") or 1)
+                            try:
+                                from supervisor.message_bus import get_bridge
+                                bridge = get_bridge()
+                                if bridge is not None:
+                                    bridge.send_message(
+                                        chat_id,
+                                        f"❌ Task `{str(w.busy_task_id)[:8]}` failed after "
+                                        f"{attempt} crash(es). Worker process crashed "
+                                        "repeatedly. Please try again.",
+                                    )
+                            except Exception:
+                                log.debug("Failed to send failure message for %s", w.busy_task_id, exc_info=True)
+                            # Emit task_done terminal event AFTER the message is queued
+                            try:
+                                get_event_q().put({
+                                    "type": "task_done",
+                                    "task_id": str(w.busy_task_id),
+                                    "chat_id": chat_id,
+                                    "status": "failed",
+                                })
+                            except Exception:
+                                log.debug("Failed to emit terminal event for %s", w.busy_task_id, exc_info=True)
+                        else:
+                            # Increment attempt counter before requeue
+                            task = dict(task)
+                            task["_attempt"] = attempt + 1
+                            try:
+                                from ouroboros.task_results import STATUS_INTERRUPTED, write_task_result
+                                write_task_result(
+                                    DRIVE_ROOT, str(w.busy_task_id), STATUS_INTERRUPTED,
+                                    result=f"Worker process died mid-task (attempt {attempt}). Retrying.",
+                                )
+                            except Exception:
+                                log.debug("Failed to write interrupted status for %s", w.busy_task_id, exc_info=True)
+                            queue.enqueue_task(task, front=True)
             respawn_worker(wid)
             queue.persist_queue_snapshot(reason="worker_respawn_after_crash")
 

@@ -140,6 +140,7 @@ async def _query_model(llm_client: LLMClient, model: str, messages: list, semaph
                 reasoning_effort="medium",
                 max_tokens=32768,
                 temperature=0.2,
+                no_proxy=True,
             )
             payload = {
                 "choices": [{"message": {"content": msg.get("content") or ""}}],

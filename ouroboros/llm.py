@@ -503,8 +503,18 @@ class LLMClient:
         max_tokens: int = 16384,
         tool_choice: str = "auto",
         temperature: Optional[float] = None,
+        no_proxy: bool = False,
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-        """Async remote chat used by review/concurrent callers."""
+        """Async remote chat used by review/concurrent callers.
+
+        When no_proxy=True, bypasses OS-level and env-var proxy detection via
+        trust_env=False.  This is required in forked worker processes on macOS
+        to avoid a SIGSEGV in SCDynamicStoreCopyProxiesWithOptions.
+
+        Applies to both the Anthropic path (synchronous requests.Session run in
+        a thread) and the OpenAI-compatible async path (httpx.AsyncClient with
+        trust_env=False and empty mounts).
+        """
         if tools:
             raise ValueError("chat_async does not support tool calls")
         target = self._resolve_remote_target(model)
@@ -518,7 +528,38 @@ class LLMClient:
                 max_tokens,
                 tool_choice,
                 temperature,
+                no_proxy,
             )
+        if no_proxy:
+            import httpx
+            from openai import AsyncOpenAI
+
+            base_url = str(target.get("base_url") or "")
+            api_key = str(target.get("api_key") or "")
+            headers_dict = dict(target.get("default_headers") or {})
+            _http_client = httpx.AsyncClient(
+                trust_env=False,
+                mounts={},
+                timeout=httpx.Timeout(connect=30.0, read=3600.0, write=3600.0, pool=30.0),
+            )
+            _oa_client = AsyncOpenAI(
+                api_key=api_key,
+                base_url=base_url,
+                default_headers=headers_dict,
+                http_client=_http_client,
+                max_retries=0,
+            )
+            try:
+                kwargs = self._build_remote_kwargs(
+                    target, messages, reasoning_effort, max_tokens, tool_choice, temperature, tools
+                )
+                resp = await _oa_client.chat.completions.create(**kwargs)
+                return self._normalize_remote_response(resp.model_dump(), target, skip_cost_fetch=True)
+            finally:
+                try:
+                    await _http_client.aclose()
+                except Exception:
+                    pass
         client = self._get_async_remote_client(target)
         kwargs = self._build_remote_kwargs(
             target, messages, reasoning_effort, max_tokens, tool_choice, temperature, tools
@@ -1089,6 +1130,7 @@ class LLMClient:
         max_tokens: int,
         tool_choice: str,
         temperature: Optional[float] = None,
+        no_proxy: bool = False,
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         import requests
 
@@ -1112,16 +1154,20 @@ class LLMClient:
             if anthropic_tool_choice:
                 payload["tool_choice"] = anthropic_tool_choice
 
-        response = requests.post(
-            f"{str(target.get('base_url') or '').rstrip('/')}/messages",
-            headers={
-                "x-api-key": str(target.get("api_key") or ""),
-                "anthropic-version": "2023-06-01",
-                "content-type": "application/json",
-            },
-            json=payload,
-            timeout=120,
-        )
+        url = f"{str(target.get('base_url') or '').rstrip('/')}/messages"
+        headers = {
+            "x-api-key": str(target.get("api_key") or ""),
+            "anthropic-version": "2023-06-01",
+            "content-type": "application/json",
+        }
+        if no_proxy:
+            # Build a session with proxy detection disabled for macOS fork-safety.
+            # Use context manager (or explicit close) to avoid connection-pool leaks.
+            with requests.Session() as session:
+                session.trust_env = False
+                response = session.post(url, headers=headers, json=payload, timeout=120)
+        else:
+            response = requests.post(url, headers=headers, json=payload, timeout=120)
         response.raise_for_status()
         return self._normalize_anthropic_response(response.json(), target)
 
@@ -1282,7 +1328,8 @@ class LLMClient:
         """
         if target.get("provider") == "anthropic":
             return self._chat_anthropic(
-                target, messages, tools, reasoning_effort, max_tokens, tool_choice, temperature
+                target, messages, tools, reasoning_effort, max_tokens, tool_choice, temperature,
+                no_proxy=no_proxy,
             )
 
         if no_proxy:
