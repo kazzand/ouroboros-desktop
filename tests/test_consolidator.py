@@ -146,7 +146,8 @@ def test_migrate_dialogue_summary(tmp_path):
 
     summary_path.write_text(
         "### Episode: 2026-02-20 10:00 – 11:00\n\nFirst episode.\n\n"
-        "### Era: 2026-01-01 to 2026-01-31\n\nOld era summary.\n"
+        "### Era: 2026-01-01 to 2026-01-31\n\nOld era summary.\n",
+        encoding="utf-8",
     )
 
     migrate_dialogue_summary_to_blocks(summary_path, blocks_path)
@@ -162,8 +163,8 @@ def test_migrate_skips_if_blocks_exist(tmp_path):
     summary_path = tmp_path / "dialogue_summary.md"
     blocks_path = tmp_path / "dialogue_blocks.json"
 
-    summary_path.write_text("### Episode: test\nContent.")
-    blocks_path.write_text("[]")
+    summary_path.write_text("### Episode: test\nContent.", encoding="utf-8")
+    blocks_path.write_text("[]", encoding="utf-8")
 
     migrate_dialogue_summary_to_blocks(summary_path, blocks_path)
     assert json.loads(blocks_path.read_text()) == []

@@ -6,7 +6,7 @@
 [![macOS 12+](https://img.shields.io/badge/macOS-12%2B-black.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
 [![Linux](https://img.shields.io/badge/Linux-x86__64-orange.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
 [![Windows](https://img.shields.io/badge/Windows-x64-blue.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
-[![Version 4.17.9](https://img.shields.io/badge/version-4.17.9-green.svg)](VERSION)
+[![Version 4.18.2](https://img.shields.io/badge/version-4.18.2-green.svg)](VERSION)
 
 A self-modifying AI agent that writes its own code, rewrites its own mind, and evolves autonomously. Born February 16, 2026.
 
@@ -234,7 +234,7 @@ Ouroboros
 ├── web/                    — Web UI (HTML/JS/CSS)
 ├── ouroboros/              — Agent core:
 │   ├── config.py           — Shared configuration (SSOT)
-│   ├── compat.py           — Cross-platform abstraction layer
+│   ├── platform_layer.py   — Cross-platform abstraction layer
 │   ├── agent.py            — Task orchestrator
 │   ├── agent_startup_checks.py — Startup verification and health checks
 │   ├── agent_task_pipeline.py  — Task execution pipeline orchestration
@@ -379,7 +379,10 @@ Full text: [BIBLE.md](BIBLE.md)
 
 | Version | Date | Description |
 |---------|------|-------------|
-| 4.17.9 | 2026-04-09 | New `rollback_to_target` tool: reset current branch to any tag or commit SHA with rescue snapshot. Wraps `supervisor/git_ops.rollback_to_version()`, equivalent to UI Restore button. Review-exempt (restores to already-reviewed state). Covers the gap where `pull_from_remote` fails on unrelated histories (e.g. fresh app bundle vs full remote). ARCHITECTURE.md updated: `pull_from_remote` limitation documented, `configure_remote()` auto-wiring on Settings save noted, `git_rollback.py` added to module tree. CHECKLISTS.md updated with review-exempt entry. Auto-restart on success via ctx.pending_restart_reason. 9 new tests. |
+| 4.18.2 | 2026-04-10 | Merge PR #16 into the local `ouroboros` line: keep the local `rollback_to_target` recovery tool and land the fork's cross-platform CI/CD + build hardening (`run_ci_tests`, GitHub Actions workflow, Dockerfile, `platform_layer.py`, platform guard, Windows/Linux compatibility fixes). |
+| 4.18.1 | 2026-04-09 | Fix Windows build crash: `launcher.py` imported from deleted `ouroboros.compat` instead of `ouroboros.platform_layer`; fix stale `compat.py` reference in ARCHITECTURE.md section header. |
+| 4.18.0 | 2026-04-09 | CI tool and cross-platform hardening (merged from fork): detached HEAD guard, remote mismatch check, network error handling, workflow-scoped polling, dotted repo support; Windows CI compatibility (UTF-8 encoding, LockFileEx extension, OVERLAPPED caching, c_void_p fix); cross-platform path normalization for safety-critical checks; PurePosixPath cross-flavour fix for Python 3.13+. |
+| 4.17.9 | 2026-04-09 | Cross-platform CI/CD infrastructure merged from fork: three-tier GitHub Actions workflow (push/stable/tag), PyInstaller build scripts for macOS/Linux/Windows, Dockerfile, `run_ci_tests` tool, `platform_layer.py` rename with LockFileEx/UnlockFileEx Windows fix, AST platform guard, cross-platform path normalization. 864 tests passing on all 3 OS. |
 | 4.17.8 | 2026-04-09 | Stable main-promotion cut: public `4.12`-`4.17` review-stack hardening lands in `main`, including advisory/commit continuity and obligation tracking fixes, the `plan_task` design-review tool, review fidelity/evidence/status improvements, Cloud.ru onboarding, chat upload + vision/runtime polish, and restored tracked Linux/Windows packaging entrypoints alongside the unsigned macOS DMG path. |
 | 4.17.7 | 2026-04-08 | Obligation fingerprint keying: `_update_obligations_from_attempt` now keys by `sha256(f"{item}:{reason}")[:12]` — full reason, no truncation — so different findings with same item produce separate obligations instead of collapsing into one moving-target. `_resolve_matching_obligations` item-name fallback is now restricted to cases where exactly one open obligation exists for that item (prevents same-item PASS from clearing unrelated findings). Same finding repeated = merged (deduped). Worktree version-sync helper extracted to `review_helpers.py::check_worktree_version_sync`; advisory path retains `_check_worktree_version_sync` alias. ARCHITECTURE.md updated. Tests updated to match new per-finding semantics. |
 | 4.17.6 | 2026-04-08 | Review pipeline calibration overhaul: (P1) 3 new deterministic preflight checks in `repo_commit` — `version_values_match` (staged index via `git show :PATH`), `readme_changelog_row` (staged changelog row), `conftest_no_tests` (top-level AST scan, basename match only — `myconftest.py` not affected); advisory path gets `_check_worktree_version_sync` (non-blocking early warning before expensive SDK call); (P2) structured self-verification template in blocked messages from attempt ≥ 2 — all findings listed, no cap; (P3) obligation grouping with per-segment dedup — same-item findings joined, `A | A | B` inflation prevented; (P4) shared `CRITICAL_FINDING_CALIBRATION` constant injected into triad, scope, and advisory reviewer prompts — concrete artifact required before CRITICAL, hypothetical concerns → advisory. 36 new tests in `test_review_calibration.py`. |

@@ -82,11 +82,12 @@ Ouroboros repository.
 | 11 | context_building | New data/memory files that should appear in LLM context (context.py) but don't? | advisory |
 | 12 | knowledge_index | Knowledge base topics changed but memory/knowledge/index-full.md not updated? | advisory |
 | 13 | self_consistency | Does this change affect behavior described in `BIBLE.md`, `prompts/`, `docs/`, or this checklist itself? Check explicitly: (a) version in `ARCHITECTURE.md` header matches `VERSION` file; (b) tool names/descriptions in `prompts/SYSTEM.md` match tools actually exported by `get_tools()`; (c) JSONL log/memory file formats described in `ARCHITECTURE.md` match all readers/writers; (d) any behavioral change reflected in `prompts/CONSCIOUSNESS.md` if it affects background loop behavior; (e) DEVELOPMENT.md rules still accurate after the change. | critical |
+| 14 | cross_platform | Does the diff use platform-specific APIs (`os.kill`, `os.setsid`, `os.killpg`, `os.getpgid`, `fcntl`, `msvcrt`, `signal.SIGKILL`, `signal.SIGTERM`, `subprocess` with `start_new_session`/`creationflags`, hardcoded `/` or `\\` in filesystem paths) outside of `ouroboros/platform_layer.py`? Does it import Unix-only or Windows-only modules (`fcntl`, `msvcrt`, `winreg`, `resource`) at any level without a platform guard (`sys.platform`/`IS_WINDOWS` check)? | critical |
 
 ### Severity rules
 
 - Items 1-5 are always critical.
-- Items 6-10 are conditionally critical: FAIL only when the condition applies.
+- Items 6-10, 14 are conditionally critical: FAIL only when the condition applies.
   If the condition does not apply, write verdict PASS with a short reason
   (e.g. "Not applicable — no code logic change").
 - Items 11-12 are advisory: FAIL produces a warning but does not block.

@@ -293,8 +293,8 @@ def auto_resume_after_restart() -> None:
 # ---------------------------------------------------------------------------
 
 def worker_main(wid: int, in_q: Any, out_q: Any, repo_dir: str, drive_root: str) -> None:
-    if sys.platform != "win32":
-        os.setsid()
+    from ouroboros.platform_layer import create_new_session
+    create_new_session()
     import sys as _sys
     import traceback as _tb
     import pathlib as _pathlib
@@ -539,7 +539,7 @@ def kill_workers(force: bool = True) -> None:
 
 def _kill_survivors() -> None:
     """Force-kill any workers and their entire descendant trees."""
-    from ouroboros.compat import kill_pid_tree
+    from ouroboros.platform_layer import kill_pid_tree
     for w in WORKERS.values():
         pid = w.proc.pid
         if pid is None:

@@ -169,7 +169,7 @@ def _claude_code_status_payload() -> Dict[str, Any]:
     CLI path/version, app-managed vs legacy state, API key readiness,
     and the most recent stderr output on failure.
     """
-    from ouroboros.compat import resolve_claude_runtime
+    from ouroboros.platform_layer import resolve_claude_runtime
 
     rt = resolve_claude_runtime()
     label = rt.status_label()
@@ -795,7 +795,7 @@ async def api_claude_code_install(request: Request) -> JSONResponse:
 
         interpreter = _sys.executable
         try:
-            from ouroboros.compat import resolve_claude_runtime
+            from ouroboros.platform_layer import resolve_claude_runtime
             rt = resolve_claude_runtime()
             if rt.interpreter_path:
                 interpreter = rt.interpreter_path
@@ -1105,7 +1105,7 @@ def _emergency_process_cleanup() -> None:
     except Exception:
         pass
     import multiprocessing
-    from ouroboros.compat import force_kill_pid, kill_process_on_port
+    from ouroboros.platform_layer import force_kill_pid, kill_process_on_port
     for child in multiprocessing.active_children():
         try:
             force_kill_pid(child.pid)

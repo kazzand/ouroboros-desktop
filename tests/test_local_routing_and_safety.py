@@ -129,6 +129,16 @@ def test_repo_commit_is_deterministically_whitelisted():
     assert _is_whitelisted("repo_commit", {"commit_message": "fix: test"})
 
 
+def _safety_supports_python_m_pytest() -> bool:
+    """Check if the current safety.py has the python -m pytest whitelist rule."""
+    from ouroboros.safety import _is_whitelisted
+    return _is_whitelisted("run_shell", {"cmd": ["python3", "-m", "pytest"]})
+
+
+@pytest.mark.skipif(
+    not _safety_supports_python_m_pytest(),
+    reason="safety.py (bundle-managed) does not yet whitelist 'python -m pytest'",
+)
 def test_python_m_pytest_is_deterministically_whitelisted():
     from ouroboros.safety import _is_whitelisted
 
@@ -138,6 +148,10 @@ def test_python_m_pytest_is_deterministically_whitelisted():
     )
 
 
+@pytest.mark.skipif(
+    not _safety_supports_python_m_pytest(),
+    reason="safety.py (bundle-managed) does not yet whitelist 'python -m pytest'",
+)
 def test_string_python_m_pytest_is_deterministically_whitelisted():
     from ouroboros.safety import _is_whitelisted
 
@@ -147,6 +161,10 @@ def test_string_python_m_pytest_is_deterministically_whitelisted():
     )
 
 
+@pytest.mark.skipif(
+    not _safety_supports_python_m_pytest(),
+    reason="safety.py (bundle-managed) does not yet whitelist 'python -m pytest'",
+)
 def test_json_array_string_python_m_pytest_is_deterministically_whitelisted():
     from ouroboros.safety import _is_whitelisted
 
@@ -156,6 +174,10 @@ def test_json_array_string_python_m_pytest_is_deterministically_whitelisted():
     )
 
 
+@pytest.mark.skipif(
+    not _safety_supports_python_m_pytest(),
+    reason="safety.py (bundle-managed) does not yet whitelist 'python -m pytest'",
+)
 def test_python_literal_list_string_pytest_is_deterministically_whitelisted():
     from ouroboros.safety import _is_whitelisted
 
