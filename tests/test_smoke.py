@@ -169,15 +169,24 @@ def test_tool_execute_basic(registry):
     assert "hello" in result.lower() or "⚠️" in result, "Should return output or error"
 
 
-def test_frozen_registry_includes_memory_tools(monkeypatch):
-    """Frozen-mode registry must still load memory registry tools."""
+def test_frozen_registry_includes_packaged_tool_modules(monkeypatch):
+    """Frozen-mode registry must still load packaged tool modules."""
     from ouroboros.tools.registry import ToolRegistry
     tmp = pathlib.Path(tempfile.mkdtemp())
     monkeypatch.setattr(sys, "frozen", True, raising=False)
     registry = ToolRegistry(repo_dir=tmp, drive_root=tmp)
     available = {t["function"]["name"] for t in registry.schemas()}
-    assert "memory_map" in available
-    assert "memory_update_registry" in available
+    expected_subset = {
+        "memory_map",
+        "memory_update_registry",
+        "advisory_pre_review",
+        "review_status",
+        "plan_task",
+        "rollback_to_target",
+        "run_ci_tests",
+    }
+    missing = expected_subset - available
+    assert missing == set(), f"Frozen registry missing tools: {sorted(missing)}"
 
 
 # ── Utilities ────────────────────────────────────────────────────
