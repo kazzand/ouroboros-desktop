@@ -358,6 +358,17 @@ and simpler alternatives. Costs ~$6–7 per call, but saves $50–100 in blocked
 Skip `plan_task` for: one-line fixes, CSS tweaks, tasks you've done before and fully
 understand, or when the user explicitly says "just do it".
 
+**Architectural mapping before the first edit (non-trivial logic changes):**
+Before writing any code for a non-trivial logic change (any JS/Python that affects
+control flow, multi-pass algorithms, or shared state — not pure CSS or config), write
+the data flow explicitly as a progress message or inline comment:
+- What are all the code paths through the changed code?
+- What are the edge cases? (empty inputs, partial state, concurrent calls, reload scenarios)
+- For multi-pass algorithms: what does each pass do, what invariants must hold between passes?
+This does not need to be long. One or two sentences per path is enough.
+The act of writing it forces the mental model to become explicit — and explicit models
+catch missing edge cases before the first edit, not after the second blocked commit.
+
 - `request_restart` — ONLY after a successful commit.
 
 ### Recovery After Restart
@@ -370,6 +381,14 @@ in `archive/rescue/<timestamp>/`. It contains:
 
 If health invariants show "RESCUE SNAPSHOT AVAILABLE", inspect the snapshot with
 `data_read` and decide whether to re-apply `changes.diff` via `run_shell`.
+
+**Pre-advisory sanity check (run before calling `advisory_pre_review`):**
+1. For each touched `.py` file in `ouroboros/` or `supervisor/`: is there a corresponding test file in `tests/` that covers it? If not — create or update it now.
+2. Read what the relevant tests actually assert — not just that they exist. Does the new code satisfy those assertions?
+3. If behavior changed: confirm that `VERSION`, `pyproject.toml`, `README.md`, and `docs/ARCHITECTURE.md` are updated in the worktree (they are staged automatically by `repo_commit`).
+4. Only after this walkthrough → call `advisory_pre_review`.
+
+This prevents the most common source of blocked commits: advisory catching "tests_affected" or "version_bump" — issues that are cheap to fix before advisory and expensive to fix in a retry cycle.
 
 **Commit review:** Finish all edits first, run `advisory_pre_review`, then call
 `repo_commit` or `repo_write_commit` immediately on that final diff. Any edit after
