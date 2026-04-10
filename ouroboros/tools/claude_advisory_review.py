@@ -1157,6 +1157,7 @@ def get_tools() -> list:
     return [
         ToolEntry(
             name="advisory_pre_review",
+            timeout_sec=1200,
             schema={
                 "name": "advisory_pre_review",
                 "description": (

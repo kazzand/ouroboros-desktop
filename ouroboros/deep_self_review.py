@@ -31,7 +31,10 @@ from ouroboros.tools.review_helpers import (  # noqa: E402
 # Directory prefixes to skip entirely (relative to repo_dir, using forward slashes).
 # - assets/  : README screenshots and app icons — no agent logic
 # - webview/ : legacy PyWebView JS helpers, not part of the web SPA or agent core
-_SKIP_DIR_PREFIXES = ("assets/", "webview/")
+_SKIP_DIR_PREFIXES = (
+    "assets/", "webview/",
+    "jsonschema/", "jsonschema_specifications/", "Python.framework/", "certifi/",
+)
 
 _MEMORY_WHITELIST = [
     "memory/identity.md",

@@ -38,13 +38,13 @@ from ouroboros.utils import run_cmd, utc_now_iso, append_jsonl, estimate_tokens
 log = logging.getLogger(__name__)
 
 _SCOPE_MODEL_DEFAULT = "anthropic/claude-opus-4.6"
-_SCOPE_MAX_TOKENS = 65536
+_SCOPE_MAX_TOKENS = 100_000
 
 # Budget gate: if the fully assembled scope-review prompt exceeds this token
 # estimate, scope review is skipped with a non-blocking warning instead of
-# crashing or sending an oversized request. 800K gives a comfortable margin
-# under most 1M-token models.
-_SCOPE_BUDGET_TOKEN_LIMIT = 800_000
+# crashing or sending an oversized request. 1M fills the full context window
+# of most frontier models.
+_SCOPE_BUDGET_TOKEN_LIMIT = 1_000_000
 
 
 @dataclass

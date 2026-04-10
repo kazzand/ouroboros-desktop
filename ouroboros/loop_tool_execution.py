@@ -62,22 +62,28 @@ def _emit_live_log(tools: ToolRegistry, payload: Dict[str, Any]) -> None:
 
 
 def _get_tool_timeout(tools: ToolRegistry, tool_name: str) -> int:
-    """Get timeout for a tool call. settings.json is SSOT; env is fallback."""
+    """Get timeout for a tool call.
+
+    Uses max(settings/env value, per-tool ToolEntry value) so that tools
+    declaring a higher minimum (e.g. claude_code_edit at 1200s) are never
+    silently capped by a lower global default (e.g. 600s).
+    """
+    settings_val = 0
     try:
         settings_val = int(load_settings().get("OUROBOROS_TOOL_TIMEOUT_SEC") or 0)
-        if settings_val > 0:
-            return settings_val
     except Exception:
         pass
-    env_val = os.environ.get("OUROBOROS_TOOL_TIMEOUT_SEC")
-    if env_val:
-        try:
-            parsed = int(env_val)
-            if parsed > 0:
-                return parsed
-        except ValueError:
-            pass
-    return tools.get_timeout(tool_name)
+    if settings_val <= 0:
+        env_val = os.environ.get("OUROBOROS_TOOL_TIMEOUT_SEC")
+        if env_val:
+            try:
+                parsed = int(env_val)
+                if parsed > 0:
+                    settings_val = parsed
+            except ValueError:
+                pass
+    per_tool = tools.get_timeout(tool_name)
+    return max(settings_val, per_tool) if settings_val > 0 else per_tool
 
 
 def _path_is_cognitive_artifact(tool_name: str, tool_args: Optional[Dict[str, Any]]) -> bool:

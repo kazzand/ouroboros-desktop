@@ -219,7 +219,7 @@ class TestPlanReviewBudgetGate(unittest.IsolatedAsyncioTestCase):
             patch.object(pr, "_load_doc", return_value=""),
             patch.object(pr, "_get_review_models", return_value=["model-a"]),
             # estimate_tokens returns a large number
-            patch("ouroboros.tools.plan_review.estimate_tokens", return_value=900_000),
+            patch("ouroboros.tools.plan_review.estimate_tokens", return_value=1_100_000),
         ):
             result = await pr._run_plan_review_async(ctx, "my plan", "my goal", [])
 

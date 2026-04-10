@@ -52,7 +52,7 @@ from claude_agent_sdk import (  # noqa: E402
 _STDERR_MAX_LINES = 200
 _stderr_lock = threading.Lock()
 _stderr_buffer: collections.deque[str] = collections.deque(maxlen=_STDERR_MAX_LINES)
-DEFAULT_CLAUDE_CODE_MAX_TURNS = 30
+DEFAULT_CLAUDE_CODE_MAX_TURNS = 50
 
 
 def _stderr_callback(line: str) -> None:

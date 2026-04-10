@@ -355,7 +355,7 @@ def _run_task_summary(env, llm, task, usage, llm_trace, drive_logs, review_evide
         trace = build_trace_summary(llm_trace)
         try:
             from ouroboros.review_evidence import format_review_evidence_for_prompt
-            review_section = format_review_evidence_for_prompt(review_evidence or {})
+            review_section = format_review_evidence_for_prompt(review_evidence or {}, max_chars=8000)
         except Exception:
             review_section = "(review evidence unavailable)"
         prompt = _TASK_SUMMARY_PROMPT.format(
@@ -363,7 +363,7 @@ def _run_task_summary(env, llm, task, usage, llm_trace, drive_logs, review_evide
             task_type=task.get("type", "user"), rounds=rounds,
             cost=cost,
             trace_summary=_truncate_with_notice(trace, 3000),
-            review_evidence=_truncate_with_notice(review_section, 2500),
+            review_evidence=review_section,
         )
         try:
             msg, _usage = llm.chat(messages=[{"role": "user", "content": prompt}],
@@ -524,14 +524,12 @@ def build_review_context(env: Any) -> str:
 
         if open_obs:
             lines.append(f"- open_obligations={len(open_obs)}")
-            for ob in open_obs[:4]:
+            for ob in open_obs:
                 reason = _truncate_with_notice(getattr(ob, "reason", ""), 120).replace("\n", " ")
                 lines.append(
                     f"  [{getattr(ob, 'obligation_id', '')}] "
                     f"{getattr(ob, 'item', '')}: {reason}"
                 )
-            if len(open_obs) > 4:
-                lines.append(f"  ... and {len(open_obs) - 4} more open obligations")
         else:
             lines.append("- open_obligations=0")
 
@@ -565,7 +563,7 @@ def build_review_context(env: Any) -> str:
                     reason = _truncate_with_notice(top.get("reason") or "", 140).replace("\n", " ")
                     lines.append(f"  advisory_finding={label}: {reason}")
                 if item.obligation_ids:
-                    lines.append(f"  obligation_ids={', '.join(item.obligation_ids[:4])}")
+                    lines.append(f"  obligation_ids={', '.join(item.obligation_ids)}")
         if corrupt:
             lines.append("\n### Corrupt review continuations")
             for item in corrupt[:3]:

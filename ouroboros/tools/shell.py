@@ -490,5 +490,5 @@ def get_tools() -> List[ToolEntry]:
                 "validate": {"type": "boolean", "default": False,
                              "description": "Run post-edit validation (tests). Returns summary in result."},
             }, "required": ["prompt"]},
-        }, _claude_code_edit, is_code_tool=True),
+        }, _claude_code_edit, is_code_tool=True, timeout_sec=1200),
     ]

@@ -1,4 +1,4 @@
-# Ouroboros v4.19.1 — Architecture & Reference
+# Ouroboros v4.19.2 — Architecture & Reference
 
 This document describes every component, page, button, API endpoint, and data flow.
 It is the single source of truth for how the system works. Keep it updated.
@@ -525,7 +525,7 @@ backward compatibility but is not the runtime authority.
 - Core tools always available; extra tools discoverable via `list_available_tools`/`enable_tools`
 - Read-only tools can run in parallel (ThreadPoolExecutor)
 - Browser tools use thread-sticky executor (Playwright greenlet affinity)
-- All tools have hard timeout (default 600s, per-tool overrides for browser/search/vision); `OUROBOROS_TOOL_TIMEOUT_SEC` in `settings.json` is the runtime SSOT override read on each tool call.
+- All tools have hard timeout (default 600s, per-tool overrides for browser/search/vision); `OUROBOROS_TOOL_TIMEOUT_SEC` in `settings.json` is the runtime SSOT override read on each tool call. The actual timeout is `max(settings_value, per_tool_declared)` so tools declaring a higher minimum (e.g. `claude_code_edit` at 1200s) are never silently capped by a lower global default.
 - Multi-layer safety: hardcoded sandbox (registry.py) → deterministic whitelist → LLM safety supervisor
 - Tool results use explicit per-tool caps with visible truncation markers (`repo_read`/`data_read`/`knowledge_read`/`run_shell`: 80k, default: 15k chars). Cognitive reads (`memory/*`, prompts, BIBLE/docs, commit/review outputs) are exempt from silent clipping.
 - `run_shell` now treats non-zero exits as explicit failed tool outcomes and records exit/signal metadata in the tool trace.
@@ -778,7 +778,7 @@ the constitutional guard is that the file itself must remain non-deletable.
   (exact file/function/symbol) + alternative approaches if applicable.
 - **Aggregate signal**: `GREEN` (proceed), `REVIEW_REQUIRED` (risks present), or `REVISE_PLAN` (FAILs found).
 - **Non-blocking**: results are advisory only — the implementer decides what to do.
-- **Budget gate**: if the assembled prompt exceeds `_PLAN_BUDGET_TOKEN_LIMIT` (800K tokens),
+- **Budget gate**: if the assembled prompt exceeds `_PLAN_BUDGET_TOKEN_LIMIT` (1M tokens),
   review is skipped with a non-blocking `⚠️ PLAN_REVIEW_SKIPPED:` warning.
 - **Cost**: ~$6-8 (3 × full-repo-pack reviewers, same cost as scope review × 3).
   Use for tasks where the alternative is 5+ blocked commits totaling $30-100.
@@ -793,7 +793,8 @@ The commit pipeline runs review stages before creating a git commit:
 Shared helpers live in `tools/review_helpers.py`: checklist section loader,
 touched-file pack builder (`build_touched_file_pack`, 1MB file limit; sensitive files omitted case-insensitively before any read), full repo pack builder
 (`build_full_repo_pack` — no char cap, binary/vendored/sensitive filtering, replaces deprecated
-`build_broader_repo_pack`), HEAD snapshot section builder, goal/scope resolution,
+`build_broader_repo_pack`; excludes `jsonschema/`, `jsonschema_specifications/`, `Python.framework/`,
+`certifi/`, and the bare `Python` binary in addition to the standard skip list), HEAD snapshot section builder, goal/scope resolution,
 advisory SDK diagnostic helpers (`get_advisory_runtime_diagnostics`, `format_advisory_sdk_error`)
 shared with `claude_advisory_review.py` to keep that module closer to the one-context-window target (P5).
 `_FILE_SIZE_LIMIT` was raised from 100KB to 1MB in v4.13.0 to stop cutting off normal-sized files.
@@ -815,7 +816,8 @@ errors surface via the same observability path.
   worktree BEFORE `repo_commit`. Permitted tools: `Read`, `Grep`, `Glob` only (no Edit/Bash).
   Model resolved via `resolve_claude_code_model()` — respects `CLAUDE_CODE_MODEL` setting,
   defaults to `opus` (same helper used by `claude_code_edit`). Shared Claude Code turn budget:
-  30 turns for both advisory and edit paths. Prompt includes the "Repo Commit Checklist" section from
+  50 turns for both advisory and edit paths. Per-tool timeout floor: 1200s (20 min).
+  Prompt includes the "Repo Commit Checklist" section from
   CHECKLISTS.md (precise section loader), plus BIBLE.md, DEVELOPMENT.md, ARCHITECTURE.md,
   touched-file pack, goal/scope sections, git status, and worktree diff.
 - **Advisory budget gate** (v4.15.0): if the assembled advisory prompt exceeds
@@ -942,7 +944,7 @@ errors surface via the same observability path.
   oversized (>1MB), and directory prefixes `.cursor/`, `.github/`, `.vscode/`, `.idea/`, `assets/`,
   `webview/`. Explicit omission count appended when files are skipped.
 - Checklist items (v4.14.1): 8 items including `cross_module_bugs` (does the change break something in a different module through implicit coupling?) and `implicit_contracts` (are there constants, data format assumptions, or expected signatures relied upon by other modules that this change violates?).
-- **Budget gate**: after assembling the full scope-review prompt, token count is estimated. If the prompt exceeds `_SCOPE_BUDGET_TOKEN_LIMIT` (800K tokens), scope review is **skipped with a non-blocking warning** rather than crashing or sending an oversized request. The commit is not blocked in this case.
+- **Budget gate**: after assembling the full scope-review prompt, token count is estimated. If the prompt exceeds `_SCOPE_BUDGET_TOKEN_LIMIT` (1M tokens), scope review is **skipped with a non-blocking warning** rather than crashing or sending an oversized request. The commit is not blocked in this case.
 - **`_TouchedContextStatus` dataclass** (v4.14.1): structured signal object used by `_build_scope_prompt()` to replace the old magic-string channel. `_compute_touched_status()` produces the touched-file statuses; `_build_scope_prompt()` creates `budget_exceeded` after estimating the assembled prompt. Fields: `status` ("empty"|"omitted"|"budget_exceeded"), `omitted_paths`, `token_count`. Success is represented by `context_status is None`, not a separate `"ok"` status. This prevents filename–sentinel collision (a real file named `__empty__` cannot be misclassified as a control sentinel).
 - **Repo-pack gathering helper**: `_gather_scope_packs()` now only returns the wider repo-pack text (or raises on git failure). It no longer returns status sentinels.
 - Runs **in parallel with** triad review (v4.14.0), BEFORE `git commit`. Also runs in `_repo_write_commit` (legacy path). Runs even when triad blocks — **except** when the budget gate skips it for an oversized assembled prompt.

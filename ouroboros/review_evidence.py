@@ -14,7 +14,7 @@ def collect_review_evidence(
     repo_dir: Any = None,
     max_attempts: int = 3,
     max_runs: int = 3,
-    max_obligations: int = 6,
+    max_obligations: int | None = None,
     max_continuations: int = 3,
 ) -> Dict[str, Any]:
     from ouroboros.review_state import (
@@ -81,7 +81,7 @@ def collect_review_evidence(
         },
         "recent_attempts": [_attempt_to_dict(item) for item in scoped_attempts[-max_attempts:]],
         "recent_advisory_runs": [_run_to_dict(item) for item in repo_runs[-max_runs:]],
-        "open_obligations": [_obligation_to_dict(item) for item in open_obligations[:max_obligations]],
+        "open_obligations": [_obligation_to_dict(item) for item in (open_obligations[:max_obligations] if max_obligations is not None else open_obligations)],
         "continuations": [_continuation_to_dict(item) for item in scoped_continuations[:max_continuations]],
         "corrupt_continuations": [str(item) for item in corrupt[:3]],
     }
@@ -96,14 +96,25 @@ def collect_review_evidence(
     return evidence
 
 
-def format_review_evidence_for_prompt(evidence: Dict[str, Any], *, max_chars: int = 2500) -> str:
+def format_review_evidence_for_prompt(
+    evidence: Dict[str, Any],
+    *,
+    max_chars: int = 0,
+    **_kwargs,
+) -> str:
+    """Format review evidence as JSON for prompt injection.
+
+    When *max_chars* is 0 (default) the full JSON is returned — no truncation.
+    Callers that inject evidence into bounded prompts (summaries, reflections)
+    can pass a positive *max_chars* to get an explicit omission note instead
+    of silent clipping.
+    """
     if not evidence or not evidence.get("has_evidence"):
         return "(no structured review evidence)"
-    raw = json.dumps(evidence, ensure_ascii=False, indent=2)
-    if len(raw) <= max_chars:
-        return raw
-    omitted = len(raw) - max_chars
-    return raw[:max_chars] + f"\n... [truncated structured review evidence; omitted {omitted} chars]"
+    full = json.dumps(evidence, ensure_ascii=False, indent=2)
+    if max_chars > 0 and len(full) > max_chars:
+        return full[:max_chars] + f"\n⚠️ OMISSION NOTE: review evidence truncated at {max_chars} chars; original length {len(full)}"
+    return full
 
 
 def _attempt_to_dict(item: Any) -> Dict[str, Any]:

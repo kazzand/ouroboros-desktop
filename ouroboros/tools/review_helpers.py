@@ -54,7 +54,10 @@ _FULL_REPO_BINARY_EXTENSIONS = frozenset({
     ".mp3", ".mp4", ".wav", ".ogg", ".flac",
     ".db", ".sqlite", ".sqlite3",
 })
-_FULL_REPO_SKIP_DIR_PREFIXES = (".cursor/", ".github/", ".vscode/", ".idea/", "assets/", "webview/")
+_FULL_REPO_SKIP_DIR_PREFIXES = (
+    ".cursor/", ".github/", ".vscode/", ".idea/", "assets/", "webview/",
+    "jsonschema/", "jsonschema_specifications/", "Python.framework/", "certifi/",
+)
 _MAX_FULL_REPO_FILE_BYTES = 1_048_576  # 1 MB
 _BINARY_SNIFF_BYTES = 8192
 _SECRET_LINE_RE = re.compile(
@@ -543,6 +546,11 @@ def build_full_repo_pack(
         # Skip excluded directory prefixes
         if rel_norm.startswith(_FULL_REPO_SKIP_DIR_PREFIXES):
             omitted.append(f"{rel} (excluded dir)")
+            continue
+
+        # Skip known non-source root files (e.g. bare Python binary from build bootstrap)
+        if rel_norm in ("Python",):
+            omitted.append(f"{rel} (binary root file)")
             continue
 
         fp = repo_dir / rel

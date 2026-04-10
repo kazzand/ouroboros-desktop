@@ -43,8 +43,8 @@ _PLAN_REVIEW_MAX_TOKENS = 65536
 _PLAN_REVIEW_EFFORT = "high"
 
 # Budget gate: skip with advisory warning if prompt exceeds this token estimate.
-# 800K gives comfortable margin under most 1M-token models (same as scope review).
-_PLAN_BUDGET_TOKEN_LIMIT = 800_000
+# 1M fills the full context window of most frontier models (same as scope review).
+_PLAN_BUDGET_TOKEN_LIMIT = 1_000_000
 
 
 # ------------------------------------------------------------------ #

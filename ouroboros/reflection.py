@@ -170,7 +170,7 @@ def generate_reflection(
     )
     try:
         from ouroboros.review_evidence import format_review_evidence_for_prompt
-        review_evidence_text = format_review_evidence_for_prompt(review_evidence or {})
+        review_evidence_text = format_review_evidence_for_prompt(review_evidence or {}, max_chars=8000)
     except Exception:
         review_evidence_text = "(review evidence unavailable)"
 
@@ -178,7 +178,7 @@ def generate_reflection(
         goal=goal or "(no goal text)",
         trace_summary=_truncate_with_notice(trace_summary, 2000),
         error_details=error_details,
-        review_evidence=_truncate_with_notice(review_evidence_text, 2500),
+        review_evidence=review_evidence_text,
     )
 
     light_model = os.environ.get("OUROBOROS_MODEL_LIGHT") or DEFAULT_LIGHT_MODEL
