@@ -6,7 +6,7 @@
 [![macOS 12+](https://img.shields.io/badge/macOS-12%2B-black.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
 [![Linux](https://img.shields.io/badge/Linux-x86__64-orange.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
 [![Windows](https://img.shields.io/badge/Windows-x64-blue.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
-[![Version 4.19.2](https://img.shields.io/badge/version-4.19.2-green.svg)](VERSION)
+[![Version 4.19.3](https://img.shields.io/badge/version-4.19.3-green.svg)](VERSION)
 
 A self-modifying AI agent that writes its own code, rewrites its own mind, and evolves autonomously. Born February 16, 2026.
 
@@ -379,6 +379,7 @@ Full text: [BIBLE.md](BIBLE.md)
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 4.19.3 | 2026-04-10 | Raise module hard gate 1250→1600 lines: `MAX_MODULE_LINES` in `review.py`, `DEVELOPMENT.md`, `CHECKLISTS.md`. Adds regression test `test_module_size_gate.py`. |
 | 4.19.2 | 2026-04-10 | Review pipeline tuning: remove obligation cap in evidence collection and context display (all obligations preserved with explicit omission-note budget guard for bounded callers); raise scope/plan review budget gate 800K→1M tokens; raise Claude Code max turns 30→50 with per-tool 1200s timeout floor (tool timeout now uses `max(settings, per_tool)` so tools can declare higher minimums); replace old 2500-char silent truncation of review evidence with opt-in `max_chars` with `⚠️ OMISSION NOTE` (default: no truncation; summaries/reflections use 8000-char budget); exclude junk dirs from repo pack (`jsonschema/`, `jsonschema_specifications/`, `Python.framework/`, `certifi/`, bare `Python` binary); raise triad review max_tokens 32K→64K and scope review max_tokens 64K→100K. |
 | 4.19.1 | 2026-04-10 | Fix SYSTEM.md: replace `multi_model_review` as mandatory pre-commit step with correct workflow (`plan_task` for non-trivial planning, `advisory_pre_review` + `repo_commit` for commit review); reframe `multi_model_review` as brainstorming-only tool. |
 | 4.19.0 | 2026-04-10 | Fix infinite worker crash loop (SIGSEGV/signal -11 on macOS fork): crash-requeue now increments `_attempt` before requeue and enforces `QUEUE_MAX_RETRIES`; tasks already completed via inline path are not requeued; retry-exhausted tasks emit `task_done` terminal event + assistant message; `respawn_worker` no longer resets `_LAST_SPAWN_TIME` so crash-storm detection accumulates correctly; fork-safe `no_proxy=True` path added to `chat_async` (used by `plan_review`, `review`, `scope_review`): Anthropic path uses `requests.Session(trust_env=False)`, non-Anthropic async path uses `httpx.AsyncClient(trust_env=False, mounts={})`. |

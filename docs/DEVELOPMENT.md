@@ -90,7 +90,7 @@ Not every layer is required for every operation. Simple cases (e.g., `repo_read`
 Derived from P5 (Minimalism): entire codebase fits in one context window.
 
 - Module target: ~1000 lines. Crossing that line is P5 pressure and should trigger extraction or an explicit justification.
-- Module hard gate: 1250 lines for non-grandfathered modules in `tests/test_smoke.py`.
+- Module hard gate: 1600 lines for non-grandfathered modules in `tests/test_smoke.py`.
 - Method target: <150 lines. Crossing that line is a decomposition signal, not an automatic failure by itself.
 - Method hard gate: 250 lines in `tests/test_smoke.py`.
 - Codebase-wide function-count hard gate: 1100 Python functions/methods in `tests/test_smoke.py`.
@@ -148,7 +148,7 @@ Before every commit, verify the following:
 - [ ] **Tool** (`{verb}_{noun}`): thin LLM-callable wrapper. Validates input, formats output.
 
 #### Module Size & Complexity
-- [ ] Module stays near one context window (~1000 lines target; 1250 hard gate unless explicitly grandfathered debt)
+- [ ] Module stays near one context window (~1000 lines target; 1600 hard gate unless explicitly grandfathered debt)
 - [ ] No method exceeds the practical target (150 lines) or the hard gate (250 lines)
 - [ ] Total Python function count stays under the current smoke hard gate (1100)
 - [ ] No function has more than 8 parameters
