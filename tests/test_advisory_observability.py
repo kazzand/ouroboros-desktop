@@ -180,7 +180,7 @@ def test_advisory_budget_gate_returns_skipped_on_large_prompt(monkeypatch, tmp_p
         from types import SimpleNamespace
         ctx = SimpleNamespace(repo_dir=tmp_path, drive_root=tmp_path,
                               emit_progress_fn=lambda _: None, pending_events=[])
-        items, raw = adv_mod._run_claude_advisory(tmp_path, "test commit", ctx)
+        items, raw, _model, _chars = adv_mod._run_claude_advisory(tmp_path, "test commit", ctx)
     finally:
         adv_mod._ADVISORY_PROMPT_MAX_CHARS = original_limit
 
@@ -341,7 +341,7 @@ def test_advisory_context_build_failure_is_surfaced(monkeypatch, tmp_path):
         pending_events=[],
         task_id="ctx-fail",
     )
-    items, raw = adv_mod._run_claude_advisory(tmp_path, "test commit", ctx)
+    items, raw, _model, _chars = adv_mod._run_claude_advisory(tmp_path, "test commit", ctx)
     assert items == []
     assert raw.startswith("⚠️ ADVISORY_ERROR:")
     assert "failed to build advisory prompt" in raw
@@ -613,3 +613,144 @@ def test_claude_code_edit_invalidates_target_repo_root(monkeypatch, tmp_path, cw
     assert mutation_root == target_root
     assert invalidate_calls[0]["source_tool"] == "claude_code_edit"
     assert invalidate_calls[0]["changed_paths"] == ["foo.py"]
+
+
+# ---------------------------------------------------------------------------
+# _parse_advisory_output — JSON array extraction heuristics
+# ---------------------------------------------------------------------------
+
+class TestIsChecklistArray:
+    """Unit tests for the _is_checklist_array helper."""
+
+    def setup_method(self, _=None):
+        import importlib
+        self.mod = importlib.import_module("ouroboros.tools.claude_advisory_review")
+        self.fn = self.mod._is_checklist_array
+
+    def test_empty_list_rejected(self):
+        assert self.fn([]) is False
+
+    def test_stray_int_array_rejected(self):
+        assert self.fn([1, 2, 3]) is False
+
+    def test_stray_string_array_rejected(self):
+        assert self.fn(["a", "b"]) is False
+
+    def test_dict_missing_item_rejected(self):
+        assert self.fn([{"verdict": "PASS"}]) is False
+
+    def test_dict_missing_verdict_rejected(self):
+        assert self.fn([{"item": "bible_compliance"}]) is False
+
+    def test_valid_single_item_accepted(self):
+        assert self.fn([{"item": "bible_compliance", "verdict": "PASS"}]) is True
+
+    def test_valid_multi_item_accepted(self):
+        items = [
+            {"item": "bible_compliance", "verdict": "PASS"},
+            {"item": "code_quality", "verdict": "FAIL", "reason": "bug"},
+        ]
+        assert self.fn(items) is True
+
+    def test_mixed_valid_invalid_rejected(self):
+        # One bad element should disqualify the whole array
+        items = [
+            {"item": "bible_compliance", "verdict": "PASS"},
+            {"not_item": "x"},
+        ]
+        assert self.fn(items) is False
+
+
+class TestParseAdvisoryOutput:
+    """Tests for the JSON array parser used to extract checklist items
+    from advisory SDK output, including cases where code blocks contain
+    brackets that could confuse a naïve find/rfind approach."""
+
+    @pytest.fixture(autouse=True)
+    def _import(self):
+        _ensure_sdk_mock()
+        import importlib
+        self.mod = importlib.import_module(
+            "ouroboros.tools.claude_advisory_review"
+        )
+
+    def _parse(self, text: str) -> list:
+        return self.mod._parse_advisory_output(text)
+
+    def _item(self, item: str, verdict: str = "PASS") -> dict:
+        return {"item": item, "verdict": verdict, "reason": "ok"}
+
+    def test_plain_json_array(self):
+        items = [self._item("bible_compliance")]
+        text = json.dumps(items)
+        assert self._parse(text) == items
+
+    def test_json_after_prose(self):
+        items = [self._item("secrets_check"), self._item("code_quality")]
+        text = "Here is my analysis.\n\n" + json.dumps(items)
+        assert self._parse(text) == items
+
+    def test_json_after_code_block_with_brackets(self):
+        """Code block containing '[' and ']' before the actual JSON array."""
+        items = [self._item("bible_compliance", "PASS"), self._item("version_bump", "PASS")]
+        code_block = (
+            "```python\n"
+            "result = [x for x in range(10)]\n"
+            "nested = [[1, 2], [3, 4]]\n"
+            "```\n\n"
+        )
+        text = "Let me think.\n" + code_block + "Final answer:\n" + json.dumps(items)
+        result = self._parse(text)
+        assert result == items
+
+    def test_json_in_markdown_fence(self):
+        items = [self._item("tests_affected")]
+        text = "Review:\n```json\n" + json.dumps(items) + "\n```"
+        assert self._parse(text) == items
+
+    def test_empty_input(self):
+        assert self._parse("") == []
+
+    def test_no_json(self):
+        assert self._parse("This is prose with no JSON.") == []
+
+    def test_multiple_code_blocks_json_last(self):
+        """Multiple code blocks followed by the JSON findings array — the
+        real production scenario that caused parse_failure."""
+        items = [
+            self._item("bible_compliance"),
+            self._item("code_quality"),
+            self._item("version_bump"),
+        ]
+        text = (
+            "Checking files...\n"
+            "```python\n"
+            "checks = [{'key': 'val'}, {'key2': [1, 2, 3]}]\n"
+            "```\n"
+            "More analysis with [inline] brackets and [another].\n"
+            "Final findings:\n"
+            + json.dumps(items)
+        )
+        result = self._parse(text)
+        assert result == items
+
+    def test_stray_array_after_real_checklist_returns_checklist(self):
+        """When a real checklist array is followed by a stray unrelated array,
+        the parser must return the checklist, not the stray array."""
+        items = [
+            self._item("bible_compliance"),
+            self._item("code_quality"),
+        ]
+        # The stray [1,2,3] appears AFTER the real checklist — a bracket-scan
+        # without shape validation would return [1,2,3] because rfind("]")
+        # finds the last "]" which belongs to [1,2,3].
+        text = json.dumps(items) + "\n\nSee also config option [1,2,3]."
+        result = self._parse(text)
+        assert result == items, (
+            "Parser must prefer the checklist array over a later stray array"
+        )
+
+    def test_stray_int_array_alone_returns_empty(self):
+        """A stray [1,2,3] with no real checklist must yield empty list (parse_failure)."""
+        result = self._parse("some text [1,2,3] end")
+        assert result == []

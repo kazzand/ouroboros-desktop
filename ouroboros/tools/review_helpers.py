@@ -57,6 +57,10 @@ _FULL_REPO_BINARY_EXTENSIONS = frozenset({
 _FULL_REPO_SKIP_DIR_PREFIXES = (
     ".cursor/", ".github/", ".vscode/", ".idea/", "assets/", "webview/",
     "jsonschema/", "jsonschema_specifications/", "Python.framework/", "certifi/",
+    # tests/ excluded from full repo pack — 87 files (~217K tokens, ~31% of budget).
+    # Touched test files are still sent via build_touched_file_pack (touched_file_pack
+    # section), so scope reviewer always sees the changed tests.
+    "tests/",
 )
 _MAX_FULL_REPO_FILE_BYTES = 1_048_576  # 1 MB
 _BINARY_SNIFF_BYTES = 8192
@@ -297,17 +301,22 @@ def build_advisory_changed_context(
     paths: list[str] | None = None,
     exclude_paths: set[str] | None = None,
 ) -> tuple[list[str], str, list[str]]:
-    """Resolve changed paths and build the touched-file section for advisory prompts."""
+    """Resolve changed paths and build the touched-file section for advisory prompts.
+
+    Uses ``changed_files_text`` (already-fetched git-status porcelain output) when
+    ``paths`` is not explicitly provided, avoiding a second git-status subprocess call
+    that could race with a concurrent worktree mutation.
+    """
     resolved_paths = (
         list(paths)
         if paths is not None
-        else list_changed_paths_from_git_status(repo_dir)
+        else parse_changed_paths_from_porcelain(changed_files_text)
     )
     filtered_paths = [
         p for p in resolved_paths
         if p not in (exclude_paths or set())
     ]
-    touched_pack, omitted = build_touched_file_pack(repo_dir, filtered_paths or None)
+    touched_pack, omitted = build_touched_file_pack(repo_dir, filtered_paths if filtered_paths is not None else None)
     if not touched_pack.strip():
         touched_pack = "(no touched files)"
     return resolved_paths, touched_pack, omitted
@@ -858,6 +867,106 @@ def check_worktree_version_sync(repo_dir) -> str:
     except Exception:
         pass
     return ""
+
+
+def check_worktree_readiness(
+    repo_dir: "Path",
+    paths: "list[str] | None" = None,
+) -> "list[str]":
+    """Run cheap deterministic checks BEFORE the expensive advisory SDK call.
+
+    Returns a list of warning strings (empty list = ready).
+    Checks: (1) uncommitted changes exist, (2) version-sync,
+    (3) Python files modified without test changes, (4) diff size.
+    Each check is wrapped in try/except — never crashes.
+    """
+    from pathlib import Path as _Path
+    repo_dir = _Path(repo_dir)
+    warnings: list = []
+
+    # 1. Check if there are any uncommitted changes
+    try:
+        path_args = (["--"] + list(paths)) if paths else []
+        status_result = subprocess.run(
+            ["git", "status", "--porcelain"] + path_args,
+            cwd=str(repo_dir), capture_output=True, text=True, timeout=10,
+        )
+        if status_result.returncode != 0:
+            stderr_text = (status_result.stderr or "").strip()
+            warnings.append(f"git status failed (rc={status_result.returncode}): {stderr_text}")
+        else:
+            status_output = (status_result.stdout or "").strip()
+            if not status_output:
+                warnings.append("No uncommitted changes detected — nothing to review.")
+                return warnings  # Blocking: no point running advisory on clean worktree
+    except Exception:
+        pass  # Skip this check on error
+
+    # 2. Version-sync check (delegate to existing helper)
+    try:
+        vsync = check_worktree_version_sync(repo_dir)
+        if vsync:
+            warnings.append(vsync)
+    except Exception:
+        pass
+
+    # 3. Python files under ouroboros/ or supervisor/ modified without test changes
+    try:
+        path_args = (["--"] + list(paths)) if paths else []
+        status_result2 = subprocess.run(
+            ["git", "status", "--porcelain"] + path_args,
+            cwd=str(repo_dir), capture_output=True, text=True, timeout=10,
+        )
+        if status_result2.returncode == 0:
+            changed_lines = (status_result2.stdout or "").splitlines()
+            has_py_in_core = False
+            has_test_change = False
+            for line in changed_lines:
+                if len(line) < 4:
+                    continue
+                fpath = line[3:].strip()
+                # git status --porcelain rename format:
+                #   staged:   "R  old -> new"  (R in byte 0)
+                #   unstaged: " R old -> new"  (R in byte 1)
+                # We must only split on " -> " when at least one status byte
+                # is R or C, NOT for all filenames (real names can contain " -> ").
+                status_bytes = line[:2]
+                if ("R" in status_bytes or "C" in status_bytes) and " -> " in fpath:
+                    fpath = fpath.rsplit(" -> ", 1)[1].strip()
+                if fpath.endswith(".py") and (
+                    fpath.startswith("ouroboros/") or fpath.startswith("supervisor/")
+                ):
+                    has_py_in_core = True
+                if fpath.startswith("tests/"):
+                    has_test_change = True
+            if has_py_in_core and not has_test_change:
+                warnings.append(
+                    "Python files in ouroboros/supervisor modified without corresponding test changes."
+                )
+    except Exception:
+        pass
+
+    # 4. Diff size check
+    try:
+        diff_path_args = (["--"] + list(paths)) if paths else []
+        staged = subprocess.run(
+            ["git", "diff", "--cached"] + diff_path_args,
+            cwd=str(repo_dir), capture_output=True, text=True, timeout=10,
+        )
+        unstaged = subprocess.run(
+            ["git", "diff"] + diff_path_args,
+            cwd=str(repo_dir), capture_output=True, text=True, timeout=10,
+        )
+        combined_len = len(staged.stdout or "") + len(unstaged.stdout or "")
+        if combined_len > 400_000:
+            warnings.append(
+                f"Large diff detected ({combined_len:,} chars). "
+                "Consider splitting into smaller commits for better advisory coverage."
+            )
+    except Exception:
+        pass
+
+    return warnings
 
 
 def format_advisory_sdk_error(prefix: str, result_error: str, stderr_tail: str,

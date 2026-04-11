@@ -45,6 +45,7 @@ from ouroboros.tools.review_helpers import (
     load_checklist_section,
     build_goal_section,
     build_scope_section,
+    check_worktree_readiness,
     check_worktree_version_sync as _check_worktree_version_sync_shared,
     CRITICAL_FINDING_CALIBRATION,
     get_advisory_runtime_diagnostics as _get_runtime_diagnostics,
@@ -60,9 +61,7 @@ from ouroboros.utils import (
 log = logging.getLogger(__name__)
 
 _MAX_DIFF_CHARS_ERROR = 500_000  # Fail loudly above this — split the commit
-# Advisory prompt budget gate — non-blocking skip when prompt too large (mirrors scope review)
-# Claude Code has a 1M token context; 1.6M chars ≈ 400K tokens leaves healthy headroom.
-_ADVISORY_PROMPT_MAX_CHARS = 1_600_000  # ~400K tokens
+_ADVISORY_PROMPT_MAX_CHARS = 1_600_000  # ~400K tokens; non-blocking skip when exceeded
 _OBLIGATION_SUFFIX_RE = re.compile(r"\s*\(obligation\s+([a-f0-9]+)\)\s*$", re.IGNORECASE)
 
 
@@ -80,15 +79,7 @@ def _get_staged_diff(
     repo_dir: pathlib.Path,
     paths: list[str] | None = None,
 ) -> str:
-    """Return staged diff + unstaged diff — full, no truncation.
-
-    When ``paths`` is provided, only diffs for those specific paths are fetched,
-    so a large unrelated worktree change cannot trigger the 500K hard-fail or
-    bias the advisory review.
-
-    If the combined diff exceeds _MAX_DIFF_CHARS_ERROR (500K chars), returns an
-    explicit error message telling the agent to split the commit.
-    """
+    """Return staged+unstaged diff (full, no truncation), scoped to ``paths`` when given."""
     try:
         path_args = (["--"] + list(paths)) if paths else []
         staged_result = subprocess.run(
@@ -124,11 +115,7 @@ def _get_changed_file_list(
     repo_dir: pathlib.Path,
     paths: list[str] | None = None,
 ) -> str:
-    """Return porcelain status, optionally scoped to ``paths``.
-
-    When ``paths`` is provided, only those paths are listed so the advisory
-    reviewer is not distracted by unrelated changed files.
-    """
+    """Return porcelain status, optionally scoped to ``paths``."""
     try:
         path_args = (["--"] + list(paths)) if paths else []
         result = subprocess.run(
@@ -145,12 +132,7 @@ def _get_changed_file_list(
 
 
 def _build_blocking_history_section(drive_root: pathlib.Path, repo_key: str = "") -> str:
-    """Build a section summarizing unresolved obligations from all blocking rounds.
-
-    Reads repo-scoped blocking_history and open_obligations from durable state.
-    The advisory reviewer must explicitly address every open obligation.
-    Returns an empty string when there are no blocking obligations.
-    """
+    """Build section summarizing unresolved obligations from blocking rounds."""
     try:
         state = load_state(drive_root)
     except Exception:
@@ -174,17 +156,7 @@ def _build_advisory_prompt(
     touched_pack: str = "",
     omitted_paths: Optional[List[str]] = None,
 ) -> str:
-    """Build the read-only advisory review prompt.
-
-    Includes: BIBLE.md, CHECKLISTS.md, DEVELOPMENT.md, git status, staged diff,
-    touched file pack, goal/scope sections, and blocking history.
-    Does NOT include raw chat/task context.
-
-    ``diff`` and ``changed_files`` may be provided by the caller to avoid
-    double-fetching (and to ensure validation already ran before prompt build).
-    If absent, they are fetched lazily here — callers that pre-validate should
-    always pass them in.
-    """
+    """Build the read-only advisory review prompt (BIBLE, checklists, dev guide, diff, touched pack)."""
     bible = _load_doc(repo_dir, "BIBLE.md", "(BIBLE.md not found)")
     try:
         checklists = load_checklist_section("Repo Commit Checklist")
@@ -298,7 +270,7 @@ Return ONLY a JSON array. Each element:
 ## Step-by-step instructions
 1. Read the FULL content of every changed file using the Read tool. Do not skip any file.
 2. Check EVERY item from the "Repo Commit Checklist" — do not stop after the first issue.
-3. Pay equal attention to ALL 13 checklist items. bible_compliance and security_issues must be
+3. Pay equal attention to ALL 14 checklist items. bible_compliance and security_issues must be
    evaluated at the same strictness as the downstream blocking reviewers.
 4. Look for ALL bugs, logic errors, regressions, race conditions, and violations of BIBLE.md or DEVELOPMENT.md.
 5. Cross-check: do tool descriptions in prompts match actual get_tools() exports?
@@ -329,14 +301,15 @@ def _run_claude_advisory(
     scope: str = "",
     paths: Optional[List[str]] = None,
     drive_root: Optional[pathlib.Path] = None,
-) -> tuple[list, str]:
+) -> tuple:
     """Run the advisory review via Claude Agent SDK (read-only).
 
-    Returns (items, raw_result). raw_result starts with ⚠️ ADVISORY_ERROR: on failure.
+    Returns (items, raw_result, model_used, prompt_chars).
+    raw_result starts with ⚠️ ADVISORY_ERROR: on failure.
     """
     api_key = os.environ.get("ANTHROPIC_API_KEY", "")
     if not api_key:
-        return [], "⚠️ ADVISORY_ERROR: ANTHROPIC_API_KEY not set."
+        return [], "⚠️ ADVISORY_ERROR: ANTHROPIC_API_KEY not set.", "", 0
 
     # Resolve model — single source of truth, honours CLAUDE_CODE_MODEL setting
     from ouroboros.gateways.claude_code import resolve_claude_code_model
@@ -345,11 +318,11 @@ def _run_claude_advisory(
     # Fetch diff and changed-file list exactly once, validate, then pass into prompt builder.
     diff_text = _get_staged_diff(repo_dir, paths=paths)
     if diff_text.startswith("⚠️ ADVISORY_ERROR:"):
-        return [], diff_text
+        return [], diff_text, "", 0
 
     changed_files_text = _get_changed_file_list(repo_dir, paths=paths)
     if changed_files_text.startswith("⚠️ ADVISORY_ERROR:"):
-        return [], changed_files_text
+        return [], changed_files_text, "", 0
 
     # Parse touched paths from porcelain output to avoid a second git-status call inside
     # build_touched_file_pack.  Lines are "XY filename" or "(clean — no changed files)".
@@ -374,9 +347,9 @@ def _run_claude_advisory(
             omitted_paths=omitted_paths,
         )
     except RuntimeError as exc:
-        return [], f"⚠️ ADVISORY_ERROR: failed to build advisory prompt: {exc}"
+        return [], f"⚠️ ADVISORY_ERROR: failed to build advisory prompt: {exc}", "", 0
     except Exception as exc:
-        return [], f"⚠️ ADVISORY_ERROR: unexpected error building prompt: {exc}"
+        return [], f"⚠️ ADVISORY_ERROR: unexpected error building prompt: {exc}", "", 0
 
     prompt_chars = len(prompt)
     diag = _get_runtime_diagnostics(model, prompt_chars, resolved_paths)
@@ -391,7 +364,7 @@ def _run_claude_advisory(
             f"Advisory review skipped — non-blocking. Consider splitting the commit."
         )
         log.warning("Advisory skipped — prompt too large: %d chars", prompt_chars)
-        return [], warning
+        return [], warning, model, prompt_chars
 
     log.info(
         "Advisory SDK call: model=%s prompt_chars=%d touched=%s sdk=%s cli=%s",
@@ -421,17 +394,17 @@ def _run_claude_advisory(
                 diag=diag,
             )
             log.error("Advisory SDK failure:\n%s", err_msg)
-            return [], err_msg
+            return [], err_msg, model, prompt_chars
 
         raw_text = result.result_text
         items = _parse_advisory_output(raw_text)
-        return items, raw_text
+        return items, raw_text, model, prompt_chars
 
     except ImportError:
         return [], (
             "⚠️ ADVISORY_ERROR: claude-agent-sdk not installed. "
             "Install: pip install 'ouroboros[claude-sdk]'"
-        )
+        ), "", 0
     except Exception as e:
         err_msg = _format_advisory_error(
             prefix=f"SDK call raised {type(e).__name__}",
@@ -441,7 +414,7 @@ def _run_claude_advisory(
             diag=diag,
         )
         log.error("Advisory SDK exception:\n%s", err_msg)
-        return [], err_msg
+        return [], err_msg, model, prompt_chars
 
 
 def _parse_advisory_output(stdout: str) -> list:
@@ -454,7 +427,7 @@ def _parse_advisory_output(stdout: str) -> list:
         outer = json.loads(text)
         if isinstance(outer, dict) and "result" in outer:
             text = str(outer["result"]).strip()
-        elif isinstance(outer, list):
+        elif isinstance(outer, list) and _is_checklist_array(outer):
             return outer
     except (json.JSONDecodeError, ValueError):
         pass
@@ -466,23 +439,62 @@ def _parse_advisory_output(stdout: str) -> list:
     # Try direct parse of the inner result
     try:
         obj = json.loads(text)
-        if isinstance(obj, list):
+        if isinstance(obj, list) and _is_checklist_array(obj):
             return obj
     except (json.JSONDecodeError, ValueError):
         pass
 
-    # Find embedded JSON array
-    start = text.find("[")
-    end = text.rfind("]")
-    if start != -1 and end > start:
-        try:
-            obj = json.loads(text[start:end + 1])
-            if isinstance(obj, list):
-                return obj
-        except (json.JSONDecodeError, ValueError):
-            pass
+    # Find embedded JSON array — scan all "]" positions from right to left and
+    # for each try all "[" positions to its left, also right to left.
+    # This correctly handles: stray arrays appearing AFTER the real checklist
+    # (we find the checklist's "]" before the stray one), and code blocks with
+    # brackets appearing BEFORE the checklist (their "[" is left of the
+    # checklist's "[" so the inner-rightmost match wins).
+    # Each candidate must also pass _is_checklist_array validation so that stray
+    # arrays like [1,2,3] or code-snippet arrays are rejected.
+    ends: list[int] = []
+    search_from = 0
+    while True:
+        pos = text.find("]", search_from)
+        if pos == -1:
+            break
+        ends.append(pos)
+        search_from = pos + 1
+
+    for end in reversed(ends):
+        # Collect all "[" positions to the left of this "]"
+        search_from = 0
+        starts: list[int] = []
+        while True:
+            pos = text.find("[", search_from)
+            if pos == -1 or pos > end:
+                break
+            starts.append(pos)
+            search_from = pos + 1
+        for start in reversed(starts):
+            try:
+                obj = json.loads(text[start:end + 1])
+                if isinstance(obj, list) and _is_checklist_array(obj):
+                    return obj
+            except (json.JSONDecodeError, ValueError):
+                continue
 
     return []
+
+
+def _is_checklist_array(items: list) -> bool:
+    """Return True iff items looks like a real advisory checklist array.
+
+    Each element must be a dict containing at least 'item' and 'verdict' keys.
+    An empty list is rejected (no findings = parse_failure, not a clean advisory).
+    Stray arrays like [1,2,3], code snippets, or unrelated JSON lists are rejected.
+    """
+    if not items:
+        return False
+    return all(
+        isinstance(el, dict) and "item" in el and "verdict" in el
+        for el in items
+    )
 
 
 # -- Audit logging --
@@ -683,12 +695,7 @@ def _next_step_guidance(latest: Optional["AdvisoryRunRecord"], state: "AdvisoryR
 
 
 def _check_worktree_version_sync(repo_dir: pathlib.Path) -> str:
-    """Worktree version-sync preflight for advisory path (non-fatal, non-blocking).
-
-    Delegates to the shared helper in review_helpers.  The local name is kept as
-    a backward-compatible alias so existing tests importing from this module continue
-    to work without changes.
-    """
+    """Backward-compatible alias — delegates to shared helper in review_helpers."""
     return _check_worktree_version_sync_shared(repo_dir)
 
 
@@ -702,11 +709,7 @@ def _handle_advisory_pre_review(
     scope: str = "",
     paths: Optional[List[str]] = None,
 ) -> str:
-    """Run an advisory pre-commit review via Claude Agent SDK (read-only).
-
-    Stores result in durable state so repo_commit can verify freshness.
-    Returns structured JSON with findings + status.
-    """
+    """Run an advisory pre-commit review via Claude Agent SDK (read-only)."""
     repo_dir = pathlib.Path(ctx.repo_dir)
     drive_root = pathlib.Path(ctx.drive_root)
     repo_key = make_repo_key(repo_dir)
@@ -727,6 +730,30 @@ def _handle_advisory_pre_review(
                                "explicit skip_advisory_pre_review=True", task_id, drive_root,
                                snapshot_paths=paths)
 
+    # Readiness gate FIRST: reject clean worktree before any fresh-run short-circuit.
+    # This ensures "no uncommitted changes" always blocks, even if a prior fresh/bypass exists.
+    readiness_warnings = check_worktree_readiness(repo_dir, paths=paths)
+    if readiness_warnings and any("no uncommitted changes" in w.lower() for w in readiness_warnings):
+        ctx.emit_progress_fn(f"⚠️ Advisory readiness gate: {'; '.join(readiness_warnings)}")
+        return json.dumps({
+            "status": "error",
+            "snapshot_hash": snapshot_hash,
+            "message": "No uncommitted changes detected — nothing to review.",
+            "readiness_warnings": readiness_warnings,
+        }, ensure_ascii=False, indent=2)
+
+    # Log non-blocking readiness warnings to events.jsonl for observability
+    if readiness_warnings:
+        try:
+            append_jsonl(drive_root / "logs" / "events.jsonl", {
+                "ts": utc_now_iso(),
+                "type": "advisory_readiness_gate",
+                "warnings": readiness_warnings,
+                "task_id": task_id,
+            })
+        except Exception:
+            pass
+
     # Check if we already have a fresh run for this snapshot.
     # BUT: if there are open obligations from a blocked commit, force a re-run
     # even on the same snapshot hash so obligations are explicitly verified.
@@ -738,6 +765,7 @@ def _handle_advisory_pre_review(
             "snapshot_hash": snapshot_hash,
             "ts": existing.ts,
             "items": existing.items,
+            "readiness_warnings": readiness_warnings,
             "message": "A fresh advisory run already exists for this snapshot. Proceed with repo_commit.",
         }, ensure_ascii=False, indent=2)
 
@@ -766,7 +794,12 @@ def _handle_advisory_pre_review(
     if version_sync_warning:
         ctx.emit_progress_fn(f"⚠️ Advisory preflight: {version_sync_warning}")
 
-    items, raw_result = _run_claude_advisory(repo_dir, commit_message, ctx, goal=goal, scope=scope, paths=paths, drive_root=drive_root)
+    import time as _time
+    _advisory_start = _time.monotonic()
+    items, raw_result, model_used, prompt_chars = _run_claude_advisory(
+        repo_dir, commit_message, ctx, goal=goal, scope=scope, paths=paths, drive_root=drive_root
+    )
+    _advisory_duration = _time.monotonic() - _advisory_start
 
     # Handle errors from the CLI
     if raw_result.startswith("⚠️ ADVISORY_ERROR"):
@@ -774,6 +807,7 @@ def _handle_advisory_pre_review(
             "status": "error",
             "snapshot_hash": snapshot_hash,
             "error": raw_result,
+            "readiness_warnings": readiness_warnings,
             "message": (
                 "Advisory review failed to run. Fix the error and retry, "
                 "or use skip_advisory_pre_review=True to bypass (will be audited)."
@@ -806,6 +840,10 @@ def _handle_advisory_pre_review(
                 tool_name="advisory_pre_review",
                 task_id=task_id,
                 attempt=next_run_attempt,
+                readiness_warnings=readiness_warnings,
+                prompt_chars=prompt_chars,
+                model_used=model_used,
+                duration_sec=_advisory_duration,
             ))
 
         update_state(drive_root, _mutate_skip)
@@ -813,6 +851,7 @@ def _handle_advisory_pre_review(
             "status": "skipped",
             "snapshot_hash": snapshot_hash,
             "message": raw_result,
+            "readiness_warnings": readiness_warnings,
         }, ensure_ascii=False, indent=2)
 
     # Classify findings
@@ -847,6 +886,10 @@ def _handle_advisory_pre_review(
                 task_id=task_id,
             )
         ) + 1,
+        readiness_warnings=readiness_warnings,
+        prompt_chars=prompt_chars,
+        model_used=model_used,
+        duration_sec=_advisory_duration,
     )
     state.add_run(run)
 
@@ -858,6 +901,7 @@ def _handle_advisory_pre_review(
             "snapshot_hash": snapshot_hash,
             "error": "Advisory ran but returned no parseable checklist items.",
             "raw_result": _truncate_review_artifact(raw_result),
+            "readiness_warnings": readiness_warnings,
             "message": (
                 "Advisory output could not be parsed. Re-run advisory_pre_review, "
                 "or use skip_advisory_pre_review=True to bypass (will be audited)."
@@ -890,6 +934,7 @@ def _handle_advisory_pre_review(
         "critical_count": len(critical_fails),
         "advisory_count": len(advisory_fails),
         "snapshot_summary": snapshot_summary,
+        "readiness_warnings": readiness_warnings,
         "message": (
             f"Advisory review complete. {len(critical_fails)} critical, "
             f"{len(advisory_fails)} advisory findings. "

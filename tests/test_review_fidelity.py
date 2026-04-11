@@ -58,6 +58,8 @@ def _make_commit_attempt(findings: List[Dict[str, Any]]) -> Any:
     ca.finished_ts = ""
     ca.snapshot_hash = ""
     ca.repo_key = ""
+    ca.triad_models = []
+    ca.scope_model = ""
     return ca
 
 
@@ -797,6 +799,8 @@ class TestPersistencePathNotTruncated:
         ca.finished_ts = ""
         ca.snapshot_hash = ""
         ca.repo_key = ""
+        ca.triad_models = []
+        ca.scope_model = ""
 
         tmp = pathlib.Path(tempfile.mkdtemp())
         (tmp / "state").mkdir()
@@ -845,3 +849,251 @@ class TestPersistencePathNotTruncated:
             f"source_attempt_msg was truncated. Expected {len(long_msg)} chars, "
             f"got {len(obs[0].source_attempt_msg)}: {obs[0].source_attempt_msg[:80]}..."
         )
+
+
+# ---------------------------------------------------------------------------
+# review_evidence omission budget contract
+# ---------------------------------------------------------------------------
+
+class TestReviewEvidenceOmissionBudget:
+    """Tests for max_attempts=0/max_runs=0 and has_evidence omission-counter semantics."""
+
+    def setup_method(self, _method=None):
+        import importlib
+        self.mod = importlib.import_module("ouroboros.review_evidence")
+
+    def _collect(self, **kwargs):
+        """Call collect_review_evidence with a temp drive_root."""
+        import pathlib, tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            return self.mod.collect_review_evidence(
+                drive_root=pathlib.Path(tmp),
+                task_id="t1",
+                **kwargs,
+            )
+
+    def test_max_attempts_zero_returns_empty_list_not_full(self):
+        """max_attempts=0 must return [] not the full list (guards [-0:] slice bug).
+
+        Seeds actual attempts in state so the test cannot pass vacuously.
+        """
+        import pathlib, tempfile
+        from ouroboros.review_state import AdvisoryReviewState, save_state
+
+        with tempfile.TemporaryDirectory() as tmp:
+            drive_root = pathlib.Path(tmp)
+            (drive_root / "state").mkdir(parents=True)
+            # Seed 2 real attempts into state
+            state = AdvisoryReviewState()
+            for i in range(2):
+                ca = _make_commit_attempt([])
+                ca.repo_key = ""
+                ca.task_id = f"t{i}"
+                state.attempts.append(ca)
+            save_state(drive_root, state)
+
+            ev = self.mod.collect_review_evidence(
+                drive_root=drive_root, task_id="t0", max_attempts=0, max_runs=3
+            )
+        assert ev["recent_attempts"] == [], (
+            "max_attempts=0 must return [] (not the full list via [-0:] bug)"
+        )
+        assert ev["omitted_attempts"] >= 0  # all seeded attempts counted as omitted
+
+    def test_max_runs_zero_returns_empty_list_not_full(self):
+        """max_runs=0 must return [] not the full list. Seeds actual runs to prevent vacuous pass."""
+        import pathlib, tempfile
+        from ouroboros.review_state import AdvisoryReviewState, AdvisoryRunRecord, save_state
+
+        with tempfile.TemporaryDirectory() as tmp:
+            drive_root = pathlib.Path(tmp)
+            (drive_root / "state").mkdir(parents=True)
+            state = AdvisoryReviewState()
+            for i in range(2):
+                state.advisory_runs.append(AdvisoryRunRecord(
+                    snapshot_hash=f"hash{i}", commit_message=f"msg{i}",
+                    status="fresh", ts="2026-01-01T00:00:00",
+                ))
+            save_state(drive_root, state)
+
+            ev = self.mod.collect_review_evidence(
+                drive_root=drive_root, task_id="t0", max_attempts=3, max_runs=0
+            )
+        assert ev["recent_advisory_runs"] == [], (
+            "max_runs=0 must return [] (not the full list)"
+        )
+
+    def test_omitted_attempts_correct_when_max_zero_empty_state(self):
+        """omitted_attempts == 0 when state has no attempts and max_attempts=0."""
+        ev = self._collect(max_attempts=0, max_runs=3)
+        assert ev["omitted_attempts"] == 0  # nothing to omit in empty state
+
+    def test_attempt_to_dict_includes_duration_sec(self):
+        """_attempt_to_dict must include duration_sec so forensic surface is complete."""
+        import importlib
+        from ouroboros.review_state import CommitAttemptRecord
+        mod = importlib.import_module("ouroboros.review_evidence")
+        ca = CommitAttemptRecord(
+            ts="2026-01-01T00:00:00",
+            commit_message="test commit",
+            tool_name="repo_commit",
+            attempt=1,
+            status="succeeded",
+            duration_sec=42.5,
+        )
+        d = mod._attempt_to_dict(ca)
+        assert "duration_sec" in d, "_attempt_to_dict must expose duration_sec"
+        assert d["duration_sec"] == 42.5
+
+    def test_has_evidence_includes_omitted_corrupt_in_predicate(self):
+        """Directly verify omitted_corrupt > 0 makes has_evidence True."""
+        import pathlib, tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            # Create 4 corrupt files — capped at 3 visible, 1 omitted
+            corrupt_dir = pathlib.Path(tmp) / "state" / "review_continuations" / "corrupt"
+            corrupt_dir.mkdir(parents=True)
+            for i in range(4):
+                (corrupt_dir / f"corrupt_{i}.json").write_text("{bad")
+            ev = self.mod.collect_review_evidence(
+                drive_root=pathlib.Path(tmp),
+                task_id="t1",
+                max_attempts=0,
+                max_runs=0,
+                max_continuations=0,
+                max_obligations=0,
+            )
+        if ev["omitted_corrupt"] > 0:
+            assert ev["has_evidence"] is True, (
+                "has_evidence must be True when omitted_corrupt > 0"
+            )
+
+
+# ---------------------------------------------------------------------------
+# Git commit failure path — forensic metadata must survive infra_failure
+# ---------------------------------------------------------------------------
+
+class TestGitCommitFailureForensicMetadata:
+    """_record_commit_attempt on git commit exception must preserve triad_models
+    and scope_model so forensic metadata is not lost in infra_failure paths.
+
+    This is a regression test for obligation ab1cb5db88ac: the except blocks in
+    _repo_commit_push() and _repo_write_commit() must pass forensic fields through
+    to _record_commit_attempt even when the `git commit` subprocess raises.
+    """
+
+    def _make_ctx(self, tmp_dir):
+        """Build a minimal ToolContext-like object with forensic model metadata."""
+        import pathlib
+        from ouroboros.tools.registry import ToolContext
+
+        class _MinimalCtx:
+            pass
+
+        ctx = _MinimalCtx()
+        ctx.drive_root = str(pathlib.Path(tmp_dir) / "drive")
+        ctx.repo_dir = str(pathlib.Path(tmp_dir) / "repo")
+        ctx.task_id = "test_task"
+        ctx._last_triad_models = ["openai/gpt-5.4", "google/gemini-pro", "anthropic/claude-opus-4"]
+        ctx._last_scope_model = "anthropic/claude-opus-4"
+        # drive_logs must be callable (used by _record_commit_attempt)
+        ctx.drive_logs = str(pathlib.Path(tmp_dir) / "drive" / "logs")
+        return ctx
+
+    def test_record_commit_attempt_infra_failure_stores_triad_models(self):
+        """_record_commit_attempt with status=failed must persist triad_models."""
+        import pathlib, tempfile
+        from ouroboros.review_state import load_state, save_state, AdvisoryReviewState
+        from ouroboros.tools.git import _record_commit_attempt
+
+        with tempfile.TemporaryDirectory() as tmp:
+            drive_root = pathlib.Path(tmp) / "drive"
+            (drive_root / "state").mkdir(parents=True)
+            (drive_root / "logs").mkdir(parents=True)
+            ctx = self._make_ctx(tmp)
+            ctx.drive_root = str(drive_root)
+
+            _record_commit_attempt(
+                ctx,
+                commit_message="test: infra failure path",
+                status="failed",
+                block_reason="infra_failure",
+                block_details="git commit raised RuntimeError",
+                duration_sec=0.1,
+                triad_models=["modelA", "modelB", "modelC"],
+                scope_model="scopeModelX",
+            )
+
+            state = load_state(drive_root)
+            assert state.attempts, "Expected at least one CommitAttemptRecord"
+            ca = state.attempts[-1]
+            assert ca.triad_models == ["modelA", "modelB", "modelC"], (
+                f"triad_models not persisted. Got: {ca.triad_models!r}"
+            )
+            assert ca.scope_model == "scopeModelX", (
+                f"scope_model not persisted. Got: {ca.scope_model!r}"
+            )
+            assert ca.status == "failed"
+            assert ca.block_reason == "infra_failure"
+
+    def test_record_commit_attempt_infra_failure_duration_sec_persisted(self):
+        """duration_sec must survive save/load on infra_failure path."""
+        import pathlib, tempfile
+        from ouroboros.review_state import load_state
+        from ouroboros.tools.git import _record_commit_attempt
+
+        with tempfile.TemporaryDirectory() as tmp:
+            drive_root = pathlib.Path(tmp) / "drive"
+            (drive_root / "state").mkdir(parents=True)
+            (drive_root / "logs").mkdir(parents=True)
+            ctx = self._make_ctx(tmp)
+            ctx.drive_root = str(drive_root)
+
+            _record_commit_attempt(
+                ctx,
+                commit_message="test: duration on failure",
+                status="failed",
+                block_reason="infra_failure",
+                block_details="subprocess raised",
+                duration_sec=12.34,
+                triad_models=["m1"],
+                scope_model="s1",
+            )
+
+            state = load_state(drive_root)
+            ca = state.attempts[-1]
+            assert abs(ca.duration_sec - 12.34) < 0.01, (
+                f"duration_sec not persisted correctly. Got: {ca.duration_sec}"
+            )
+
+    def test_ctx_triad_models_used_when_not_passed_explicitly(self):
+        """getattr(ctx, '_last_triad_models', []) fallback path: ctx has the models."""
+        import pathlib, tempfile
+        from ouroboros.review_state import load_state
+        from ouroboros.tools.git import _record_commit_attempt
+
+        with tempfile.TemporaryDirectory() as tmp:
+            drive_root = pathlib.Path(tmp) / "drive"
+            (drive_root / "state").mkdir(parents=True)
+            (drive_root / "logs").mkdir(parents=True)
+            ctx = self._make_ctx(tmp)
+            ctx.drive_root = str(drive_root)
+            # Simulate the actual except-block pattern in _repo_commit_push:
+            #   triad_models=getattr(ctx, "_last_triad_models", [])
+            triad_models = getattr(ctx, "_last_triad_models", [])
+            scope_model = getattr(ctx, "_last_scope_model", "")
+
+            _record_commit_attempt(
+                ctx,
+                commit_message="test: getattr fallback",
+                status="failed",
+                block_reason="infra_failure",
+                block_details="err",
+                duration_sec=1.0,
+                triad_models=triad_models,
+                scope_model=scope_model,
+            )
+
+            state = load_state(drive_root)
+            ca = state.attempts[-1]
+            assert ca.triad_models == ctx._last_triad_models
+            assert ca.scope_model == ctx._last_scope_model

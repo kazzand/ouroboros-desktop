@@ -1,9 +1,6 @@
 """Git tools: repo_write, repo_write_commit, repo_commit, git_status, git_diff,
 pull_from_remote, restore_to_head, revert_commit.
-
-Pre-commit review pipeline (Bible P8): advisory pre-review runs first, then
-triad diff review and scope review execute concurrently via parallel_review.py.
-All review stages run before commit; enforcement is configurable.
+Advisory pre-review + triad + scope review run before each commit (parallel_review.py).
 """
 
 from __future__ import annotations
@@ -143,6 +140,8 @@ def _handle_revalidation_failure(
         post_review_fingerprint=(post_fingerprint or {}).get("fingerprint", ""),
         fingerprint_status=fingerprint_status,
         degraded_reasons=[degraded_reason],
+        triad_models=getattr(ctx, "_last_triad_models", []),
+        scope_model=getattr(ctx, "_last_scope_model", ""),
     )
     return msg
 
@@ -171,6 +170,8 @@ def _finalize_blocked_review(
         pre_review_fingerprint=pre_fingerprint.get("fingerprint", ""),
         post_review_fingerprint=post_fingerprint.get("fingerprint", ""),
         fingerprint_status="matched",
+        triad_models=getattr(ctx, "_last_triad_models", []),
+        scope_model=getattr(ctx, "_last_scope_model", ""),
     )
     try:
         run_cmd(["git", "reset", "HEAD"], cwd=ctx.repo_dir)
@@ -335,7 +336,6 @@ def _git_commit_with_tests(ctx: ToolContext) -> Optional[str]:
     return None
 
 
-# Triad review helpers (used by parallel_review.py and legacy paths).
 from ouroboros.tools.review import (  # noqa: F401
     _run_unified_review,
     _load_checklist_section,
@@ -580,6 +580,10 @@ def _repo_write_commit(ctx: ToolContext, path: str, content: str,
     global _consecutive_test_failures
     ctx.last_push_succeeded = False
     ctx._review_advisory = []
+    # Reset forensic fields at the start of each commit attempt so stale values
+    # from a previous attempt never persist on early-exit paths.
+    ctx._last_triad_models = []
+    ctx._last_scope_model = ""
     ctx._current_review_tool_name = "repo_write_commit"
     if not commit_message.strip():
         return "⚠️ ERROR: commit_message must be non-empty."
@@ -725,14 +729,18 @@ def _repo_write_commit(ctx: ToolContext, path: str, content: str,
             err_msg = f"⚠️ GIT_ERROR (commit): {_sanitize_git_error(str(e))}"
             _record_commit_attempt(ctx, commit_message, "failed",
                                    block_reason="infra_failure", block_details=err_msg,
-                                   duration_sec=time.time() - _commit_start)
+                                   duration_sec=time.time() - _commit_start,
+                                   triad_models=getattr(ctx, "_last_triad_models", []),
+                                   scope_model=getattr(ctx, "_last_scope_model", ""))
             return err_msg
         _record_commit_attempt(ctx, commit_message, "succeeded",
                                duration_sec=time.time() - _commit_start,
                                phase="commit",
                                pre_review_fingerprint=pre_fingerprint.get("fingerprint", ""),
                                post_review_fingerprint=post_fingerprint.get("fingerprint", ""),
-                               fingerprint_status="matched")
+                               fingerprint_status="matched",
+                               triad_models=getattr(ctx, "_last_triad_models", []),
+                               scope_model=getattr(ctx, "_last_scope_model", ""))
         ctx._scope_review_history = {}  # Clear on success — next commit starts fresh
         _post_commit_result(ctx, commit_message, skip_tests, test_warning_ref)
         tag_info = _auto_tag_on_version_bump(ctx.repo_dir, commit_message)
@@ -753,6 +761,10 @@ def _repo_commit_push(ctx: ToolContext, commit_message: str,
     """Stage, review, and commit files with unified pre-commit review."""
     ctx.last_push_succeeded = False
     ctx._review_advisory = []
+    # Reset forensic fields at the start of each commit attempt so stale values
+    # from a previous attempt never persist on early-exit paths (e.g. fingerprint_unavailable).
+    ctx._last_triad_models = []
+    ctx._last_scope_model = ""
     ctx._current_review_tool_name = "repo_commit"
     _commit_start = time.time()
     if not commit_message.strip():
@@ -889,14 +901,18 @@ def _repo_commit_push(ctx: ToolContext, commit_message: str,
             err_msg = f"⚠️ GIT_ERROR (commit): {_sanitize_git_error(str(e))}"
             _record_commit_attempt(ctx, commit_message, "failed",
                                    block_reason="infra_failure", block_details=err_msg,
-                                   duration_sec=time.time() - _commit_start)
+                                   duration_sec=time.time() - _commit_start,
+                                   triad_models=getattr(ctx, "_last_triad_models", []),
+                                   scope_model=getattr(ctx, "_last_scope_model", ""))
             return err_msg
         _record_commit_attempt(ctx, commit_message, "succeeded",
                                duration_sec=time.time() - _commit_start,
                                phase="commit",
                                pre_review_fingerprint=pre_fingerprint.get("fingerprint", ""),
                                post_review_fingerprint=post_fingerprint.get("fingerprint", ""),
-                               fingerprint_status="matched")
+                               fingerprint_status="matched",
+                               triad_models=getattr(ctx, "_last_triad_models", []),
+                               scope_model=getattr(ctx, "_last_scope_model", ""))
         ctx._scope_review_history = {}  # Clear on success — next commit starts fresh
         _post_commit_result(ctx, commit_message, skip_tests, test_warning_ref)
         tag_info = _auto_tag_on_version_bump(ctx.repo_dir, commit_message)

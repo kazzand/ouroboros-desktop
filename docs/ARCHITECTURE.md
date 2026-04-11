@@ -1,4 +1,4 @@
-# Ouroboros v4.19.3 — Architecture & Reference
+# Ouroboros v4.20.0 — Architecture & Reference
 
 This document describes every component, page, button, API endpoint, and data flow.
 It is the single source of truth for how the system works. Keep it updated.
@@ -540,6 +540,15 @@ backward compatibility but is not the runtime authority.
   for the real result (hard ceiling: 1800s). This prevents ambiguous "tool timed out, maybe
   still running" states for commit operations.
 - Context compaction kicks in after round 8 (summarizes old tool results)
+- **Loop checkpoint** (`_maybe_inject_self_check`): every 15 rounds, a self-audit message is
+  injected into the transcript. Includes: checkpoint number, round/max, token count, cost so far,
+  and a **last-15-tool-call trace** built by `_build_recent_tool_trace` (P3 LLM-First — trace is
+  provided as factual data, the LLM decides if it represents repetition). Emits a `task_checkpoint`
+  event via `_emit_live_log` → `event_queue` → `supervisor/events.py::_handle_log_event`, which
+  both pushes the event to the live UI bridge AND persists it to `logs/events.jsonl` for durable
+  postmortem analysis. When `event_queue` is `None` (direct/test path), `_emit_checkpoint_event`
+  falls back to direct `append_jsonl`. Passes `event_queue`, `task_id`, and `drive_logs` from
+  `run_llm_loop` for observability.
 
 ### Claude runtime (gateways/claude_code.py + platform_layer.py)
 
@@ -651,6 +660,20 @@ attempts merges into the existing obligation (reason text deduped) instead of du
 `_resolve_matching_obligations` in `ouroboros/tools/claude_advisory_review.py` resolves
 by both `obligation_id` (primary) and `item.lower()` (fallback for legacy saved state),
 so the dual-path resolution handles obligations created under either scheme.
+
+### Deterministic readiness gate (`ouroboros/tools/review_helpers.py::check_worktree_readiness`)
+
+`check_worktree_readiness(repo_dir, paths)` runs cheap deterministic checks BEFORE the
+expensive advisory SDK call. Returns a list of warning strings (empty = ready):
+1. **No uncommitted changes** — blocking: if git status shows nothing to review, advisory
+   returns an error immediately without calling the SDK.
+2. **Version-sync warning** — delegates to `check_worktree_version_sync`.
+3. **Python-without-tests warning** — if `.py` files under `ouroboros/` or `supervisor/` are
+   modified but no `tests/` files are changed, emits a warning (non-blocking).
+4. **Diff size warning** — warns if combined staged+unstaged diff exceeds advisory thresholds.
+
+Called at the start of `_handle_advisory_pre_review`, before the `already_fresh` short-circuit.
+Non-blocking warnings are emitted to `events.jsonl` as `advisory_readiness_gate` events.
 
 ### Shared worktree version-sync preflight (`ouroboros/tools/review_helpers.py::check_worktree_version_sync`)
 
@@ -794,7 +817,9 @@ Shared helpers live in `tools/review_helpers.py`: checklist section loader,
 touched-file pack builder (`build_touched_file_pack`, 1MB file limit; sensitive files omitted case-insensitively before any read), full repo pack builder
 (`build_full_repo_pack` — no char cap, binary/vendored/sensitive filtering, replaces deprecated
 `build_broader_repo_pack`; excludes `jsonschema/`, `jsonschema_specifications/`, `Python.framework/`,
-`certifi/`, and the bare `Python` binary in addition to the standard skip list), HEAD snapshot section builder, goal/scope resolution,
+`certifi/`, the bare `Python` binary, and `tests/` in addition to the standard skip list —
+untouched test files are excluded to reduce scope review prompt size; touched test files still arrive
+via `build_touched_file_pack`), HEAD snapshot section builder, goal/scope resolution,
 advisory SDK diagnostic helpers (`get_advisory_runtime_diagnostics`, `format_advisory_sdk_error`)
 shared with `claude_advisory_review.py` to keep that module closer to the one-context-window target (P5).
 `_FILE_SIZE_LIMIT` was raised from 100KB to 1MB in v4.13.0 to stop cutting off normal-sized files.
@@ -851,7 +876,17 @@ errors surface via the same observability path.
   open obligations, stale markers, repo/tool/task identities, and reviewed-diff fingerprints.
   Advisory runs have: `snapshot_hash`, `commit_message`, `status`
   (fresh/stale/bypassed/skipped/parse_failure), `items`, `raw_result` (full, no truncation), audit fields,
-  `snapshot_paths` (optional list of paths used to compute the scoped hash — `None` = whole repo).
+  `snapshot_paths` (optional list of paths used to compute the scoped hash — `None` = whole repo),
+  **forensic fields** `readiness_warnings` (list of warnings from the readiness gate),
+  `prompt_chars` (size of the advisory prompt sent to the SDK), `model_used` (resolved Anthropic
+  model name), `duration_sec` (wall-clock time for the SDK call).
+  Commit attempts additionally carry **forensic fields** `triad_models` (list of 3 model IDs
+  configured for the triad review) and `scope_model` (model ID configured for the scope review).
+  These fields record the *configured* models at the time the review was launched, not necessarily
+  the models that successfully responded — they are set before the LLM calls complete so they are
+  always present even when a review attempt fails mid-flight. All forensic fields survive save/load
+  via updated `_record_from_dict`/`_commit_attempt_from_dict` and are preserved across `_merge_attempt`
+  calls so the latest values are never silently dropped on status updates.
   `parse_failure` means the SDK ran but returned unparseable output — repo_commit treats it as
   no fresh advisory (equivalent to stale) and requires a re-run or explicit bypass.
   `snapshot_paths` is persisted so `review_status` can recompute the live hash with the same
@@ -870,6 +905,11 @@ errors surface via the same observability path.
   clears all obligations. Advisory invalidation is repo-scoped and triggered automatically by successful
   mutations from `_repo_write`, `_str_replace_editor`, `claude_code_edit`, mutating `run_shell`, and
   reviewed commit flows when they change worktree state.
+  **Forensic fields on terminal attempt records** (`triad_models`, `scope_model`): set by the reviewer
+  orchestration layer immediately after resolving the configured model IDs and before awaiting LLM results.
+  These fields are present on any terminal attempt record (`blocked`, `succeeded`, `failed`) where the
+  review actually started. The initial `status="reviewing"` record written before the LLM calls begin
+  may not carry these fields if the process terminates during review startup.
 - **`task_continuation.py`**: durable `data/state/review_continuations/<task_id>.json` payloads for blocked or interrupted review work.
   Built from durable review state, isolated per task, cleared only for the
   current task on successful reviewed commits, and surfaced on startup plus in
@@ -881,6 +921,17 @@ errors surface via the same observability path.
   execution reflections. When `repo_dir` / `repo_key` is known, open obligations and stale markers stay
   repo-scoped; when `task_id` is present, `recent_attempts` stays task-scoped rather than silently
   falling back to another task's repo history.
+  Output dict fields: `recent_attempts` (scoped commit attempts), `recent_advisory_runs` (repo-scoped),
+  `open_obligations`, `continuations`, `corrupt_continuations`, `current_repo` (live advisory status),
+  plus **omission counters** `omitted_attempts`, `omitted_advisory_runs`, `omitted_obligations`,
+  `omitted_continuations` (count of entries trimmed by their respective `max_*` budget params),
+  `omitted_corrupt` (count of corrupt continuation files beyond the fixed visible cap of 3), and
+  **forensic fields** from attempt/run records: `triad_models`, `scope_model`, `readiness_warnings`,
+  `prompt_chars`, `model_used`, `duration_sec` exposed via `_attempt_to_dict` and `_run_to_dict`.
+  `has_evidence` is `True` when any visible list is non-empty, advisory_status is known, OR any
+  omission counter is > 0 — including `omitted_corrupt` — so truncated evidence is never silently
+  treated as absent. `max_attempts=0` / `max_runs=0` correctly returns an empty visible list with
+  all entries counted as omitted (Python `[-0:]` full-slice bug is guarded explicitly).
 - **Snapshot hash**: deterministic SHA-256 of changed file content digests only.
   Commit message is NOT part of the hash (decoupled for less brittle freshness).
   Path-aware: `paths` parameter scopes the hash to specific files.
@@ -922,13 +973,15 @@ errors surface via the same observability path.
 #### Blocking scope review
 
 - **Module**: `tools/scope_review.py`. Single-model (configurable via `OUROBOROS_SCOPE_REVIEW_MODEL`, default `anthropic/claude-opus-4.6`). Reasoning effort via `OUROBOROS_EFFORT_SCOPE_REVIEW` (default `high`).
-- **Fail-closed**: timeout, parse error, API failure, or unreadable touched files all block. Exception: when the fully assembled scope-review prompt exceeds `_SCOPE_BUDGET_TOKEN_LIMIT` (800K tokens), scope review is **skipped with a non-blocking advisory warning** rather than blocking the commit. Touched-file omission always takes precedence over the budget gate.
+- **Fail-closed**: timeout, parse error, API failure, or unreadable touched files all block. Exception: when the fully assembled scope-review prompt (input only) exceeds `_SCOPE_BUDGET_TOKEN_LIMIT` (750K tokens), scope review is **skipped with a non-blocking advisory warning** rather than blocking the commit. The 750K gate is margin-aware: `estimate_tokens` (chars/4) under-counts by ~15%, so with 15% undercount `750K / 0.85 ≈ 882K` actual input tokens + 100K output = 982K < 1M API hard limit. Touched-file omission always takes precedence over the budget gate.
 - **Role**: full-codebase reviewer with unique advantage — sees the ENTIRE repository,
   not just the diff. Finds cross-module bugs, broken implicit contracts, hidden
   regressions, and forgotten touchpoints that diff-only triad reviewers miss.
 - **Prompt includes**: "Intent / Scope Review Checklist" from CHECKLISTS.md, touched-file
-  pack, full repo pack (all tracked files minus touched — no char cap, binary/vendored/sensitive
-  filtered via `build_full_repo_pack`), goal/scope sections, DEVELOPMENT.md, staged diff, review history.
+  pack, full repo pack (all tracked non-test files minus touched — no char cap, binary/vendored/sensitive
+  filtered via `build_full_repo_pack`; `tests/` excluded from full repo pack to stay under the 1M-token
+  budget gate — touched test files remain visible via `build_touched_file_pack`), goal/scope sections,
+  DEVELOPMENT.md, staged diff, review history.
 - **Pre-change (HEAD) snapshots** (best-effort): `build_head_snapshot_section` in `review_helpers.py`
   fetches the HEAD version of each touched file via `git show HEAD:<path>`. Sensitive files (`.env`,
   `.pem`, `.key`, `credentials.json`, etc. — case-insensitive) are suppressed before the subprocess
@@ -944,7 +997,7 @@ errors surface via the same observability path.
   oversized (>1MB), and directory prefixes `.cursor/`, `.github/`, `.vscode/`, `.idea/`, `assets/`,
   `webview/`. Explicit omission count appended when files are skipped.
 - Checklist items (v4.14.1): 8 items including `cross_module_bugs` (does the change break something in a different module through implicit coupling?) and `implicit_contracts` (are there constants, data format assumptions, or expected signatures relied upon by other modules that this change violates?).
-- **Budget gate**: after assembling the full scope-review prompt, token count is estimated. If the prompt exceeds `_SCOPE_BUDGET_TOKEN_LIMIT` (1M tokens), scope review is **skipped with a non-blocking warning** rather than crashing or sending an oversized request. The commit is not blocked in this case.
+- **Budget gate**: after assembling the full scope-review prompt (input section only), token count is estimated via `estimate_tokens` (chars/4 heuristic). If the estimate exceeds `_SCOPE_BUDGET_TOKEN_LIMIT` (750K tokens), scope review is **skipped with a non-blocking warning** rather than crashing or sending an oversized request. The commit is not blocked in this case. The 750K gate is margin-aware: chars/4 under-counts by ~15%; `750K / 0.85 ≈ 882K` actual input + 100K output = 982K < 1M API limit.
 - **`_TouchedContextStatus` dataclass** (v4.14.1): structured signal object used by `_build_scope_prompt()` to replace the old magic-string channel. `_compute_touched_status()` produces the touched-file statuses; `_build_scope_prompt()` creates `budget_exceeded` after estimating the assembled prompt. Fields: `status` ("empty"|"omitted"|"budget_exceeded"), `omitted_paths`, `token_count`. Success is represented by `context_status is None`, not a separate `"ok"` status. This prevents filename–sentinel collision (a real file named `__empty__` cannot be misclassified as a control sentinel).
 - **Repo-pack gathering helper**: `_gather_scope_packs()` now only returns the wider repo-pack text (or raises on git failure). It no longer returns status sentinels.
 - Runs **in parallel with** triad review (v4.14.0), BEFORE `git commit`. Also runs in `_repo_write_commit` (legacy path). Runs even when triad blocks — **except** when the budget gate skips it for an oversized assembled prompt.

@@ -583,7 +583,12 @@ def _handle_owner_message_injected(evt: Dict[str, Any], ctx: Any) -> None:
 
 
 def _handle_log_event(evt: Dict[str, Any], ctx: Any) -> None:
-    """Forward worker-emitted live-only timeline events to the UI."""
+    """Forward worker-emitted live-only timeline events to the UI.
+
+    Most log events are live-only (pushed to the bridge for UI display).
+    Durable event types (task_checkpoint) are also persisted to events.jsonl
+    so they survive UI reloads and are available for postmortem analysis.
+    """
     data = evt.get("data")
     if not isinstance(data, dict):
         return
@@ -595,6 +600,12 @@ def _handle_log_event(evt: Dict[str, Any], ctx: Any) -> None:
         ctx.bridge.push_log(payload)
     except Exception:
         log.debug("Failed to forward live log event", exc_info=True)
+    # Persist durable checkpoint events to the event log
+    if data.get("type") == "task_checkpoint":
+        try:
+            ctx.append_jsonl(ctx.DRIVE_ROOT / "logs" / "events.jsonl", payload)
+        except Exception:
+            log.debug("Failed to persist task_checkpoint event to events.jsonl", exc_info=True)
 
 
 # ---------------------------------------------------------------------------

@@ -7,6 +7,7 @@ Extracted from agent.py to keep the agent thin.
 
 from __future__ import annotations
 
+import json
 import os
 import queue
 import pathlib
@@ -116,16 +117,71 @@ def _check_budget_limits(
     return None
 
 
+def _build_recent_tool_trace(messages: List[Dict[str, Any]], window: int = 15) -> str:
+    """Build a factual trace of recent tool calls for the LLM to evaluate.
+
+    Returns a compact trace string showing the last N tool calls with their
+    names and argument summaries. The LLM uses this to assess whether
+    it is making progress or repeating the same actions (P3 LLM-First).
+    """
+    all_calls: List[str] = []
+    for msg in messages:
+        if msg.get("role") == "assistant" and msg.get("tool_calls"):
+            for tc in msg["tool_calls"]:
+                fn = tc.get("function", {})
+                name = fn.get("name", "")
+                args = fn.get("arguments", "")
+                if isinstance(args, dict):
+                    args = json.dumps(args, sort_keys=True)
+                args_str = str(args)
+                summary = f"{name}({args_str[:80]})" if len(args_str) > 80 else f"{name}({args_str})"
+                all_calls.append(summary)
+    recent = all_calls[-window:] if all_calls else []
+    if not recent:
+        return ""
+    return "Recent tool calls (oldest first):\n" + "\n".join(f"  {i+1}. {c}" for i, c in enumerate(recent))
+
+
+def _emit_checkpoint_event(
+    event_queue: Optional[queue.Queue],
+    task_id: str,
+    drive_logs: Optional[pathlib.Path],
+    data: Dict[str, Any],
+) -> None:
+    """Emit a task_checkpoint event for observability in the live UI and events.jsonl.
+
+    When event_queue is available, emits via _emit_live_log only — the supervisor
+    pipeline persists log events to events.jsonl, so a separate direct append would
+    duplicate the entry. Falls back to direct append only when queue is absent.
+    """
+    from ouroboros.loop_llm_call import _emit_live_log
+    payload = {"type": "task_checkpoint", "task_id": task_id, **data}
+    if event_queue is not None:
+        _emit_live_log(event_queue, payload)
+    elif drive_logs:
+        try:
+            from ouroboros.utils import append_jsonl, utc_now_iso
+            append_jsonl(drive_logs / "events.jsonl", {"ts": utc_now_iso(), **payload})
+        except Exception:
+            pass
+
+
 def _maybe_inject_self_check(
     round_idx: int,
     max_rounds: int,
     messages: List[Dict[str, Any]],
     accumulated_usage: Dict[str, Any],
     emit_progress: Callable[[str], None],
+    *,
+    event_queue: Optional[queue.Queue] = None,
+    task_id: str = "",
+    drive_logs: Optional[pathlib.Path] = None,
 ) -> bool:
     """Inject a soft self-check reminder every REMINDER_INTERVAL rounds.
 
-    Returns True if a checkpoint was injected (caller boosts reasoning effort).
+    Includes factual tool-call trace (P3 LLM-First: no Python-side classification).
+    Emits a task_checkpoint event for observability in UI and events.jsonl.
+    Returns True if a checkpoint was injected.
     """
     REMINDER_INTERVAL = 15
     if round_idx <= 1 or round_idx % REMINDER_INTERVAL != 0:
@@ -139,24 +195,40 @@ def _maybe_inject_self_check(
     task_cost = accumulated_usage.get("cost", 0)
     checkpoint_num = round_idx // REMINDER_INTERVAL
 
+    tool_trace = _build_recent_tool_trace(messages)
+
     reminder = (
         f"[CHECKPOINT {checkpoint_num} — round {round_idx}/{max_rounds}]\n"
         f"📊 Context: ~{ctx_tokens} tokens | Cost so far: ${task_cost:.2f} | "
         f"Rounds remaining: {max_rounds - round_idx}\n\n"
-        f"⏸️ PAUSE AND REFLECT before continuing:\n"
-        f"1. Am I making real progress, or repeating the same actions?\n"
-        f"2. Is my current strategy working? Should I try something different?\n"
-        f"3. Is my context bloated with old tool results I no longer need?\n"
-        f"   → If yes, call `compact_context` to summarize them selectively.\n"
-        f"4. Have I been stuck on the same sub-problem for many rounds?\n"
-        f"   → If yes, consider: simplify the approach, skip the sub-problem, or finish with what I have.\n"
-        f"5. Should I just STOP and return my best result so far?\n"
-        f"6. Multiple REVIEW_BLOCKED results in context? Consider saving WIP\n"
-        f"   (git_diff → data_write) and breaking into smaller commits.\n\n"
-        f"This is not a hard limit — you decide. But be honest with yourself."
     )
+    if tool_trace:
+        reminder += f"{tool_trace}\n\n"
+    reminder += (
+        "⏸️ PAUSE AND REFLECT before continuing:\n"
+        "1. Am I making real progress, or repeating the same actions?\n"
+        "2. Is my current strategy working? Should I try something different?\n"
+        "3. Is my context bloated with old tool results I no longer need?\n"
+        "   → If yes, call `compact_context` to summarize them selectively.\n"
+        "4. Have I been stuck on the same sub-problem for many rounds?\n"
+        "   → If yes, consider: simplify the approach, skip the sub-problem, or finish with what I have.\n"
+        "5. Should I just STOP and return my best result so far?\n"
+        "6. Multiple REVIEW_BLOCKED results in context? Consider saving WIP\n"
+        "   (git_diff → data_write) and breaking into smaller commits.\n\n"
+        "This is not a hard limit — you decide. But be honest with yourself."
+    )
+
     messages.append({"role": "system", "content": reminder})
     emit_progress(f"🔄 Checkpoint {checkpoint_num} at round {round_idx}: ~{ctx_tokens} tokens, ${task_cost:.2f} spent")
+
+    _emit_checkpoint_event(event_queue, task_id, drive_logs, {
+        "checkpoint_number": checkpoint_num,
+        "round": round_idx,
+        "max_rounds": max_rounds,
+        "context_tokens": ctx_tokens,
+        "task_cost": task_cost,
+    })
+
     return True
 
 
@@ -408,7 +480,10 @@ def run_llm_loop(
                     log.warning("Failed to get final response after round limit", exc_info=True)
                     return finish_reason, accumulated_usage, llm_trace
 
-            _checkpoint_injected = _maybe_inject_self_check(round_idx, MAX_ROUNDS, messages, accumulated_usage, emit_progress)
+            _checkpoint_injected = _maybe_inject_self_check(
+                round_idx, MAX_ROUNDS, messages, accumulated_usage, emit_progress,
+                event_queue=event_queue, task_id=task_id, drive_logs=drive_logs,
+            )
 
             ctx = tools._ctx
             if ctx.active_model_override:

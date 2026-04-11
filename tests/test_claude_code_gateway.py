@@ -436,7 +436,7 @@ class TestSDKOnlyPath:
                 raise ImportError("claude-agent-sdk not installed")
             return real_import(name, *args, **kwargs)
 
-        items, raw = _run_claude_advisory(tmp_path, "test commit", ctx)
+        items, raw, *_extra = _run_claude_advisory(tmp_path, "test commit", ctx)
         # Either SDK-not-installed message, git-setup error, or empty if SDK is present.
         # We only verify the result is well-typed; the specific error message depends on
         # which gate fires first (git diff may fail before reaching the SDK path when the

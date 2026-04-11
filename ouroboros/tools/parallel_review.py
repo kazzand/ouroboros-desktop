@@ -93,6 +93,10 @@ def run_parallel_review(ctx, commit_message, *, goal="", scope="", review_rebutt
     """
     from ouroboros.tools.review import _run_unified_review
 
+    # Reset forensic field at the start of each parallel review attempt
+    # so stale values from a previous attempt are never persisted on early exit.
+    ctx._last_scope_model = ""
+
     try:
         diff_bytes = run_cmd(["git", "diff", "--cached"], cwd=ctx.repo_dir).encode()
     except Exception:
@@ -108,7 +112,8 @@ def run_parallel_review(ctx, commit_message, *, goal="", scope="", review_rebutt
 
     def _run_scope():
         try:
-            from ouroboros.tools.scope_review import run_scope_review
+            from ouroboros.tools.scope_review import run_scope_review, _get_scope_model
+            ctx._last_scope_model = _get_scope_model()  # forensic: actual resolved model
             return run_scope_review(
                 ctx, commit_message, goal=goal, scope=scope,
                 review_rebuttal=review_rebuttal,

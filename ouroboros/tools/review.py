@@ -896,6 +896,7 @@ def _run_unified_review(ctx: ToolContext, commit_message: str,
     target_repo = repo_dir or ctx.repo_dir
     ctx._review_iteration_count += 1
     ctx._last_review_block_reason = ""  # reset per attempt
+    ctx._last_triad_models = []  # reset forensic field so stale values never persist on early exit
     ctx._last_review_critical_findings = []  # reset to avoid stale findings from previous attempts
     review_enforcement = _cfg.get_review_enforcement()
     blocking_review = review_enforcement == "blocking"
@@ -1022,6 +1023,7 @@ def _run_unified_review(ctx: ToolContext, commit_message: str,
     )
 
     models = _cfg.get_review_models()
+    ctx._last_triad_models = list(models)  # forensic: actual resolved model IDs
 
     try:
         result_json = _handle_multi_model_review(

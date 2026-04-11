@@ -79,11 +79,16 @@ def collect_review_evidence(
             "stale_reason": str(getattr(state, "last_stale_reason", "") or "") if stale_matches_repo else "",
             "stale_ts": str(getattr(state, "last_stale_from_edit_ts", "") or "") if stale_matches_repo else "",
         },
-        "recent_attempts": [_attempt_to_dict(item) for item in scoped_attempts[-max_attempts:]],
-        "recent_advisory_runs": [_run_to_dict(item) for item in repo_runs[-max_runs:]],
+        "recent_attempts": [_attempt_to_dict(item) for item in (scoped_attempts[-max_attempts:] if max_attempts > 0 else [])],
+        "omitted_attempts": max(0, len(scoped_attempts) - max_attempts) if max_attempts > 0 else len(scoped_attempts),
+        "recent_advisory_runs": [_run_to_dict(item) for item in (repo_runs[-max_runs:] if max_runs > 0 else [])],
+        "omitted_advisory_runs": max(0, len(repo_runs) - max_runs) if max_runs > 0 else len(repo_runs),
         "open_obligations": [_obligation_to_dict(item) for item in (open_obligations[:max_obligations] if max_obligations is not None else open_obligations)],
+        "omitted_obligations": max(0, len(open_obligations) - max_obligations) if max_obligations is not None else 0,
         "continuations": [_continuation_to_dict(item) for item in scoped_continuations[:max_continuations]],
+        "omitted_continuations": max(0, len(scoped_continuations) - max_continuations),
         "corrupt_continuations": [str(item) for item in corrupt[:3]],
+        "omitted_corrupt": max(0, len(corrupt) - 3),
     }
     evidence["has_evidence"] = any([
         evidence["recent_attempts"],
@@ -92,6 +97,12 @@ def collect_review_evidence(
         evidence["continuations"],
         evidence["corrupt_continuations"],
         evidence["current_repo"]["advisory_status"] not in ("", "missing"),
+        # Omission counters signal truncated evidence even when visible lists are empty
+        evidence["omitted_attempts"] > 0,
+        evidence["omitted_advisory_runs"] > 0,
+        evidence["omitted_obligations"] > 0,
+        evidence["omitted_continuations"] > 0,
+        evidence["omitted_corrupt"] > 0,
     ])
     return evidence
 
@@ -131,6 +142,9 @@ def _attempt_to_dict(item: Any) -> Dict[str, Any]:
         "readiness_warnings": [str(x) for x in (getattr(item, "readiness_warnings", []) or [])],
         "obligation_ids": [str(x) for x in (getattr(item, "obligation_ids", []) or [])],
         "degraded_reasons": [str(x) for x in (getattr(item, "degraded_reasons", []) or [])],
+        "triad_models": [str(x) for x in (getattr(item, "triad_models", []) or [])],
+        "scope_model": str(getattr(item, "scope_model", "") or ""),
+        "duration_sec": float(getattr(item, "duration_sec", 0.0) or 0.0),
     }
 
 
@@ -153,6 +167,10 @@ def _run_to_dict(item: Any) -> Dict[str, Any]:
         "bypass_reason": str(getattr(item, "bypass_reason", "") or ""),
         "snapshot_summary": str(getattr(item, "snapshot_summary", "") or ""),
         "findings": fail_items,
+        "readiness_warnings": [str(x) for x in (getattr(item, "readiness_warnings", []) or [])],
+        "prompt_chars": int(getattr(item, "prompt_chars", 0) or 0),
+        "model_used": str(getattr(item, "model_used", "") or ""),
+        "duration_sec": float(getattr(item, "duration_sec", 0.0) or 0.0),
     }
 
 

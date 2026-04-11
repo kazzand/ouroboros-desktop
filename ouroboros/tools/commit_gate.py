@@ -85,7 +85,9 @@ def _record_commit_attempt(ctx: ToolContext, commit_message: str, status: str,
                            pre_review_fingerprint: str = "",
                            post_review_fingerprint: str = "",
                            fingerprint_status: str = "",
-                           degraded_reasons: Optional[List[str]] = None) -> None:
+                           degraded_reasons: Optional[List[str]] = None,
+                           triad_models: Optional[List[str]] = None,
+                           scope_model: str = "") -> None:
     try:
         from ouroboros.review_state import (
             CommitAttemptRecord,
@@ -177,6 +179,13 @@ def _record_commit_attempt(ctx: ToolContext, commit_message: str, status: str,
                     ) if str(x).strip()
                 ],
                 started_ts=str(getattr(existing, "started_ts", "") or ""),
+                triad_models=[
+                    str(x) for x in _list_or_default(
+                        triad_models,
+                        list(getattr(existing, "triad_models", []) or []),
+                    ) if str(x).strip()
+                ],
+                scope_model=scope_model or str(getattr(existing, "scope_model", "") or ""),
             )
             state.record_attempt(attempt)
 

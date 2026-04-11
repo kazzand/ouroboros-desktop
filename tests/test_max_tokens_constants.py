@@ -81,9 +81,26 @@ def test_claude_code_sdk_only_no_cli_fallback():
 
 
 def test_scope_review_budget_limit():
-    """scope_review.py _SCOPE_BUDGET_TOKEN_LIMIT must be ≥1_000_000."""
-    from ouroboros.tools.scope_review import _SCOPE_BUDGET_TOKEN_LIMIT
-    assert _SCOPE_BUDGET_TOKEN_LIMIT >= 1_000_000
+    """scope_review.py budget gate must be margin-aware for the chars/4 heuristic.
+
+    estimate_tokens (chars/4) under-counts by ~15% on real code.
+    The gate must be derived so that: (gate / 0.85) + max_tokens <= 1_000_000
+    i.e. gate <= floor((1_000_000 - max_tokens) * 0.85)
+    With max_tokens=100K: gate <= floor(900_000 * 0.85) = 765_000.
+    We use 750_000 as the conservative safe value.
+    """
+    from ouroboros.tools.scope_review import _SCOPE_BUDGET_TOKEN_LIMIT, _SCOPE_MAX_TOKENS
+    assert _SCOPE_BUDGET_TOKEN_LIMIT >= 700_000, "budget limit too low (over-restrictive, skips most reviews)"
+    # Margin-aware invariant: (gate / 0.85) + max_tokens <= 1_000_000
+    # Equivalent to: gate <= (1_000_000 - max_tokens) * 0.85
+    max_safe_gate = int((1_000_000 - _SCOPE_MAX_TOKENS) * 0.85)
+    assert _SCOPE_BUDGET_TOKEN_LIMIT <= max_safe_gate, (
+        f"_SCOPE_BUDGET_TOKEN_LIMIT ({_SCOPE_BUDGET_TOKEN_LIMIT}) exceeds the margin-aware safe gate "
+        f"({max_safe_gate}): with 15% chars/4 undercount, actual input could be "
+        f"{int(_SCOPE_BUDGET_TOKEN_LIMIT / 0.85)} tokens, "
+        f"plus {_SCOPE_MAX_TOKENS} output = "
+        f"{int(_SCOPE_BUDGET_TOKEN_LIMIT / 0.85) + _SCOPE_MAX_TOKENS} > 1M API limit"
+    )
 
 
 def test_plan_review_budget_limit():
@@ -168,9 +185,9 @@ def test_advisory_pre_review_timeout_1200():
 
 
 def test_full_repo_pack_excludes_junk_dirs():
-    """build_full_repo_pack must skip jsonschema/, Python.framework/, certifi/."""
+    """build_full_repo_pack must skip jsonschema/, Python.framework/, certifi/, tests/."""
     from ouroboros.tools.review_helpers import _FULL_REPO_SKIP_DIR_PREFIXES
-    for prefix in ("jsonschema/", "jsonschema_specifications/", "Python.framework/", "certifi/"):
+    for prefix in ("jsonschema/", "jsonschema_specifications/", "Python.framework/", "certifi/", "tests/"):
         assert prefix in _FULL_REPO_SKIP_DIR_PREFIXES, f"{prefix} not in skip list"
 
 

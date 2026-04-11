@@ -97,7 +97,10 @@ class AdvisoryRunRecord:
     phase: str = "advisory"
     created_ts: str = ""
     updated_ts: str = ""
-
+    readiness_warnings: List[str] = field(default_factory=list)
+    prompt_chars: int = 0
+    model_used: str = ""
+    duration_sec: float = 0.0
 @dataclass
 class CommitAttemptRecord:
     """Tracks one reviewed mutative tool attempt across its lifecycle."""
@@ -127,7 +130,8 @@ class CommitAttemptRecord:
     started_ts: str = ""
     updated_ts: str = ""
     finished_ts: str = ""
-
+    triad_models: List[str] = field(default_factory=list)
+    scope_model: str = ""
 @dataclass
 class AdvisoryReviewState:
     """Top-level durable state container."""
@@ -580,9 +584,7 @@ class AdvisoryReviewState:
         return expired
 
 
-# ---------------------------------------------------------------------------
-# Serialization
-# ---------------------------------------------------------------------------
+# --- Serialization ---
 
 def _obligation_from_dict(d: Dict[str, Any]) -> ObligationItem:
     return ObligationItem(
@@ -619,6 +621,10 @@ def _record_from_dict(d: Dict[str, Any]) -> AdvisoryRunRecord:
         phase=str(d.get("phase", "advisory")),
         created_ts=str(d.get("created_ts", ts)),
         updated_ts=str(d.get("updated_ts", ts)),
+        readiness_warnings=[str(x) for x in (d.get("readiness_warnings") or [])],
+        prompt_chars=int(d.get("prompt_chars", 0) or 0),
+        model_used=str(d.get("model_used", "")),
+        duration_sec=float(d.get("duration_sec", 0.0) or 0.0),
     )
 
 
@@ -651,6 +657,8 @@ def _commit_attempt_from_dict(d: Dict[str, Any]) -> CommitAttemptRecord:
         started_ts=str(d.get("started_ts", ts)),
         updated_ts=str(d.get("updated_ts", ts)),
         finished_ts=str(d.get("finished_ts", ts if status in ("blocked", "failed", "succeeded") else "")),
+        triad_models=[str(x) for x in (d.get("triad_models") or [])],
+        scope_model=str(d.get("scope_model", "")),
     )
 
 
@@ -780,9 +788,7 @@ def update_state(
         release_review_state_lock(drive_root, lock_fd)
 
 
-# ---------------------------------------------------------------------------
-# Lock helpers
-# ---------------------------------------------------------------------------
+# --- Lock helpers ---
 
 def acquire_review_state_lock(
     drive_root: pathlib.Path,
@@ -830,9 +836,7 @@ def release_review_state_lock(drive_root: pathlib.Path, lock_fd: Optional[int]) 
         log.debug("Failed to unlink review-state lock", exc_info=True)
 
 
-# ---------------------------------------------------------------------------
-# Snapshot hash / repo identity
-# ---------------------------------------------------------------------------
+# --- Snapshot hash / repo identity ---
 
 _SNAPSHOT_EXCLUDE_PATHS = frozenset({
     "state/advisory_review.json",
@@ -899,9 +903,7 @@ def compute_snapshot_hash(
     return h.hexdigest()[:32]
 
 
-# ---------------------------------------------------------------------------
-# Advisory staleness from worktree edits
-# ---------------------------------------------------------------------------
+# --- Advisory staleness from worktree edits ---
 
 def mark_advisory_stale_after_edit(drive_root: pathlib.Path) -> None:
     """Mark all fresh advisory runs as stale because the worktree was modified."""
@@ -954,9 +956,7 @@ def invalidate_advisory_after_mutation(
         log.debug("invalidate_advisory_after_mutation failed (non-fatal): %s", e)
 
 
-# ---------------------------------------------------------------------------
-# Context injection
-# ---------------------------------------------------------------------------
+# --- Context injection ---
 
 def format_status_section(state: AdvisoryReviewState,
                           repo_dir: Optional[pathlib.Path] = None) -> str:
@@ -1085,9 +1085,7 @@ def format_status_section(state: AdvisoryReviewState,
     return "\n".join(lines)
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
+# --- Helpers ---
 
 def _attempt_identity_tuple(attempt: CommitAttemptRecord) -> tuple[str, str, str, str]:
     attempt_number = int(attempt.attempt or 0)
@@ -1148,6 +1146,8 @@ def _merge_attempt(existing: CommitAttemptRecord, incoming: CommitAttemptRecord)
         started_ts=existing.started_ts or incoming.started_ts or existing.ts,
         updated_ts=incoming.updated_ts or existing.updated_ts or _utc_now(),
         finished_ts=incoming.finished_ts or existing.finished_ts,
+        triad_models=list(incoming.triad_models or existing.triad_models),
+        scope_model=incoming.scope_model or existing.scope_model,
     )
     return merged
 
