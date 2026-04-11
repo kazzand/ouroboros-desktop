@@ -157,6 +157,7 @@ export function initChat({ ws, state, updateUnreadBadge }) {
     const retiredTaskIds = new Set();
     let activeLiveGroupId = '';
     let historySyncTimer = null;
+    let pendingReconnectSync = false;  // Set when a fromReconnect sync arrives while one is already in-flight.
     let pendingReconnectBannerText = readPendingReconnectBanner();
 
     function buildMessageKey(role, text, timestamp, opts = {}) {
@@ -1011,8 +1012,14 @@ export function initChat({ ws, state, updateUnreadBadge }) {
         addMessage('Ouroboros has awakened', 'assistant', false, null, false, { ephemeral: true });
     }
 
-    async function syncHistory({ includeUser = false } = {}) {
-        if (historySyncPromise) return historySyncPromise;
+    async function syncHistory({ includeUser = false, fromReconnect = false } = {}) {
+        if (historySyncPromise) {
+            // A sync is already in flight.  If this call came from a reconnect we must
+            // NOT lose the intent: after the in-flight sync settles we need a fresh run
+            // that clears retiredTaskIds.  Record the pending request and chain it.
+            if (fromReconnect) pendingReconnectSync = true;
+            return historySyncPromise;
+        }
         historySyncPromise = (async () => {
             try {
                 const resp = await fetch('/api/chat/history?limit=1000', { cache: 'no-store' });
@@ -1024,11 +1031,13 @@ export function initChat({ ws, state, updateUnreadBadge }) {
                 // authoritative source of truth for what cards should be visible.
                 // Clear retiredTaskIds so that previously-cleaned-up cards (e.g.
                 // from the pre-restart session) can be reconstructed from history.
-                // We do this ONLY on a full rebuild (historyLoaded === false) to avoid
-                // resurrecting cards on every routine scheduleHistorySync() call that
-                // fires after each task completion — those incremental syncs must
-                // still respect the retirement state set by the current session.
-                if (!historyLoaded) retiredTaskIds.clear();
+                // We do this on:
+                //   (a) first load (historyLoaded === false) — hard restart / fresh page load
+                //   (b) fromReconnect === true — soft restart / WS reconnect after same-SHA
+                //       restart, where historyLoaded stays true across the reconnect
+                // We do NOT clear on routine scheduleHistorySync() calls (fired 700ms after
+                // task completion) to avoid resurrecting already-cleaned-up cards mid-session.
+                if (!historyLoaded || fromReconnect) retiredTaskIds.clear();
 
                 // Two-pass processing: progress/summary first, then regular messages.
                 // This guarantees live cards are built before finishLiveCard() is called,
@@ -1140,6 +1149,12 @@ export function initChat({ ws, state, updateUnreadBadge }) {
                 return false;
             } finally {
                 historySyncPromise = null;
+                // If a reconnect-triggered sync arrived while we were in-flight, run it
+                // now so retiredTaskIds.clear() executes with the latest server state.
+                if (pendingReconnectSync) {
+                    pendingReconnectSync = false;
+                    syncHistory({ includeUser: false, fromReconnect: true }).catch(() => {});
+                }
             }
         })();
         return historySyncPromise;
@@ -1494,9 +1509,10 @@ export function initChat({ ws, state, updateUnreadBadge }) {
             || (wsHasConnectedOnce ? '♻️ Reconnected' : '');
         const shouldClearReconnectParams = Boolean(pendingReconnectBannerText);
         pendingReconnectBannerText = '';
+        const isReconnect = wsHasConnectedOnce;
         wsHasConnectedOnce = true;
         updateMessagesPadding();
-        syncHistory({ includeUser: !historyLoaded })
+        syncHistory({ includeUser: !historyLoaded, fromReconnect: isReconnect })
             .then((hasMessages) => {
                 if (!hasMessages) ensureWelcomeMessage();
                 if (reconnectBanner) {

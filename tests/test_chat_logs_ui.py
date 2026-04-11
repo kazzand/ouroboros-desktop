@@ -900,8 +900,36 @@ def test_sync_history_clears_retired_task_ids():
     so that server-history is authoritative and cards from a previous live session are
     reconstructed correctly after a restart/reconnect.  The clear must be guarded so
     that routine incremental syncs (scheduleHistorySync after task done) do NOT resurrect
-    already-retired cards from the current session."""
+    already-retired cards from the current session.
+
+    Two triggers for the clear:
+    (a) !historyLoaded — hard restart / fresh page load (JS memory is new)
+    (b) fromReconnect  — soft restart / same-SHA WS reconnect where historyLoaded
+        stays true across the reconnect but retiredTaskIds may contain stale IDs from
+        the previous session that need to be cleared so history replay can show them.
+    """
     source = _read("web/modules/chat.js")
-    # Must be guarded by !historyLoaded so incremental syncs skip the clear
-    assert "if (!historyLoaded) retiredTaskIds.clear();" in source, \
-        "syncHistory must clear retiredTaskIds only on full rebuild (!historyLoaded)"
+    # Must clear on both first-load AND reconnect
+    assert "if (!historyLoaded || fromReconnect) retiredTaskIds.clear();" in source, \
+        "syncHistory must clear retiredTaskIds on first load (!historyLoaded) AND on reconnect (fromReconnect)"
+    # fromReconnect param must be declared on the function signature
+    assert "fromReconnect = false" in source, \
+        "syncHistory must accept a fromReconnect parameter defaulting to false"
+    # ws.on('open') must pass isReconnect captured before wsHasConnectedOnce is set
+    assert "const isReconnect = wsHasConnectedOnce;" in source, \
+        "ws.on('open') must capture isReconnect before setting wsHasConnectedOnce=true"
+    assert "fromReconnect: isReconnect" in source, \
+        "ws.on('open') must pass fromReconnect: isReconnect to syncHistory"
+    # scheduleHistorySync must NOT pass fromReconnect (defaults to false)
+    assert "scheduleHistorySync" in source, \
+        "scheduleHistorySync must exist"
+    # Verify the old single-condition guard is gone (replaced by the two-condition guard)
+    assert "if (!historyLoaded) retiredTaskIds.clear();" not in source, \
+        "Old single-condition guard must be replaced by the two-condition version"
+    # Pending reconnect intent must survive an in-flight sync
+    assert "let pendingReconnectSync = false;" in source, \
+        "pendingReconnectSync flag must be declared to preserve reconnect intent across in-flight syncs"
+    assert "if (fromReconnect) pendingReconnectSync = true;" in source, \
+        "When fromReconnect arrives during an in-flight sync, pendingReconnectSync must be set"
+    assert "if (pendingReconnectSync)" in source, \
+        "finally block must check pendingReconnectSync and re-run syncHistory with fromReconnect=true"
