@@ -38,8 +38,8 @@ CORE_TOOL_NAMES: frozenset[str] = frozenset({
     "git_status", "git_diff",
     "restore_to_head", "revert_commit",
     "pull_from_remote", "rollback_to_target",
-    # Task decomposition
-    "schedule_task", "wait_for_task", "get_task_result",
+    # Task decomposition (non-core: use enable_tools("schedule_task") to activate)
+    # schedule_task, wait_for_task, get_task_result are available but not auto-loaded
     # Memory / identity
     "update_scratchpad", "update_identity",
     "chat_history",

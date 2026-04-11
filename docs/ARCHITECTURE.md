@@ -1,4 +1,4 @@
-# Ouroboros v4.27.1 — Architecture & Reference
+# Ouroboros v4.27.2 — Architecture & Reference
 
 This document describes every component, page, button, API endpoint, and data flow.
 It is the single source of truth for how the system works. Keep it updated.
@@ -720,7 +720,7 @@ the constitutional guard is that the file itself must remain non-deletable.
   health invariants, recent chat/progress/tools/events (same context as main agent)
 - Owner messages are forwarded to background consciousness in full text (not first-100-char previews).
 - Calls LLM with lightweight introspection prompt
-- Has limited tool access (memory, messaging, scheduling, read-only)
+- Has limited tool access (memory, messaging, read-only; `schedule_task` is non-core and requires `enable_tools` if used)
 - **Progress emission**: emits 💬 progress messages to UI via event queue + persists to `progress.jsonl`
 - Pauses when regular task is running; deferred events queued and flushed on resume
 - Budget-capped (default 10% of total)

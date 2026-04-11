@@ -275,6 +275,57 @@ def test_code_search_registered():
 
 
 # ---------------------------------------------------------------------------
+# schedule_task non-core classification tests
+# ---------------------------------------------------------------------------
+
+
+def test_schedule_task_not_in_core():
+    """schedule_task must NOT be in CORE_TOOL_NAMES (moved to non-core in v4.27.2)."""
+    from ouroboros.tool_capabilities import CORE_TOOL_NAMES
+    assert "schedule_task" not in CORE_TOOL_NAMES, (
+        "schedule_task was moved to non-core to prevent reflexive delegation; "
+        "use enable_tools('schedule_task') to activate"
+    )
+
+
+def test_wait_for_task_not_in_core():
+    """wait_for_task must NOT be in CORE_TOOL_NAMES."""
+    from ouroboros.tool_capabilities import CORE_TOOL_NAMES
+    assert "wait_for_task" not in CORE_TOOL_NAMES
+
+
+def test_get_task_result_not_in_core():
+    """get_task_result must NOT be in CORE_TOOL_NAMES."""
+    from ouroboros.tool_capabilities import CORE_TOOL_NAMES
+    assert "get_task_result" not in CORE_TOOL_NAMES
+
+
+def test_schedule_task_available_in_registry():
+    """schedule_task must still be registered (available via enable_tools)."""
+    from ouroboros.tools.registry import ToolRegistry
+    import pathlib, tempfile
+    tmp = pathlib.Path(tempfile.mkdtemp())
+    registry = ToolRegistry(repo_dir=tmp, drive_root=tmp)
+    all_names = {t["function"]["name"] for t in registry.schemas()}
+    assert "schedule_task" in all_names, (
+        "schedule_task must be discoverable via list_available_tools / enable_tools"
+    )
+
+
+def test_schedule_task_not_in_initial_schemas():
+    """schedule_task must NOT appear in initial tool schemas (non-core)."""
+    from ouroboros.tools.registry import ToolRegistry
+    from ouroboros.tool_policy import initial_tool_schemas
+    import pathlib, tempfile
+    tmp = pathlib.Path(tempfile.mkdtemp())
+    registry = ToolRegistry(repo_dir=tmp, drive_root=tmp)
+    names = {s["function"]["name"] for s in initial_tool_schemas(registry)}
+    assert "schedule_task" not in names, (
+        "schedule_task should not be loaded by default; activate with enable_tools"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Discovery path drift test
 # ---------------------------------------------------------------------------
 
