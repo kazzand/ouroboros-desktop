@@ -1391,8 +1391,10 @@ body {
     align-items: center;
     gap: 0;
     z-index: 1;
+    height: 28px;
 }
 
+/* --send-color: resolved per send-mode via dataset attribute below */
 .chat-send-inline {
     border: none;
     background: transparent;
@@ -1402,11 +1404,13 @@ body {
     font-family: inherit;
     letter-spacing: 0.04em;
     cursor: pointer;
-    padding: 4px 8px;
+    padding: 0 8px;
+    height: 100%;
     border-radius: var(--radius) 0 0 var(--radius);
-    transition: color 0.15s, background 0.15s;
-    opacity: 0.7;
-    line-height: 1;
+    transition: color 0.18s, background 0.18s, opacity 0.18s;
+    opacity: 0.72;
+    display: flex;
+    align-items: center;
 }
 .chat-send-inline:hover {
     opacity: 1;
@@ -1417,6 +1421,20 @@ body {
     opacity: 1;
 }
 
+/* Plan mode overrides — toggled via data-send-mode="plan" on the group */
+.chat-send-group[data-send-mode="plan"] .chat-send-inline {
+    color: var(--amber);
+    opacity: 0.85;
+}
+.chat-send-group[data-send-mode="plan"] .chat-send-inline:hover {
+    opacity: 1;
+    background: var(--amber-dim);
+}
+.chat-send-group[data-send-mode="plan"] .chat-send-inline:active {
+    background: rgba(245, 158, 11, 0.22);
+    opacity: 1;
+}
+
 /* Chevron button — always visible for touch-screen accessibility */
 .chat-send-chevron {
     border: none;
@@ -1424,18 +1442,27 @@ body {
     background: transparent;
     color: var(--accent);
     cursor: pointer;
-    padding: 4px 5px;
+    padding: 0 5px;
+    height: 100%;
     border-radius: 0 var(--radius) var(--radius) 0;
-    transition: background 0.15s, opacity 0.15s;
+    transition: background 0.15s, opacity 0.15s, color 0.18s, border-color 0.18s;
     opacity: 0.5;
     display: flex;
     align-items: center;
-    line-height: 1;
 }
 .chat-send-chevron:hover,
 .chat-send-chevron.active {
     opacity: 1;
     background: rgba(201, 53, 69, 0.10);
+}
+.chat-send-group[data-send-mode="plan"] .chat-send-chevron {
+    color: var(--amber);
+    border-left-color: rgba(245, 158, 11, 0.25);
+}
+.chat-send-group[data-send-mode="plan"] .chat-send-chevron:hover,
+.chat-send-group[data-send-mode="plan"] .chat-send-chevron.active {
+    background: var(--amber-dim);
+    opacity: 1;
 }
 
 /* Dropdown panel */
@@ -1477,6 +1504,19 @@ body {
     background: rgba(201, 53, 69, 0.12);
     color: var(--accent);
     opacity: 1;
+}
+/* Active-mode marker: the currently selected mode item gets a subtle tint */
+.chat-send-dropdown-item[data-mode-active="true"] {
+    opacity: 1;
+    font-weight: 600;
+}
+/* Plan item tinted amber when it's the active mode */
+#chat-dropdown-plan[data-mode-active="true"] {
+    color: var(--amber);
+}
+/* Send item tinted accent when it's the active mode */
+#chat-dropdown-send[data-mode-active="true"] {
+    color: var(--accent);
 }
 
 /* Shared UI components (stat cards used by Costs, section titles by Evolution) */

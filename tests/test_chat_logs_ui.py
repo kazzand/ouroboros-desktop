@@ -756,10 +756,66 @@ def test_plan_mode_remember_input_uses_raw_text():
 
 
 def test_plan_mode_send_listener_uses_arrow_function():
-    """sendBtn click listener must use arrow function to avoid MouseEvent-as-planMode bug."""
+    """sendBtn click listener reads planMode from DOM dataset — not hardcoded boolean."""
     source = _read("web/modules/chat.js")
-    assert "sendBtn.addEventListener('click', () => sendMessage(false))" in source, \
-        "sendBtn listener must use () => sendMessage(false) to prevent MouseEvent truthy arg"
+    # Must derive plan mode from dataset, not hardcode false/true.
+    assert "sendGroup.dataset.sendMode === 'plan'" in source, \
+        "sendBtn listener must read mode from sendGroup.dataset.sendMode, not hardcode false"
+    assert "sendBtn.addEventListener('click', () => sendMessage(sendGroup.dataset.sendMode === 'plan'))" in source, \
+        "sendBtn click listener must use () => sendMessage(sendGroup.dataset.sendMode === 'plan')"
+
+
+def test_plan_mode_default_is_send():
+    """Send mode must default to 'send' on initialisation."""
+    source = _read("web/modules/chat.js")
+    assert "setSendMode('send')" in source, \
+        "setSendMode must be called with 'send' to initialise default mode"
+
+
+def test_plan_mode_set_send_mode_function_exists():
+    """setSendMode function must exist and update sendGroup dataset."""
+    source = _read("web/modules/chat.js")
+    assert "function setSendMode(mode)" in source, \
+        "setSendMode function must be defined"
+    assert "sendGroup.dataset.sendMode = mode" in source, \
+        "setSendMode must write mode to sendGroup.dataset.sendMode (DOM-backed state)"
+
+
+def test_plan_mode_dropdown_switches_mode_not_send():
+    """Dropdown items must switch the mode, not immediately send a message."""
+    source = _read("web/modules/chat.js")
+    # Dropdown-send item: must call setSendMode('send'), NOT sendMessage directly.
+    send_item_block_idx = source.index("dropdownSend.addEventListener('click'")
+    send_item_block = source[send_item_block_idx:send_item_block_idx + 200]
+    assert "setSendMode('send')" in send_item_block, \
+        "dropdownSend click must call setSendMode('send'), not sendMessage"
+    assert "sendMessage" not in send_item_block, \
+        "dropdownSend click must NOT call sendMessage (mode-switch only)"
+    # Dropdown-plan item: must call setSendMode('plan'), NOT sendMessage directly.
+    plan_item_block_idx = source.index("dropdownPlan.addEventListener('click'")
+    plan_item_block = source[plan_item_block_idx:plan_item_block_idx + 200]
+    assert "setSendMode('plan')" in plan_item_block, \
+        "dropdownPlan click must call setSendMode('plan'), not sendMessage"
+    assert "sendMessage" not in plan_item_block, \
+        "dropdownPlan click must NOT call sendMessage (mode-switch only)"
+
+
+def test_plan_mode_css_dataset_selector_exists():
+    """CSS must have data-send-mode attribute selector for plan mode styling."""
+    css = _read("web/style.css")
+    assert '[data-send-mode="plan"]' in css, \
+        "CSS must use [data-send-mode=\"plan\"] attribute selector for plan mode"
+    assert ".chat-send-group[data-send-mode=\"plan\"] .chat-send-inline" in css, \
+        "Must have amber colour rule for .chat-send-inline in plan mode"
+    assert ".chat-send-group[data-send-mode=\"plan\"] .chat-send-chevron" in css, \
+        "Must have amber colour rule for .chat-send-chevron in plan mode"
+
+
+def test_plan_mode_active_marker_css():
+    """CSS must have active-mode marker rule for dropdown items."""
+    css = _read("web/style.css")
+    assert '[data-mode-active="true"]' in css, \
+        "CSS must have data-mode-active attribute selector for active dropdown item"
 
 
 def test_plan_mode_dropdown_css_exists():

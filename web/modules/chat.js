@@ -1215,6 +1215,22 @@ export function initChat({ ws, state, updateUnreadBadge }) {
     }
 
     // Dropdown toggle helpers
+    // Send-mode state — stored on DOM so CSS can key off data-send-mode attribute.
+    // Default: 'send'. Modes: 'send' | 'plan'.
+    const sendGroup = document.querySelector('.chat-send-group');
+
+    function setSendMode(mode) {
+        sendGroup.dataset.sendMode = mode;
+        sendBtn.textContent = mode === 'plan' ? 'Plan' : 'Send';
+        sendBtn.title = mode === 'plan' ? 'Send with planning prefix' : 'Send message';
+        // Mark the active item in the dropdown for visual feedback.
+        dropdownSend.dataset.modeActive = mode === 'send' ? 'true' : 'false';
+        dropdownPlan.dataset.modeActive = mode === 'plan' ? 'true' : 'false';
+    }
+
+    // Initialise to send mode.
+    setSendMode('send');
+
     function openSendDropdown() {
         sendDropdown.classList.add('open');
         chevronBtn.classList.add('active');
@@ -1231,13 +1247,14 @@ export function initChat({ ws, state, updateUnreadBadge }) {
             openSendDropdown();
         }
     });
+    // Dropdown items now SWITCH the mode instead of immediately sending.
     dropdownSend.addEventListener('click', () => {
+        setSendMode('send');
         closeSendDropdown();
-        sendMessage(false);
     });
     dropdownPlan.addEventListener('click', () => {
+        setSendMode('plan');
         closeSendDropdown();
-        sendMessage(true);
     });
     document.addEventListener('click', (e) => {
         if (!sendDropdown.contains(e.target) && e.target !== chevronBtn) {
@@ -1249,11 +1266,12 @@ export function initChat({ ws, state, updateUnreadBadge }) {
     });
 
     // Use explicit arrow functions to avoid MouseEvent being passed as planMode arg.
-    sendBtn.addEventListener('click', () => sendMessage(false));
+    // Both send paths derive planMode from the DOM dataset — single source of truth.
+    sendBtn.addEventListener('click', () => sendMessage(sendGroup.dataset.sendMode === 'plan'));
     input.addEventListener('keydown', (e) => {
         if (e.key === 'Enter' && !e.shiftKey) {
             e.preventDefault();
-            sendMessage(false);
+            sendMessage(sendGroup.dataset.sendMode === 'plan');
             return;
         }
         if (e.key === 'ArrowUp' && !e.shiftKey) {
