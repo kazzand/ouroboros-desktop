@@ -149,6 +149,31 @@ def infer_api_key_type(model: str, provider: Optional[str] = None) -> str:
     return "openrouter"
 
 
+def infer_provider_from_model(model: str) -> str:
+    """Derive the billing provider string from a model identifier.
+
+    Rules (same prefix logic as infer_api_key_type, returns canonical provider name):
+      anthropic::*          → "anthropic"
+      openai::*             → "openai"
+      openai-compatible::*  → "openai-compatible"
+      cloudru::*            → "cloudru"
+      anything else         → "openrouter"  (un-prefixed OpenRouter routing)
+
+    Used by review-pipeline emitters to ensure /api/cost-breakdown attribution
+    is correct regardless of which provider the model actually routes through.
+    """
+    raw = _normalize_model_name(str(model or ""))
+    if raw.startswith("anthropic::"):
+        return "anthropic"
+    if raw.startswith("openai::"):
+        return "openai"
+    if raw.startswith("openai-compatible::"):
+        return "openai-compatible"
+    if raw.startswith("cloudru::"):
+        return "cloudru"
+    return "openrouter"
+
+
 def infer_model_category(model: str) -> str:
     """Infer model category by comparing against configured model env vars."""
     normalized = _normalize_model_identity(model)

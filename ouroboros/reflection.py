@@ -183,13 +183,20 @@ def generate_reflection(
 
     light_model = os.environ.get("OUROBOROS_MODEL_LIGHT") or DEFAULT_LIGHT_MODEL
     try:
-        resp_msg, _usage = llm_client.chat(
+        resp_msg, refl_usage = llm_client.chat(
             messages=[{"role": "user", "content": prompt}],
             model=light_model,
             reasoning_effort="low",
             max_tokens=4096,
         )
         reflection_text = (resp_msg.get("content") or "").strip()
+        # Track cost — reflection runs in daemon thread path, so update directly.
+        if refl_usage:
+            try:
+                from supervisor.state import update_budget_from_usage
+                update_budget_from_usage(refl_usage)
+            except Exception:
+                pass
     except Exception as e:
         log.warning("Reflection LLM call failed: %s", e)
         reflection_text = f"(reflection generation failed: {e})"
@@ -295,12 +302,19 @@ def _update_patterns(drive_root: pathlib.Path, entry: Dict[str, Any]) -> None:
 
     light_model = os.environ.get("OUROBOROS_MODEL_LIGHT") or DEFAULT_LIGHT_MODEL
     client = LLMClient()
-    resp_msg, _usage = client.chat(
+    resp_msg, patterns_usage = client.chat(
         messages=[{"role": "user", "content": prompt}],
         model=light_model,
         reasoning_effort="low",
         max_tokens=4096,
     )
+    # Track cost — patterns update runs in daemon thread path, so update directly.
+    if patterns_usage:
+        try:
+            from supervisor.state import update_budget_from_usage
+            update_budget_from_usage(patterns_usage)
+        except Exception:
+            pass
     updated = (resp_msg.get("content") or "").strip()
     if not updated or "|" not in updated:
         log.warning("Pattern register LLM returned invalid output, skipping update")

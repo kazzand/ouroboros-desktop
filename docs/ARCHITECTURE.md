@@ -1,4 +1,4 @@
-# Ouroboros v4.26.1 — Architecture & Reference
+# Ouroboros v4.27.0 — Architecture & Reference
 
 This document describes every component, page, button, API endpoint, and data flow.
 It is the single source of truth for how the system works. Keep it updated.
@@ -521,6 +521,7 @@ backward compatibility but is not the runtime authority.
 
 - Pricing/cost estimation logic extracted to `pricing.py` (model pricing table, cost estimation, API key inference, usage event emission)
 - **Per-task soft threshold**: Each task has a soft threshold (default $20, env `OUROBOROS_PER_TASK_COST_USD`). When a task exceeds this, the LLM is asked to wrap up soon. This is a reminder, not a hard stop.
+- **Budget tracking coverage**: All LLM spend reaches the budget via two patterns: (1) **Tool path** — tools emit `llm_usage` events to `ctx.pending_events` (falling back from `ctx.event_queue`); (2) **Daemon thread path** — background threads (consolidation, reflection, supervisor dedup) call `supervisor.state.update_budget_from_usage` directly. Covered paths: main agent loop, safety LLM, web search, triad review, scope review (with pending_events fallback added v4.27.0), plan_task per-reviewer (added v4.27.0), advisory_pre_review SDK + fallback LLM costs (added v4.27.0), claude_code_edit (conditional on cost_usd > 0), consciousness loop, consolidation daemon threads (added v4.27.0), reflection LLM calls (added v4.27.0), supervisor _find_duplicate_task (added v4.27.0).
 - **`memory_tools.py`**: Provides `memory_map` (read the metacognitive registry of all data sources) and `memory_update_registry` (add/update entries). Part of the Memory Registry system (v3.16.0).
 - **`tool_discovery.py`**: Provides `list_available_tools` (discover non-core tools) and `enable_tools` (activate extra tools for the current task). Enables dynamic tool set management.
 - **`code_search`**: First-class code search tool in `tools/core.py`. Literal search by default, regex optional. Skips binaries, caches, vendor dirs. Bounded output (max 200 results, 80K chars). Available from round 1 as a core tool. Replaces the pattern of using `run_shell` with `grep`/`rg` for code search.

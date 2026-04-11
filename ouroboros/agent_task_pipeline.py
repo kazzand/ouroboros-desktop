@@ -413,6 +413,13 @@ def _run_chat_consolidation(env, memory, llm, task, drive_logs):
                         append_jsonl(_logs / "events.jsonl", {"ts": utc_now_iso(),
                             "type": "chat_block_consolidation", "task_id": _id,
                             "cost_usd": round(float(u.get("cost") or 0), 6)})
+                        # Track cost — consolidation runs in daemon thread, update directly.
+                        if u.get("cost") or u.get("prompt_tokens"):
+                            try:
+                                from supervisor.state import update_budget_from_usage
+                                update_budget_from_usage(u)
+                            except Exception:
+                                pass
                 except Exception:
                     log.warning("Chat block consolidation failed", exc_info=True)
             threading.Thread(target=_run, daemon=True).start()
@@ -433,7 +440,14 @@ def _run_scratchpad_consolidation(env: Any, memory: Any, llm: Any) -> None:
 
             def _run():
                 try:
-                    consolidate(memory, kb_dir, llm, _identity)
+                    u = consolidate(memory, kb_dir, llm, _identity)
+                    # Track cost — scratchpad consolidation runs in daemon thread.
+                    if u and (u.get("cost") or u.get("prompt_tokens")):
+                        try:
+                            from supervisor.state import update_budget_from_usage
+                            update_budget_from_usage(u)
+                        except Exception:
+                            pass
                 except Exception:
                     log.warning("Scratchpad consolidation failed", exc_info=True)
 

@@ -431,12 +431,13 @@ def _parse_scope_json(raw: str) -> Optional[list]:
 
 def _emit_usage(ctx: ToolContext, model: str, usage: dict) -> None:
     """Emit a standard llm_usage event for cost tracking."""
-    from ouroboros.pricing import infer_api_key_type, infer_model_category
+    from ouroboros.pricing import infer_api_key_type, infer_model_category, infer_provider_from_model
+    provider = infer_provider_from_model(model)
     event = {
         "type": "llm_usage", "ts": utc_now_iso(),
         "task_id": getattr(ctx, "task_id", "") or "",
         "model": model,
-        "api_key_type": infer_api_key_type(model, "openrouter"),
+        "api_key_type": infer_api_key_type(model, provider),
         "model_category": infer_model_category(model),
         "usage": {
             "prompt_tokens": usage.get("prompt_tokens", 0),
@@ -444,16 +445,21 @@ def _emit_usage(ctx: ToolContext, model: str, usage: dict) -> None:
             "cached_tokens": usage.get("cached_tokens", 0),
             "cost": usage.get("cost", 0),
         },
-        "provider": "openrouter",
+        "provider": provider,
         "source": "scope_review",
         "category": "review",
     }
     eq = getattr(ctx, "event_queue", None)
-    if eq:
+    if eq is not None:
         try:
             eq.put_nowait(event)
+            return
         except Exception:
             pass
+    # Fallback: route to pending_events when event_queue is unavailable.
+    pending = getattr(ctx, "pending_events", None)
+    if pending is not None:
+        pending.append(event)
 
 
 def _classify_scope_findings(items: list) -> tuple:

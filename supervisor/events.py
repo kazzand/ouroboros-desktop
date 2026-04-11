@@ -409,6 +409,13 @@ def _find_duplicate_task(desc: str, task_context: str, pending: list, running: d
             reasoning_effort="low",
             max_tokens=50,
         )
+        # Track cost — supervisor runs outside task context, update directly.
+        if usage:
+            try:
+                from supervisor.state import update_budget_from_usage
+                update_budget_from_usage(usage)
+            except Exception:
+                pass
         answer = (resp_msg.get("content") or "NONE").strip()
         if answer.upper() == "NONE" or not answer:
             return None

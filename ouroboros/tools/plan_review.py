@@ -203,6 +203,10 @@ async def _run_plan_review_async(
     ]
     raw_results = await asyncio.gather(*tasks)
 
+    # Track per-reviewer costs — plan_task calls 3 models (full repo pack, ~$6-8 total)
+    # and these costs must reach the budget like any other LLM spend.
+    _emit_plan_review_usage(ctx, raw_results)
+
     # Format output
     return _format_output(raw_results, models, goal, estimated_tokens)
 
@@ -210,6 +214,53 @@ async def _run_plan_review_async(
 # ------------------------------------------------------------------ #
 # Single-reviewer query
 # ------------------------------------------------------------------ #
+
+def _emit_plan_review_usage(ctx: "ToolContext", raw_results: list) -> None:
+    """Emit llm_usage events for each plan reviewer so costs reach the budget."""
+    try:
+        from ouroboros.pricing import infer_api_key_type, infer_model_category, infer_provider_from_model
+        from ouroboros.utils import utc_now_iso
+        for result in raw_results:
+            if result.get("error"):
+                continue
+            tokens_in = result.get("tokens_in", 0)
+            tokens_out = result.get("tokens_out", 0)
+            if not tokens_in and not tokens_out:
+                continue
+            model = result.get("model") or result.get("request_model") or ""
+            cost = float(result.get("cost", 0) or 0)
+            provider = infer_provider_from_model(model)
+            event = {
+                "type": "llm_usage",
+                "ts": utc_now_iso(),
+                "task_id": getattr(ctx, "task_id", "") or "",
+                "model": model,
+                "api_key_type": infer_api_key_type(model, provider),
+                "model_category": infer_model_category(model),
+                "usage": {
+                    "prompt_tokens": tokens_in,
+                    "completion_tokens": tokens_out,
+                    "cached_tokens": 0,
+                    "cost": cost,
+                },
+                "provider": provider,
+                "source": "plan_review",
+                "category": "review",
+                "cost": cost,
+            }
+            eq = getattr(ctx, "event_queue", None)
+            if eq is not None:
+                try:
+                    eq.put_nowait(event)
+                    continue
+                except Exception:
+                    pass
+            pending = getattr(ctx, "pending_events", None)
+            if pending is not None:
+                pending.append(event)
+    except Exception:
+        log.debug("_emit_plan_review_usage failed (non-critical)", exc_info=True)
+
 
 async def _query_reviewer(
     llm_client: LLMClient,
@@ -235,6 +286,7 @@ async def _query_reviewer(
             resolved_model = str((usage or {}).get("resolved_model") or model)
             prompt_tokens = (usage or {}).get("prompt_tokens", 0)
             completion_tokens = (usage or {}).get("completion_tokens", 0)
+            cost = float((usage or {}).get("cost", 0) or 0)
             return {
                 "model": resolved_model,
                 "request_model": model,
@@ -242,6 +294,7 @@ async def _query_reviewer(
                 "error": None,
                 "tokens_in": prompt_tokens,
                 "tokens_out": completion_tokens,
+                "cost": cost,
             }
         except asyncio.TimeoutError:
             return {

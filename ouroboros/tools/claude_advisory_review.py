@@ -61,6 +61,60 @@ from ouroboros.utils import (
 log = logging.getLogger(__name__)
 
 _MAX_DIFF_CHARS_ERROR = 500_000  # Fail loudly above this — split the commit
+
+
+def _emit_advisory_usage(
+    ctx: "ToolContext",
+    model: str,
+    cost_usd: float,
+    usage: dict,
+    source: str = "advisory",
+    provider: str = "anthropic",
+) -> None:
+    """Emit an llm_usage event so advisory and fallback LLM costs reach the budget.
+
+    Uses the same routing as triad/scope review: event_queue first, pending_events
+    fallback, so costs are tracked regardless of execution context.
+
+    ``provider`` should be "anthropic" for SDK calls (always billed there) and
+    the real routing provider (e.g., "openrouter") for fallback LLM calls that
+    go through the shared LLMClient — otherwise /api/cost-breakdown attribution
+    will be wrong.
+    """
+    try:
+        from ouroboros.pricing import infer_api_key_type, infer_model_category
+        from ouroboros.utils import utc_now_iso as _utc
+        event = {
+            "type": "llm_usage",
+            "ts": _utc(),
+            "task_id": getattr(ctx, "task_id", "") or "",
+            "model": model,
+            "api_key_type": infer_api_key_type(model, provider),
+            "model_category": infer_model_category(model),
+            "usage": {
+                "prompt_tokens": usage.get("prompt_tokens", 0),
+                "completion_tokens": usage.get("completion_tokens", 0),
+                "cached_tokens": usage.get("cached_tokens", 0),
+                "cost": cost_usd or usage.get("cost", 0),
+            },
+            "provider": provider,
+            "source": source,
+            "category": "review",
+        }
+        eq = getattr(ctx, "event_queue", None)
+        if eq is not None:
+            try:
+                eq.put_nowait(event)
+                return
+            except Exception:
+                pass
+        pending = getattr(ctx, "pending_events", None)
+        if pending is not None:
+            pending.append(event)
+    except Exception:
+        log.debug("_emit_advisory_usage failed (non-critical)", exc_info=True)
+
+
 _ADVISORY_PROMPT_MAX_CHARS = 1_600_000  # ~400K tokens; non-blocking skip when exceeded
 _OBLIGATION_SUFFIX_RE = re.compile(r"\s*\(obligation\s+([a-f0-9]+)\)\s*$", re.IGNORECASE)
 
@@ -373,13 +427,24 @@ def _llm_extract_advisory_items(raw_text: str, ctx: object) -> list:
         messages = [{"role": "user", "content": prompt}]
 
         llm = LLMClient()
-        response, _usage = llm.chat(
+        response, fallback_usage = llm.chat(
             messages=messages,
             model=light_model,
             max_tokens=8192,
             reasoning_effort="low",
             no_proxy=True,
         )
+
+        # Track fallback LLM cost — this is real spend even if it's a cheap call.
+        # Derive provider from the model prefix for correct cost-breakdown attribution.
+        if fallback_usage and isinstance(ctx, ToolContext):
+            fallback_cost = float((fallback_usage or {}).get("cost", 0) or 0)
+            from ouroboros.pricing import infer_provider_from_model as _infer_prov
+            _emit_advisory_usage(
+                ctx, light_model, fallback_cost, fallback_usage,
+                "advisory_fallback", provider=_infer_prov(light_model),
+            )
+
         content = response.get("content", "")
         if not isinstance(content, str):
             # Flatten list content blocks
@@ -516,6 +581,11 @@ def _run_claude_advisory(
             return [], err_msg, model, prompt_chars
 
         raw_text = result.result_text
+
+        # Track SDK cost — advisory calls are real spend that must reach the budget.
+        if result.cost_usd > 0:
+            _emit_advisory_usage(ctx, model, result.cost_usd, result.usage or {}, "advisory_sdk")
+
         items = _parse_advisory_output(raw_text)
 
         # LLM-first fallback: if structural parse failed but we have raw output,
