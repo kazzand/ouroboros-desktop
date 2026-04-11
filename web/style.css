@@ -1359,7 +1359,7 @@ body {
 
 #chat-input {
     flex: 1;
-    padding: 10px 52px 10px 42px;
+    padding: 10px 76px 10px 42px;
     border-radius: 24px;
     border: 1px solid rgba(255, 255, 255, 0.09);
     background: rgba(26, 21, 32, 0.62);
@@ -1382,12 +1382,18 @@ body {
 }
 #chat-input::placeholder { color: var(--text-muted); }
 
-.chat-send-inline {
+/* Send group: positions the Send button + chevron as an absolute unit */
+.chat-send-group {
     position: absolute;
     right: 8px;
     bottom: 8px;
-    top: auto;
-    transform: none;
+    display: flex;
+    align-items: center;
+    gap: 0;
+    z-index: 1;
+}
+
+.chat-send-inline {
     border: none;
     background: transparent;
     color: var(--accent);
@@ -1396,12 +1402,11 @@ body {
     font-family: inherit;
     letter-spacing: 0.04em;
     cursor: pointer;
-    padding: 4px 10px;
-    border-radius: var(--radius);
+    padding: 4px 8px;
+    border-radius: var(--radius) 0 0 var(--radius);
     transition: color 0.15s, background 0.15s;
     opacity: 0.7;
     line-height: 1;
-    z-index: 1;
 }
 .chat-send-inline:hover {
     opacity: 1;
@@ -1409,6 +1414,68 @@ body {
 }
 .chat-send-inline:active {
     background: rgba(201, 53, 69, 0.18);
+    opacity: 1;
+}
+
+/* Chevron button — always visible for touch-screen accessibility */
+.chat-send-chevron {
+    border: none;
+    border-left: 1px solid rgba(201, 53, 69, 0.20);
+    background: transparent;
+    color: var(--accent);
+    cursor: pointer;
+    padding: 4px 5px;
+    border-radius: 0 var(--radius) var(--radius) 0;
+    transition: background 0.15s, opacity 0.15s;
+    opacity: 0.5;
+    display: flex;
+    align-items: center;
+    line-height: 1;
+}
+.chat-send-chevron:hover,
+.chat-send-chevron.active {
+    opacity: 1;
+    background: rgba(201, 53, 69, 0.10);
+}
+
+/* Dropdown panel */
+.chat-send-dropdown {
+    display: none;
+    position: absolute;
+    bottom: calc(100% + 6px);
+    right: 0;
+    min-width: 120px;
+    background: rgba(26, 21, 32, 0.92);
+    backdrop-filter: blur(14px);
+    -webkit-backdrop-filter: blur(14px);
+    border: 1px solid rgba(201, 53, 69, 0.20);
+    border-radius: var(--radius);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+    overflow: hidden;
+    z-index: 10;
+}
+.chat-send-dropdown.open {
+    display: block;
+}
+.chat-send-dropdown-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    border: none;
+    background: transparent;
+    color: var(--text-primary);
+    font-size: 13px;
+    font-family: inherit;
+    cursor: pointer;
+    padding: 9px 14px;
+    text-align: left;
+    transition: background 0.13s, color 0.13s;
+    opacity: 0.85;
+}
+.chat-send-dropdown-item:hover {
+    background: rgba(201, 53, 69, 0.12);
+    color: var(--accent);
     opacity: 1;
 }
 

@@ -75,7 +75,22 @@ export function initChat({ ws, state, updateUnreadBadge }) {
                 </button>
                 <input type="file" id="chat-file-input" class="chat-file-input-hidden" accept="*/*">
                 <textarea id="chat-input" placeholder="Message Ouroboros..." rows="1"></textarea>
-                <button class="chat-send-inline" id="chat-send" title="Send message">Send</button>
+                <div class="chat-send-group">
+                    <button class="chat-send-inline" id="chat-send" title="Send message">Send</button>
+                    <button class="chat-send-chevron" id="chat-send-chevron" type="button" title="More send options" aria-label="More send options">
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+                    </button>
+                    <div class="chat-send-dropdown" id="chat-send-dropdown" role="menu">
+                        <button class="chat-send-dropdown-item" id="chat-dropdown-send" role="menuitem">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+                            Send
+                        </button>
+                        <button class="chat-send-dropdown-item" id="chat-dropdown-plan" role="menuitem">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="8" y="2" width="8" height="4" rx="1" ry="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><path d="M12 11h4"/><path d="M12 16h4"/><path d="M8 11h.01"/><path d="M8 16h.01"/></svg>
+                            Plan
+                        </button>
+                    </div>
+                </div>
             </div>
         </div>
     `;
@@ -84,6 +99,10 @@ export function initChat({ ws, state, updateUnreadBadge }) {
     const messagesDiv = document.getElementById('chat-messages');
     const input = document.getElementById('chat-input');
     const sendBtn = document.getElementById('chat-send');
+    const chevronBtn = document.getElementById('chat-send-chevron');
+    const sendDropdown = document.getElementById('chat-send-dropdown');
+    const dropdownSend = document.getElementById('chat-dropdown-send');
+    const dropdownPlan = document.getElementById('chat-dropdown-plan');
     const statusBadge = document.getElementById('chat-status');
     const headerActions = document.getElementById('chat-header-actions');
     const attachBtn = document.getElementById('chat-attach');
@@ -1133,7 +1152,9 @@ export function initChat({ ws, state, updateUnreadBadge }) {
         input.setSelectionRange(cursor, cursor);
     }
 
-    async function sendMessage() {
+    const PLAN_PREFIX = 'Please do multi-model planning (plan_task tool) and web-search before answering or starting this task:\n\n';
+
+    async function sendMessage(planMode = false) {
         if (sendBtn.disabled) return;  // guard against Enter re-entry during async upload
         let text = input.value.trim();
         if (!text && !pendingAttachment) return;
@@ -1172,13 +1193,17 @@ export function initChat({ ws, state, updateUnreadBadge }) {
             }
         }
         if (!text) return;
+        // Recall history always uses the raw user text (no prefix pollution on ArrowUp).
         rememberInput(text);
         input.value = '';
         input.style.height = 'auto';
         updateMessagesPadding();
+        // Apply planning prefix to wire content only; display text stays clean.
+        // Slash commands are always sent verbatim regardless of planMode.
+        const wireText = (planMode && !text.startsWith('/')) ? PLAN_PREFIX + text : text;
         const result = ws.send({
             type: 'chat',
-            content: text,
+            content: wireText,
             sender_session_id: chatSessionId,
         });
         addMessage(text, 'user', false, null, false, {
@@ -1189,11 +1214,46 @@ export function initChat({ ws, state, updateUnreadBadge }) {
         });
     }
 
-    sendBtn.addEventListener('click', sendMessage);
+    // Dropdown toggle helpers
+    function openSendDropdown() {
+        sendDropdown.classList.add('open');
+        chevronBtn.classList.add('active');
+    }
+    function closeSendDropdown() {
+        sendDropdown.classList.remove('open');
+        chevronBtn.classList.remove('active');
+    }
+    chevronBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (sendDropdown.classList.contains('open')) {
+            closeSendDropdown();
+        } else {
+            openSendDropdown();
+        }
+    });
+    dropdownSend.addEventListener('click', () => {
+        closeSendDropdown();
+        sendMessage(false);
+    });
+    dropdownPlan.addEventListener('click', () => {
+        closeSendDropdown();
+        sendMessage(true);
+    });
+    document.addEventListener('click', (e) => {
+        if (!sendDropdown.contains(e.target) && e.target !== chevronBtn) {
+            closeSendDropdown();
+        }
+    });
+    document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape') closeSendDropdown();
+    });
+
+    // Use explicit arrow functions to avoid MouseEvent being passed as planMode arg.
+    sendBtn.addEventListener('click', () => sendMessage(false));
     input.addEventListener('keydown', (e) => {
         if (e.key === 'Enter' && !e.shiftKey) {
             e.preventDefault();
-            sendMessage();
+            sendMessage(false);
             return;
         }
         if (e.key === 'ArrowUp' && !e.shiftKey) {

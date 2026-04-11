@@ -471,7 +471,7 @@ def test_live_card_timeline_no_hardcoded_item_cap():
 
 
 def test_chat_input_overlay_buttons_css():
-    """Regression: paperclip and Send buttons must be absolute overlays inside the textarea."""
+    """Regression: paperclip button and send group must be absolute overlays inside the textarea."""
     css = _read("web/style.css")
 
     # .chat-attach-btn: absolute, inside input wrap on the left
@@ -485,16 +485,17 @@ def test_chat_input_overlay_buttons_css():
     assert "position: absolute" in attach_body, ".chat-attach-btn must be position: absolute"
     assert "left:" in attach_body, ".chat-attach-btn must have a left: offset"
 
-    # .chat-send-inline: absolute, inside input wrap on the right
-    send_match = re.search(
-        r'\.chat-send-inline\s*\{(.+?)\}',
+    # .chat-send-group: absolute wrapper for Send + chevron, positioned on the right.
+    # (.chat-send-inline itself no longer needs position:absolute — the group handles it.)
+    group_match = re.search(
+        r'\.chat-send-group\s*\{(.+?)\}',
         css,
         re.DOTALL,
     )
-    assert send_match, ".chat-send-inline CSS rule not found"
-    send_body = send_match.group(1)
-    assert "position: absolute" in send_body, ".chat-send-inline must be position: absolute"
-    assert "right:" in send_body, ".chat-send-inline must have a right: offset"
+    assert group_match, ".chat-send-group CSS rule not found"
+    group_body = group_match.group(1)
+    assert "position: absolute" in group_body, ".chat-send-group must be position: absolute"
+    assert "right:" in group_body, ".chat-send-group must have a right: offset"
 
     # #chat-input: must have both left and right padding to avoid text overlap
     input_match = re.search(
@@ -505,10 +506,16 @@ def test_chat_input_overlay_buttons_css():
     assert input_match, "#chat-input CSS rule not found"
     input_body = input_match.group(1)
     assert "padding" in input_body, "#chat-input must have padding defined"
-    # padding: 10px 52px 10px 42px — right 52px, left 42px
-    # We check that the padding value is not the symmetric default
+    # padding: 10px 76px 10px 42px — right 76px (wider for send+chevron group), left 42px
     assert "42px" in input_body, "#chat-input must have 42px left padding for attach overlay"
-    assert "52px" in input_body, "#chat-input must have 52px right padding for send overlay"
+    # Right padding must be ≥ 72px to accommodate the send group (was 52px for single button)
+    right_match = re.search(r'padding:\s*\d+px\s+(\d+)px', input_body)
+    if right_match:
+        right_px = int(right_match.group(1))
+        assert right_px >= 72, f"#chat-input right padding must be >= 72px, got {right_px}px"
+    else:
+        assert "76px" in input_body or "80px" in input_body, \
+            "#chat-input must have sufficient right padding for the send group"
 
 
 def test_sync_history_two_pass_progress_before_finalize():
@@ -664,25 +671,28 @@ def test_sync_history_appends_disconnected_unfinished_cards_at_end():
 
 
 def test_chat_send_button_bottom_aligned():
-    """Send button must use bottom:8px alignment (not top:50%/translateY) so it stays
+    """Send group wrapper must use bottom:8px alignment so all send controls stay
     aligned with the paperclip button when the textarea grows to multiple lines."""
     css = _read("web/style.css")
 
-    # Find the .chat-send-inline rule
-    rule_start = css.index(".chat-send-inline {")
+    # The absolute positioning now lives on .chat-send-group, not .chat-send-inline.
+    rule_start = css.index(".chat-send-group {")
     rule_end = css.index("\n}", rule_start) + 2
     rule_body = css[rule_start:rule_end]
 
     assert "bottom: 8px" in rule_body, \
-        ".chat-send-inline must use bottom: 8px to align with paperclip button"
-    assert "top: auto" in rule_body, \
-        ".chat-send-inline must reset top to auto"
-    assert "transform: none" in rule_body, \
-        ".chat-send-inline must reset transform to none (no translateY centering)"
-    # Negative: the old vertical-center hack must be gone
-    assert "top: 50%" not in rule_body, \
+        ".chat-send-group must use bottom: 8px to align with paperclip button"
+    assert "position: absolute" in rule_body, \
+        ".chat-send-group must be position: absolute"
+    # The Send button itself must NOT re-introduce absolute positioning
+    send_start = css.index(".chat-send-inline {")
+    send_end = css.index("\n}", send_start) + 2
+    send_body = css[send_start:send_end]
+    assert "position: absolute" not in send_body, \
+        ".chat-send-inline must not use position: absolute (handled by parent .chat-send-group)"
+    assert "top: 50%" not in send_body, \
         ".chat-send-inline must NOT use top: 50% vertical centering"
-    assert "translateY(-50%)" not in rule_body, \
+    assert "translateY(-50%)" not in send_body, \
         ".chat-send-inline must NOT use translateY(-50%) vertical centering"
 
 
@@ -696,3 +706,104 @@ def test_chat_attach_button_bottom_aligned():
 
     assert "bottom:" in rule_body, \
         ".chat-attach-btn must use bottom positioning to align with Send button"
+
+
+# --- Plan mode send tests ---
+
+def test_plan_mode_dom_elements_present():
+    """The chat input must contain the send group, chevron, and dropdown elements."""
+    source = _read("web/modules/chat.js")
+    assert 'id="chat-send-chevron"' in source, "chat-send-chevron button must be present"
+    assert 'id="chat-send-dropdown"' in source, "chat-send-dropdown div must be present"
+    assert 'id="chat-dropdown-plan"' in source, "chat-dropdown-plan item must be present"
+    assert 'id="chat-dropdown-send"' in source, "chat-dropdown-send item must be present"
+    assert 'class="chat-send-group"' in source, "chat-send-group wrapper must be present"
+
+
+def test_plan_mode_send_message_accepts_plan_flag():
+    """sendMessage must accept a planMode parameter."""
+    source = _read("web/modules/chat.js")
+    assert "async function sendMessage(planMode = false)" in source, \
+        "sendMessage must accept planMode=false as default parameter"
+
+
+def test_plan_mode_prefix_constant_defined():
+    """PLAN_PREFIX constant must be defined with planning instruction."""
+    source = _read("web/modules/chat.js")
+    assert "const PLAN_PREFIX" in source, "PLAN_PREFIX constant must be defined"
+    assert "plan_task" in source, "PLAN_PREFIX should reference plan_task tool"
+    assert "web-search" in source, "PLAN_PREFIX should reference web-search"
+
+
+def test_plan_mode_wire_text_uses_prefix():
+    """Plan mode must prepend the prefix to wire text, but not for slash commands."""
+    source = _read("web/modules/chat.js")
+    # Must include slash-command bypass guard
+    assert "planMode && !text.startsWith('/')" in source, \
+        "Plan mode must bypass PLAN_PREFIX for slash commands"
+    assert "PLAN_PREFIX + text" in source, \
+        "Plan mode must prepend PLAN_PREFIX to regular messages"
+
+
+def test_plan_mode_remember_input_uses_raw_text():
+    """rememberInput must be called before prefix is applied (no recall pollution)."""
+    source = _read("web/modules/chat.js")
+    # rememberInput must appear before wireText assignment
+    remember_idx = source.index("rememberInput(text)")
+    wire_idx = source.index("const wireText = (planMode")
+    assert remember_idx < wire_idx, \
+        "rememberInput must be called with raw text before wireText prefix is applied"
+
+
+def test_plan_mode_send_listener_uses_arrow_function():
+    """sendBtn click listener must use arrow function to avoid MouseEvent-as-planMode bug."""
+    source = _read("web/modules/chat.js")
+    assert "sendBtn.addEventListener('click', () => sendMessage(false))" in source, \
+        "sendBtn listener must use () => sendMessage(false) to prevent MouseEvent truthy arg"
+
+
+def test_plan_mode_dropdown_css_exists():
+    """CSS must include send group, chevron, and dropdown rules."""
+    css = _read("web/style.css")
+    assert ".chat-send-group {" in css, "Must have .chat-send-group CSS rule"
+    assert ".chat-send-chevron {" in css, "Must have .chat-send-chevron CSS rule"
+    assert ".chat-send-dropdown {" in css, "Must have .chat-send-dropdown CSS rule"
+    assert ".chat-send-dropdown.open {" in css, "Must have .chat-send-dropdown.open rule"
+    assert ".chat-send-dropdown-item {" in css, "Must have .chat-send-dropdown-item rule"
+
+
+def test_plan_mode_input_padding_accommodates_group():
+    """#chat-input padding-right must be wide enough for Send + chevron group (~76px)."""
+    css = _read("web/style.css")
+    rule_start = css.index("#chat-input {")
+    rule_end = css.index("\n}", rule_start) + 2
+    rule_body = css[rule_start:rule_end]
+    # Extract padding-right value — must be at least 72px
+    import re
+    match = re.search(r'padding:\s*[^;]+?(\d+)px\s+(\d+)px', rule_body)
+    if match:
+        # shorthand: padding: top right... — second value is the right-hand padding
+        # But our format is padding: 10px 76px 10px 42px
+        right_px = int(match.group(2))
+        assert right_px >= 72, \
+            f"#chat-input padding-right should be >= 72px to fit send group, got {right_px}px"
+    else:
+        # fallback: check that 76px is mentioned in the rule
+        assert "76px" in rule_body or "80px" in rule_body, \
+            "#chat-input must have sufficient right padding for the send+chevron group"
+
+
+def test_plan_mode_dropdown_close_on_escape():
+    """Escape key handler must call closeSendDropdown."""
+    source = _read("web/modules/chat.js")
+    assert "e.key === 'Escape'" in source and "closeSendDropdown()" in source, \
+        "Escape key must close the send dropdown"
+
+
+def test_plan_mode_close_on_outside_click():
+    """Outside click handler must close the dropdown."""
+    source = _read("web/modules/chat.js")
+    assert "document.addEventListener('click'" in source, \
+        "A document click listener must exist to close the dropdown on outside click"
+    assert "closeSendDropdown()" in source, \
+        "closeSendDropdown must be called from the outside-click handler"
