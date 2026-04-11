@@ -293,6 +293,141 @@ Return ONLY a JSON array. Each element:
     return prompt
 
 
+_FALLBACK_EXTRACT_PROMPT = """\
+The following text is the output of an advisory code review. It may contain narrative
+reasoning, tool call traces, and a JSON checklist array. Extract ONLY the JSON checklist
+array from this text and return it as a valid JSON array. No prose, no markdown fences.
+
+Each element MUST have ALL of these fields:
+  "item":     checklist item name (string)
+  "verdict":  "PASS" or "FAIL" (string)
+  "severity": "critical" or "advisory" (string, REQUIRED — do not omit even for PASS entries)
+  "reason":   brief explanation (string)
+
+If a FAIL entry in the source is missing a severity, infer it from context:
+treat it as "critical" if it involves bugs, security, or constitutional violations,
+otherwise "advisory".
+
+If no valid checklist array exists in the text, return an empty JSON array: []
+
+Advisory review output to extract from:
+{raw_text}
+"""
+
+_FALLBACK_HEAD_CHARS = 4_000   # first N chars of raw text (context / tool-call traces)
+_FALLBACK_TAIL_CHARS = 60_000  # last N chars — where the JSON array usually appears
+_FALLBACK_OMISSION_NOTE = (
+    "\n\n[⚠️ OMISSION NOTE: middle section of advisory output omitted "
+    "to fit context window — JSON findings are expected in the tail section above]\n\n"
+)
+
+
+def _build_fallback_window(raw_text: str) -> str:
+    """Build a head+tail window of raw_text for the LLM extraction fallback.
+
+    The known failure pattern is: Claude writes a long narrative preamble + tool
+    call traces, then places the JSON checklist array NEAR THE END.  A first-N
+    truncation would discard the JSON.  We keep the first _FALLBACK_HEAD_CHARS
+    (for context) and the last _FALLBACK_TAIL_CHARS (where JSON lives), with an
+    explicit omission note for the middle section.
+    """
+    total = _FALLBACK_HEAD_CHARS + _FALLBACK_TAIL_CHARS
+    if len(raw_text) <= total:
+        return raw_text
+    head = raw_text[:_FALLBACK_HEAD_CHARS]
+    tail = raw_text[-_FALLBACK_TAIL_CHARS:]
+    return head + _FALLBACK_OMISSION_NOTE + tail
+
+
+def _resolve_fallback_model() -> str:
+    """Resolve the light extraction model that works on the current provider configuration.
+
+    Priority:
+      1. OUROBOROS_MODEL_LIGHT env var if set and non-empty
+      2. If only ANTHROPIC_API_KEY is configured (no OpenRouter), use a direct
+         Anthropic model so the call actually routes to the right provider.
+      3. Otherwise default to the OpenRouter-style light model.
+
+    This prevents the failure mode where advisory SDK succeeds (Anthropic-only)
+    but the extraction fallback fails because it chose an OpenRouter-style default.
+    """
+    import os as _os
+    env_light = (_os.environ.get("OUROBOROS_MODEL_LIGHT") or "").strip()
+    if env_light:
+        return env_light
+
+    has_openrouter = bool((_os.environ.get("OPENROUTER_API_KEY") or "").strip())
+    has_anthropic = bool((_os.environ.get("ANTHROPIC_API_KEY") or "").strip())
+
+    if has_anthropic and not has_openrouter:
+        # Anthropic-only installation: use direct-provider prefix so LLMClient
+        # routes to the Anthropic API rather than OpenRouter.
+        return "anthropic::claude-haiku-3-5"
+
+    # OpenRouter available (default multi-provider path)
+    return "anthropic/claude-haiku-3-5"
+
+
+def _llm_extract_advisory_items(raw_text: str, ctx: object) -> list:
+    """LLM-first fallback: extract advisory checklist items from narrative text.
+
+    Called when _parse_advisory_output() returns [] but we have non-empty raw output.
+    Uses the light model via llm.py with no_proxy=True (fork-safe for macOS workers).
+
+    Sends a head+tail window of raw_text so that the JSON array near the end of a
+    long narrative response is always included even when the total text exceeds the
+    combined head+tail budget.
+
+    Returns a list of checklist item dicts, or [] on any failure.
+    """
+    try:
+        from ouroboros.llm import LLMClient  # type: ignore[attr-defined]
+
+        light_model = _resolve_fallback_model()
+        input_text = _build_fallback_window(raw_text)
+        prompt = _FALLBACK_EXTRACT_PROMPT.format(raw_text=input_text)
+        messages = [{"role": "user", "content": prompt}]
+
+        llm = LLMClient()
+        response, _usage = llm.chat(
+            messages=messages,
+            model=light_model,
+            max_tokens=8192,
+            reasoning_effort="low",
+            no_proxy=True,
+        )
+        content = response.get("content", "")
+        if not isinstance(content, str):
+            # Flatten list content blocks
+            if isinstance(content, list):
+                content = " ".join(
+                    str(b.get("text", "")) for b in content if isinstance(b, dict)
+                )
+            else:
+                content = str(content or "")
+
+        items = _parse_advisory_output(content)
+        if not _is_checklist_array(items):
+            return []
+
+        # Normalise: any FAIL item missing 'severity' gets "critical" so that
+        # _handle_advisory_pre_review() never silently downgrade a blocking finding.
+        normalised = []
+        for it in items:
+            if not isinstance(it, dict):
+                continue
+            verdict = str(it.get("verdict", "")).upper().strip()
+            if verdict == "FAIL" and not str(it.get("severity", "")).strip():
+                it = dict(it)
+                it["severity"] = "critical"
+            normalised.append(it)
+        return normalised
+
+    except Exception as exc:
+        log.warning("Advisory LLM fallback extraction failed: %s", exc)
+        return []
+
+
 def _run_claude_advisory(
     repo_dir: pathlib.Path,
     commit_message: str,
@@ -398,6 +533,16 @@ def _run_claude_advisory(
 
         raw_text = result.result_text
         items = _parse_advisory_output(raw_text)
+
+        # LLM-first fallback: if structural parse failed but we have raw output,
+        # ask a light model to extract the JSON array from the narrative response.
+        # This handles the "Claude writes findings at the end of a long narrative"
+        # pattern that causes parse_failure on large diffs (confirmed root cause).
+        if not items and raw_text and not raw_text.startswith("⚠️ ADVISORY_ERROR"):
+            items = _llm_extract_advisory_items(raw_text, ctx)
+            if items:
+                log.info("Advisory: structural parse failed, LLM fallback extracted %d items", len(items))
+
         return items, raw_text, model, prompt_chars
 
     except ImportError:

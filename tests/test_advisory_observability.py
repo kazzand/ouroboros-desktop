@@ -754,3 +754,168 @@ class TestParseAdvisoryOutput:
         """A stray [1,2,3] with no real checklist must yield empty list (parse_failure)."""
         result = self._parse("some text [1,2,3] end")
         assert result == []
+
+
+# ---------------------------------------------------------------------------
+# LLM fallback extraction (_llm_extract_advisory_items)
+# ---------------------------------------------------------------------------
+
+class TestLLMFallbackExtraction:
+    """Tests for the LLM-first parse-failure fallback in _run_claude_advisory."""
+
+    @pytest.fixture(autouse=True)
+    def _import(self):
+        _ensure_sdk_mock()
+        import importlib
+        self.mod = importlib.import_module("ouroboros.tools.claude_advisory_review")
+
+    def _make_ctx(self):
+        from types import SimpleNamespace
+        return SimpleNamespace(
+            repo_dir="/tmp",
+            drive_root="/tmp",
+            emit_progress_fn=lambda _: None,
+            pending_events=[],
+            task_id="fallback-test",
+        )
+
+    def _item(self, item: str, verdict: str = "PASS") -> dict:
+        return {"item": item, "verdict": verdict, "reason": "ok"}
+
+    def test_fallback_succeeds_when_direct_parse_fails(self, monkeypatch):
+        """When _parse_advisory_output returns [] but raw_text has JSON,
+        _llm_extract_advisory_items should return the checklist items."""
+        expected = [self._item("bible_compliance"), self._item("code_quality")]
+
+        # Patch LLMClient.chat to return the JSON as if the LLM extracted it
+        def fake_chat(self_llm, messages, model, **kwargs):
+            return {"content": json.dumps(expected)}, {"cost": 0.001}
+
+        import ouroboros.llm as llm_mod
+        monkeypatch.setattr(llm_mod.LLMClient, "chat", fake_chat)
+
+        raw_text = (
+            "I've reviewed the code carefully.\n"
+            "Let me check each file...\n"
+            "Here are my findings in JSON:\n"
+            + json.dumps(expected)
+        )
+        result = self.mod._llm_extract_advisory_items(raw_text, self._make_ctx())
+        assert result == expected
+
+    def test_fallback_window_includes_tail_for_long_inputs(self, monkeypatch):
+        """For inputs longer than head+tail budget, _build_fallback_window must preserve
+        the TAIL (where JSON lives) and show a head excerpt + omission note — not a
+        first-N truncation that would discard the JSON at the end."""
+        head_chars = self.mod._FALLBACK_HEAD_CHARS
+        tail_chars = self.mod._FALLBACK_TAIL_CHARS
+
+        # Build a text that is bigger than the combined budget.
+        # Head = 'A' * head_chars, middle filler, tail contains a distinct marker.
+        tail_marker = "TAIL_JSON_MARKER"
+        filler_size = head_chars + tail_chars + 10_000  # clearly over budget
+        preamble = "A" * filler_size
+        raw_text = preamble + tail_marker
+
+        window = self.mod._build_fallback_window(raw_text)
+
+        # Tail marker must be present
+        assert tail_marker in window, "Tail (where JSON lives) must be included in the window"
+        # Omission note must be present for middle-section awareness
+        assert "OMISSION NOTE" in window, "Omission note must mark the skipped middle section"
+        # Window must be shorter than full raw_text
+        assert len(window) < len(raw_text)
+
+    def test_resolve_fallback_model_anthropic_only(self, monkeypatch):
+        """On Anthropic-only installations, fallback model must use anthropic:: prefix."""
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+        monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+        monkeypatch.delenv("OUROBOROS_MODEL_LIGHT", raising=False)
+
+        model = self.mod._resolve_fallback_model()
+        assert model.startswith("anthropic::"), (
+            f"Anthropic-only install must use direct-provider prefix, got: {model!r}"
+        )
+
+    def test_resolve_fallback_model_uses_env_var(self, monkeypatch):
+        """OUROBOROS_MODEL_LIGHT must take priority over auto-detection."""
+        monkeypatch.setenv("OUROBOROS_MODEL_LIGHT", "openai::gpt-4o-mini")
+        model = self.mod._resolve_fallback_model()
+        assert model == "openai::gpt-4o-mini"
+
+    def test_fallback_normalises_fail_without_severity_to_critical(self, monkeypatch):
+        """FAIL items missing 'severity' from the LLM fallback must be normalised to 'critical'
+        so _handle_advisory_pre_review() never silently downgrades blocking findings."""
+        # Simulate LLM returning a FAIL item with no severity (schema-incomplete output)
+        raw_items = [
+            {"item": "code_quality", "verdict": "FAIL", "reason": "bug found"},
+        ]
+
+        def fake_chat(self_llm, messages, model, **kwargs):
+            return {"content": json.dumps(raw_items)}, {"cost": 0.001}
+
+        import ouroboros.llm as llm_mod
+        monkeypatch.setattr(llm_mod.LLMClient, "chat", fake_chat)
+
+        result = self.mod._llm_extract_advisory_items("narrative with no json", self._make_ctx())
+        assert len(result) == 1
+        assert result[0]["verdict"] == "FAIL"
+        assert result[0]["severity"] == "critical", (
+            "FAIL without severity must be normalised to 'critical' — not left empty"
+        )
+
+    def test_fallback_returns_empty_on_llm_failure(self, monkeypatch):
+        """When the LLM call raises an exception, fallback must return [] gracefully."""
+        import ouroboros.llm as llm_mod
+
+        def fake_chat_raises(self_llm, messages, model, **kwargs):
+            raise RuntimeError("API unavailable")
+
+        monkeypatch.setattr(llm_mod.LLMClient, "chat", fake_chat_raises)
+
+        result = self.mod._llm_extract_advisory_items("some narrative text", self._make_ctx())
+        assert result == []
+
+    def test_direct_parse_success_skips_fallback(self, monkeypatch):
+        """When _parse_advisory_output succeeds, _llm_extract_advisory_items must NOT be called."""
+        expected = [self._item("secrets_check"), self._item("version_bump")]
+
+        fallback_called = []
+        original_fallback = self.mod._llm_extract_advisory_items
+
+        def tracking_fallback(raw_text, ctx):
+            fallback_called.append(raw_text)
+            return original_fallback(raw_text, ctx)
+
+        monkeypatch.setattr(self.mod, "_llm_extract_advisory_items", tracking_fallback)
+
+        # _run_claude_advisory calls _parse_advisory_output first; mock run_readonly
+        # to return a clean JSON array (direct parse succeeds)
+        import ouroboros.gateways.claude_code as gw
+        from ouroboros.gateways.claude_code import ClaudeCodeResult
+
+        def fake_run_readonly(**kwargs):
+            return ClaudeCodeResult(
+                success=True,
+                result_text=json.dumps(expected),
+                session_id="sess-test",
+            )
+
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+        monkeypatch.setattr(gw, "run_readonly", fake_run_readonly)
+        monkeypatch.setattr(self.mod, "build_advisory_changed_context",
+                            lambda *a, **kw: ([], "", set()))
+        monkeypatch.setattr(self.mod, "_get_staged_diff",
+                            lambda *a, **kw: "diff --git a/foo.py b/foo.py")
+        monkeypatch.setattr(self.mod, "_get_changed_file_list",
+                            lambda *a, **kw: "M foo.py")
+        monkeypatch.setattr(self.mod, "_build_advisory_prompt",
+                            lambda *a, **kw: "prompt text")
+
+        import pathlib
+        items, raw, _model, _chars = self.mod._run_claude_advisory(
+            pathlib.Path("/tmp"), "test commit", self._make_ctx()
+        )
+
+        assert items == expected
+        assert fallback_called == [], "Fallback must NOT be called when direct parse succeeds"
