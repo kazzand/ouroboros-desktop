@@ -380,6 +380,36 @@ export function summarizeLogEvent(evt) {
         };
     }
 
+    if (t === 'task_checkpoint') {
+        const cpNum = evt.checkpoint_number || Math.floor((evt.round || 0) / 15);
+        return {
+            ...base,
+            phase: 'thinking',
+            headline: `Checkpoint ${cpNum}`,
+            meta: [
+                evt.task_id ? `task=${evt.task_id}` : '',
+                evt.round ? `r${evt.round}` : '',
+                evt.context_tokens ? `~${evt.context_tokens} tok` : '',
+                formatLogMoney(evt.task_cost),
+            ].filter(Boolean),
+        };
+    }
+
+    if (t === 'task_checkpoint_reflection') {
+        const cpRound = evt.round || 0;
+        const cpNum = Math.floor(cpRound / 15);
+        return {
+            ...base,
+            phase: 'thinking',
+            headline: `Checkpoint ${cpNum} reflection`,
+            body: shortText(String(evt.reflection || '').replace(/^CHECKPOINT_REFLECTION:\s*/i, ''), 260),
+            meta: [
+                evt.task_id ? `task=${evt.task_id}` : '',
+                evt.round ? `r${cpRound}` : '',
+            ].filter(Boolean),
+        };
+    }
+
     if (t.includes('error') || t.includes('crash') || t.includes('fail')) {
         return {
             ...base,
@@ -492,6 +522,41 @@ export function summarizeChatLiveEvent(evt) {
             promote: false,
             human: false,
             dedupeKey: `${t}:${getLogTaskGroupId(evt)}:${evt.tool || ''}`,
+        };
+    }
+
+    if (t === 'task_checkpoint') {
+        // Not visible in chat live card — the emit_progress message is the visible source
+        // for the chat timeline (avoids duplicate timeline entries). This event remains
+        // visible in the Logs tab via summarizeLogEvent.
+        const cpNum = evt.checkpoint_number || Math.floor((evt.round || 0) / 15);
+        return {
+            phase: 'thinking',
+            headline: `Checkpoint ${cpNum} — pausing to reflect`,
+            body: '',
+            visible: false,
+            promote: false,
+            human: false,
+            dedupeKey: `${t}:${getLogTaskGroupId(evt)}:${cpNum}`,
+        };
+    }
+
+    if (t === 'task_checkpoint_reflection') {
+        // Not visible in chat live card — the emit_progress message already carries the
+        // full reflection text and is the single visible chat source. This event remains
+        // visible in the Logs tab via summarizeLogEvent for postmortem inspection.
+        const cpRound = evt.round || 0;
+        const cpNum = Math.floor(cpRound / 15);
+        const reflText = describeText(String(evt.reflection || '').replace(/^CHECKPOINT_REFLECTION:\s*/i, ''), 300);
+        return {
+            phase: 'thinking',
+            headline: `Checkpoint ${cpNum} reflection`,
+            body: reflText.preview,
+            fullBody: reflText.full,
+            visible: false,
+            promote: false,
+            human: false,
+            dedupeKey: `${t}:${getLogTaskGroupId(evt)}:${cpRound}`,
         };
     }
 

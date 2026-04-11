@@ -69,11 +69,16 @@ def _tool_round_spans(messages: list) -> list[Tuple[int, int]]:
 def _round_has_protected_content(messages: list, start: int, end: int) -> bool:
     for idx in range(start, end + 1):
         msg = messages[idx]
-        if msg.get("role") != "tool":
-            continue
+        role = msg.get("role", "")
         content = str(msg.get("content") or "")
-        tool_name = _find_tool_name_for_result(msg, messages)
-        if tool_name in _COMPACTION_PROTECTED_TOOLS or content.startswith("⚠️"):
+        # Protect tool-result messages for critical tools or error markers
+        if role == "tool":
+            tool_name = _find_tool_name_for_result(msg, messages)
+            if tool_name in _COMPACTION_PROTECTED_TOOLS or content.startswith("⚠️"):
+                return True
+        # Protect checkpoint rounds: assistant message with CHECKPOINT_REFLECTION
+        # text must survive compaction so the reflection stays visible to future rounds.
+        if role == "assistant" and "CHECKPOINT_REFLECTION" in content:
             return True
     return False
 

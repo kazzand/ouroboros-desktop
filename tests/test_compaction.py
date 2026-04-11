@@ -83,3 +83,98 @@ def test_old_assistant_tool_payloads_are_compacted():
         and "<<CONTENT_OMITTED len=" in m["tool_calls"][0]["function"]["arguments"]
     ]
     assert len(compacted_assistants) >= 4, "Old oversized assistant tool-call payloads should be compacted"
+
+
+# ── Checkpoint reflection protection ─────────────────────────────────────────
+
+
+def _make_messages_with_checkpoint(num_rounds: int = 8, checkpoint_round: int = 2):
+    """Build a message list where one assistant message contains CHECKPOINT_REFLECTION."""
+    messages = [{"role": "system", "content": "system"}]
+    for i in range(num_rounds):
+        tc_id = f"call_{i}"
+        content = (
+            "CHECKPOINT_REFLECTION:\n"
+            "- Known: the file exists\n"
+            "- Blocker: none\n"
+            "- Decision: proceed\n"
+            "- Next: repo_read the target file"
+        ) if i == checkpoint_round else f"Round {i} reasoning"
+        messages.append({
+            "role": "assistant",
+            "content": content,
+            "tool_calls": [{
+                "id": tc_id,
+                "function": {"name": "repo_read", "arguments": '{"path": "a.py"}'},
+            }],
+        })
+        messages.append({
+            "role": "tool",
+            "tool_call_id": tc_id,
+            "content": "file content here",
+        })
+    return messages
+
+
+def test_checkpoint_reflection_round_survives_compaction():
+    """Rounds whose assistant content contains CHECKPOINT_REFLECTION must not be compacted."""
+    from ouroboros.context_compaction import compact_tool_history_llm
+    msgs = _make_messages_with_checkpoint(num_rounds=10, checkpoint_round=2)
+
+    # Patch the LLM summarizer so compaction runs without a real API call
+    import unittest.mock as mock
+    fake_summary = {i: f"[summary of round {i}]" for i in range(len(msgs))}
+
+    with mock.patch(
+        "ouroboros.context_compaction._summarize_round_batch",
+        return_value=(fake_summary, {}),
+    ):
+        compacted, _ = compact_tool_history_llm(msgs, keep_recent=3)
+
+    # The checkpoint round's assistant content must be present verbatim
+    checkpoint_texts = [
+        m["content"] for m in compacted
+        if m.get("role") == "assistant" and "CHECKPOINT_REFLECTION" in str(m.get("content", ""))
+    ]
+    assert len(checkpoint_texts) >= 1, (
+        "Checkpoint reflection round must survive compact_tool_history_llm"
+    )
+
+
+def test_round_has_protected_content_detects_checkpoint():
+    """_round_has_protected_content returns True when assistant content has CHECKPOINT_REFLECTION."""
+    from ouroboros.context_compaction import _round_has_protected_content
+
+    # Build a minimal span: [assistant, tool]
+    messages = [
+        {
+            "role": "assistant",
+            "content": "CHECKPOINT_REFLECTION:\n- Known: x\n- Blocker: none",
+            "tool_calls": [{"id": "c1", "function": {"name": "repo_read", "arguments": "{}"}}],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "c1",
+            "content": "ok",
+        },
+    ]
+    assert _round_has_protected_content(messages, 0, 1) is True
+
+
+def test_round_has_protected_content_ignores_non_checkpoint():
+    """_round_has_protected_content returns False for normal rounds without checkpoint text."""
+    from ouroboros.context_compaction import _round_has_protected_content
+
+    messages = [
+        {
+            "role": "assistant",
+            "content": "Normal reasoning without any reflection marker",
+            "tool_calls": [{"id": "c1", "function": {"name": "repo_read", "arguments": "{}"}}],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "c1",
+            "content": "file content",
+        },
+    ]
+    assert _round_has_protected_content(messages, 0, 1) is False

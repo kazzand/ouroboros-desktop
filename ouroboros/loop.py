@@ -208,13 +208,16 @@ def _maybe_inject_self_check(
     if tool_trace:
         reminder += f"{tool_trace}\n\n"
     reminder += (
-        "⏸️ PAUSE AND REFLECT before continuing. Write a brief `CHECKPOINT_REFLECTION:` "
-        "in plain text covering:\n"
-        "- What I know for certain about the current state\n"
-        "- The main blocker (or 'none')\n"
-        "- What I'm choosing to do and why\n"
-        "- The very next concrete action\n\n"
-        "Keep it short (4 bullets / ~80 words). "
+        "⏸️ PAUSE AND REFLECT before continuing. Write a `CHECKPOINT_REFLECTION:` block "
+        "in plain text with exactly these four lines:\n"
+        "- **Known:** What I have verified as true about the current state (not assumptions)\n"
+        "- **Blocker:** The concrete obstacle right now, or 'none'\n"
+        "- **Decision:** What approach I am choosing and why (not just what I will do)\n"
+        "- **Next:** The single most important action I will take next\n\n"
+        "Requirements: Be specific — name files, functions, or error messages. "
+        "Avoid vague language like 'continue working'. "
+        "Keep total length under 100 words. "
+        "Start the block with `CHECKPOINT_REFLECTION:` on its own line. "
         "Then immediately continue with your next tool call in the same response. "
         "If the task is genuinely complete, give the final answer instead."
     )
@@ -600,17 +603,27 @@ def run_llm_loop(
                     ), accumulated_usage, llm_trace
 
             # On checkpoint rounds: emit the reflection event (full content, no parsing).
-            # If the LLM returned only text (no tool calls), it may be either a reflection
-            # that needs a nudge OR a genuine final answer — treat it as a final answer so
-            # the task can terminate normally on a checkpoint round.  The checkpoint prompt
-            # explicitly says "give the final answer instead" if genuinely complete, so a
-            # text-only response is the intended signal that the task is done.
+            # Also emit a visible progress message so the reflection appears in the chat
+            # live card timeline AND survives history reconstruction from progress.jsonl.
+            # If the LLM returned only text (no tool calls), treat it as a final answer
+            # so the task can terminate normally on a checkpoint round. The checkpoint
+            # prompt explicitly says "give the final answer instead" if genuinely complete.
             if _checkpoint_injected:
                 raw_content = msg.get("content") or ""
                 tool_calls_cp = msg.get("tool_calls") or []
                 if raw_content:
+                    # Normalize content — may be a string or a list of content blocks.
+                    reflection_text = _extract_plain_text_from_content(raw_content).strip()
                     _emit_checkpoint_reflection_event(
-                        raw_content, round_idx, task_id, event_queue, drive_logs,
+                        reflection_text, round_idx, task_id, event_queue, drive_logs,
+                    )
+                    # Emit a progress message carrying the full reflection text so it:
+                    # (a) appears in the chat live card via is_progress events, and
+                    # (b) survives page reload/reconnect via progress.jsonl replay.
+                    # No truncation — this is a cognitive artifact (P1 Continuity, DEVELOPMENT.md).
+                    checkpoint_num_cp = round_idx // 15
+                    emit_progress(
+                        f"🔍 Checkpoint {checkpoint_num_cp} reflection (round {round_idx}):\n{reflection_text}"
                     )
                 if not tool_calls_cp:
                     # Text-only on a checkpoint round = task complete (or reflection without
