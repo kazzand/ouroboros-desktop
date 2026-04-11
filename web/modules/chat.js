@@ -528,6 +528,9 @@ export function initChat({ ws, state, updateUnreadBadge }) {
             items: [],
             lastHumanHeadline: '',
             expandedLineKeys: new Set(),
+            // Set to true when syncLiveCardLayout() was skipped because the chat
+            // page was hidden; re-synced on the next ouro:page-shown / visibilitychange.
+            _needsLayoutSync: false,
         };
         record.summaryButtonEl?.addEventListener('click', () => {
             setLiveCardExpanded(record, record.root.dataset.expanded !== '1');
@@ -616,6 +619,16 @@ export function initChat({ ws, state, updateUnreadBadge }) {
 
     function syncLiveCardLayout(record) {
         if (!record?.root || !record.summaryButtonEl) return;
+        // If the chat page is not currently active (e.g. user is on another tab
+        // inside the SPA, or the browser tab is backgrounded), getBoundingClientRect()
+        // returns {height:0} and would set minHeight=0, collapsing the card to a
+        // pixel-thin sliver.  Skip the geometry update and flag the record so we
+        // re-sync when the chat page becomes visible again.
+        if (!record.root.closest('.page.active') || document.hidden) {
+            record._needsLayoutSync = true;
+            return;
+        }
+        record._needsLayoutSync = false;
         const summaryHeight = Math.ceil(record.summaryButtonEl.getBoundingClientRect().height || 0);
         const expanded = record.root.dataset.expanded === '1';
         const timelineHeight = expanded
@@ -623,6 +636,22 @@ export function initChat({ ws, state, updateUnreadBadge }) {
             : 0;
         record.root.style.minHeight = `${Math.max(summaryHeight + timelineHeight, 0)}px`;
     }
+
+    // Re-sync layout for all connected live cards when the chat page becomes visible.
+    // Covers two cases: (1) SPA navigation back to Chat tab, (2) browser tab un-hidden.
+    window.addEventListener('ouro:page-shown', (event) => {
+        if (event?.detail?.page !== 'chat') return;
+        for (const record of liveCardRecords.values()) {
+            if (record?.root?.isConnected) syncLiveCardLayout(record);
+        }
+    });
+    document.addEventListener('visibilitychange', () => {
+        if (document.hidden) return;
+        if (state.activePage !== 'chat') return;
+        for (const record of liveCardRecords.values()) {
+            if (record?.root?.isConnected && record._needsLayoutSync) syncLiveCardLayout(record);
+        }
+    });
 
     function buildTimelineItemHtml(item, record) {
         const expandable = isLiveLineExpandable(item);
@@ -990,6 +1019,16 @@ export function initChat({ ws, state, updateUnreadBadge }) {
                 if (!resp.ok) return false;
                 const data = await resp.json();
                 const messages = Array.isArray(data.messages) ? data.messages : [];
+
+                // On a full reconnect / initial page load, server history is the
+                // authoritative source of truth for what cards should be visible.
+                // Clear retiredTaskIds so that previously-cleaned-up cards (e.g.
+                // from the pre-restart session) can be reconstructed from history.
+                // We do this ONLY on a full rebuild (historyLoaded === false) to avoid
+                // resurrecting cards on every routine scheduleHistorySync() call that
+                // fires after each task completion — those incremental syncs must
+                // still respect the retirement state set by the current session.
+                if (!historyLoaded) retiredTaskIds.clear();
 
                 // Two-pass processing: progress/summary first, then regular messages.
                 // This guarantees live cards are built before finishLiveCard() is called,

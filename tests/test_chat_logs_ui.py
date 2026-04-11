@@ -863,3 +863,45 @@ def test_plan_mode_close_on_outside_click():
         "A document click listener must exist to close the dropdown on outside click"
     assert "closeSendDropdown()" in source, \
         "closeSendDropdown must be called from the outside-click handler"
+
+
+def test_live_card_layout_skipped_when_page_hidden():
+    """syncLiveCardLayout must skip geometry update and set _needsLayoutSync when
+    the card is not inside an active page (getBoundingClientRect returns 0 in that
+    case and would collapse the card to a sliver)."""
+    source = _read("web/modules/chat.js")
+    # Guard must use .page.active class (not inline style, which CSS-controlled pages don't set)
+    assert "record.root.closest('.page.active')" in source, \
+        "syncLiveCardLayout must guard against hidden pages via .closest('.page.active')"
+    assert "_needsLayoutSync = true" in source, \
+        "syncLiveCardLayout must flag _needsLayoutSync when the page is hidden"
+    assert "_needsLayoutSync: false" in source, \
+        "createLiveCardRecord must initialise _needsLayoutSync to false"
+
+
+def test_live_card_layout_resynced_on_page_shown():
+    """When the chat page becomes visible (SPA navigation or browser tab), all
+    connected live cards with a stale layout must be re-synced."""
+    source = _read("web/modules/chat.js")
+    assert "ouro:page-shown" in source, \
+        "chat.js must listen for the ouro:page-shown SPA event"
+    # The handler must iterate liveCardRecords and call syncLiveCardLayout
+    assert "event?.detail?.page !== 'chat'" in source, \
+        "ouro:page-shown handler must guard for page === 'chat'"
+    assert "syncLiveCardLayout(record)" in source, \
+        "ouro:page-shown handler must call syncLiveCardLayout for each card"
+    # visibilitychange covers browser-tab switches
+    assert "visibilitychange" in source, \
+        "chat.js must also listen for visibilitychange to re-sync on browser tab return"
+
+
+def test_sync_history_clears_retired_task_ids():
+    """syncHistory must clear retiredTaskIds on a full rebuild (first load / reconnect)
+    so that server-history is authoritative and cards from a previous live session are
+    reconstructed correctly after a restart/reconnect.  The clear must be guarded so
+    that routine incremental syncs (scheduleHistorySync after task done) do NOT resurrect
+    already-retired cards from the current session."""
+    source = _read("web/modules/chat.js")
+    # Must be guarded by !historyLoaded so incremental syncs skip the clear
+    assert "if (!historyLoaded) retiredTaskIds.clear();" in source, \
+        "syncHistory must clear retiredTaskIds only on full rebuild (!historyLoaded)"

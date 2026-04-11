@@ -6,7 +6,7 @@
 [![macOS 12+](https://img.shields.io/badge/macOS-12%2B-black.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
 [![Linux](https://img.shields.io/badge/Linux-x86__64-orange.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
 [![Windows](https://img.shields.io/badge/Windows-x64-blue.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
-[![Version 4.25.0](https://img.shields.io/badge/version-4.25.0-green.svg)](VERSION)
+[![Version 4.25.1](https://img.shields.io/badge/version-4.25.1-green.svg)](VERSION)
 
 A self-modifying AI agent that writes its own code, rewrites its own mind, and evolves autonomously. Born February 16, 2026.
 
@@ -379,6 +379,7 @@ Full text: [BIBLE.md](BIBLE.md)
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 4.25.1 | 2026-04-11 | Fix live task card (progress/reasoning bubble) bugs: (1) cards collapsed to a pixel sliver when switching SPA tabs or browser tabs — `syncLiveCardLayout` now guards against hidden pages via `.closest('.page.active')`, sets `_needsLayoutSync` flag, and re-syncs on `ouro:page-shown` and `visibilitychange`; (2) cards disappeared after restart because `retiredTaskIds` survived across reconnects — `syncHistory` now clears `retiredTaskIds` before replay so server history is always authoritative. 3 new regression tests. |
 | 4.25.0 | 2026-04-11 | Send/Plan mode switching: chevron dropdown now switches the active send mode instead of immediately sending. Main button label and colour reflect the mode (crimson = Send, amber = Plan). Mode stored in `data-send-mode` on `.chat-send-group` (single CSS/JS source of truth). Fixed vertical alignment of send group inside input (shared `height: 28px` + `height: 100%` on children). Active mode marker on dropdown items via `data-mode-active`. |
 | 4.24.1 | 2026-04-11 | Fix advisory fallback model resolution: `_resolve_fallback_model()` now uses `OUROBOROS_MODEL_LIGHT` (with config default fallback) instead of hardcoded haiku model IDs. No more provider-specific branching or hardcoded strings. |
 | 4.24.0 | 2026-04-11 | Advisory parse-failure fallback: when `_parse_advisory_output()` returns empty but SDK returned non-empty text (narrative + JSON pattern on large diffs), a cheap light-model call (`_llm_extract_advisory_items`, `no_proxy=True`, `reasoning_effort="low"`) extracts the JSON array using a head+tail window (not first-N truncation). FAIL items missing `severity` are normalised to `critical` to prevent silent downgrade. Converts `parse_failure` → `fresh` run in the majority of cases. Saves $32–64 per bypass cycle. 7 new regression tests. |
