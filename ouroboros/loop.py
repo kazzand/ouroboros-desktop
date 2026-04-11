@@ -148,11 +148,10 @@ def _emit_checkpoint_event(
     drive_logs: Optional[pathlib.Path],
     data: Dict[str, Any],
 ) -> None:
-    """Emit a task_checkpoint event for observability in the live UI and events.jsonl.
+    """Emit a task_checkpoint event for observability.
 
-    When event_queue is available, emits via _emit_live_log only — the supervisor
-    pipeline persists log events to events.jsonl, so a separate direct append would
-    duplicate the entry. Falls back to direct append only when queue is absent.
+    Routes via the supervisor event queue when available (which persists to
+    events.jsonl). Falls back to direct append when queue is absent.
     """
     from ouroboros.loop_llm_call import _emit_live_log
     payload = {"type": "task_checkpoint", "task_id": task_id, **data}
@@ -177,15 +176,19 @@ def _maybe_inject_self_check(
     task_id: str = "",
     drive_logs: Optional[pathlib.Path] = None,
 ) -> bool:
-    """Inject a soft self-check reminder every REMINDER_INTERVAL rounds.
+    """Inject a freeform self-check reminder every REMINDER_INTERVAL rounds.
 
-    Includes factual tool-call trace (P3 LLM-First: no Python-side classification).
-    Emits a task_checkpoint event for observability in UI and events.jsonl.
+    Asks the LLM to pause and write a brief reflection in free text, then
+    continue with a tool call. No parsing required — the reflection stays
+    in the transcript as natural assistant content (P3 LLM-First, P5 Minimalism).
+
+    Emits a task_checkpoint event for observability.
     Returns True if a checkpoint was injected.
     """
     REMINDER_INTERVAL = 15
     if round_idx <= 1 or round_idx % REMINDER_INTERVAL != 0:
         return False
+
     ctx_tokens = sum(
         estimate_tokens(str(m.get("content", "")))
         if isinstance(m.get("content"), str)
@@ -205,21 +208,22 @@ def _maybe_inject_self_check(
     if tool_trace:
         reminder += f"{tool_trace}\n\n"
     reminder += (
-        "⏸️ PAUSE AND REFLECT before continuing:\n"
-        "1. Am I making real progress, or repeating the same actions?\n"
-        "2. Is my current strategy working? Should I try something different?\n"
-        "3. Is my context bloated with old tool results I no longer need?\n"
-        "   → If yes, call `compact_context` to summarize them selectively.\n"
-        "4. Have I been stuck on the same sub-problem for many rounds?\n"
-        "   → If yes, consider: simplify the approach, skip the sub-problem, or finish with what I have.\n"
-        "5. Should I just STOP and return my best result so far?\n"
-        "6. Multiple REVIEW_BLOCKED results in context? Consider saving WIP\n"
-        "   (git_diff → data_write) and breaking into smaller commits.\n\n"
-        "This is not a hard limit — you decide. But be honest with yourself."
+        "⏸️ PAUSE AND REFLECT before continuing. Write a brief `CHECKPOINT_REFLECTION:` "
+        "in plain text covering:\n"
+        "- What I know for certain about the current state\n"
+        "- The main blocker (or 'none')\n"
+        "- What I'm choosing to do and why\n"
+        "- The very next concrete action\n\n"
+        "Keep it short (4 bullets / ~80 words). "
+        "Then immediately continue with your next tool call in the same response. "
+        "If the task is genuinely complete, give the final answer instead."
     )
 
     messages.append({"role": "system", "content": reminder})
-    emit_progress(f"🔄 Checkpoint {checkpoint_num} at round {round_idx}: ~{ctx_tokens} tokens, ${task_cost:.2f} spent")
+    emit_progress(
+        f"🔄 Checkpoint {checkpoint_num} at round {round_idx}: "
+        f"~{ctx_tokens} tokens, ${task_cost:.2f} spent"
+    )
 
     _emit_checkpoint_event(event_queue, task_id, drive_logs, {
         "checkpoint_number": checkpoint_num,
@@ -230,6 +234,35 @@ def _maybe_inject_self_check(
     })
 
     return True
+
+
+def _emit_checkpoint_reflection_event(
+    content: str,
+    round_idx: int,
+    task_id: str,
+    event_queue: Optional[queue.Queue],
+    drive_logs: Optional[pathlib.Path],
+) -> None:
+    """Emit a task_checkpoint_reflection event with the full assistant content.
+
+    Stores the complete reflection text (no silent truncation, P1 Continuity).
+    Routes via queue when available; falls back to direct file append.
+    """
+    payload = {
+        "type": "task_checkpoint_reflection",
+        "task_id": task_id,
+        "round": round_idx,
+        "reflection": content,
+    }
+    if event_queue is not None:
+        from ouroboros.loop_llm_call import _emit_live_log
+        _emit_live_log(event_queue, payload)
+    elif drive_logs:
+        try:
+            from ouroboros.utils import append_jsonl, utc_now_iso
+            append_jsonl(drive_logs / "events.jsonl", {"ts": utc_now_iso(), **payload})
+        except Exception:
+            pass
 
 
 def _extract_plain_text_from_content(content: Any) -> str:
@@ -537,6 +570,8 @@ def run_llm_loop(
             if _pre_checkpoint_effort is not None:
                 active_effort = _pre_checkpoint_effort
 
+            # Handle model failure — must come BEFORE checkpoint logic so that a
+            # successful fallback response also goes through checkpoint handling.
             if msg is None:
                 fallback_model = os.environ.get("OUROBOROS_MODEL_FALLBACK", "").strip()
                 if not fallback_model or fallback_model == active_model:
@@ -563,6 +598,24 @@ def run_llm_loop(
                         f"both returned no response. Stopping.{_provider_failure_hint(accumulated_usage)} "
                         f"Background consciousness will attempt recovery when the provider is back."
                     ), accumulated_usage, llm_trace
+
+            # On checkpoint rounds: emit the reflection event (full content, no parsing).
+            # If the LLM returned only text (no tool calls), it may be either a reflection
+            # that needs a nudge OR a genuine final answer — treat it as a final answer so
+            # the task can terminate normally on a checkpoint round.  The checkpoint prompt
+            # explicitly says "give the final answer instead" if genuinely complete, so a
+            # text-only response is the intended signal that the task is done.
+            if _checkpoint_injected:
+                raw_content = msg.get("content") or ""
+                tool_calls_cp = msg.get("tool_calls") or []
+                if raw_content:
+                    _emit_checkpoint_reflection_event(
+                        raw_content, round_idx, task_id, event_queue, drive_logs,
+                    )
+                if not tool_calls_cp:
+                    # Text-only on a checkpoint round = task complete (or reflection without
+                    # more work to do). Terminate normally — do not force an extra round.
+                    return _handle_text_response(raw_content, llm_trace, accumulated_usage)
 
             tool_calls = msg.get("tool_calls") or []
             content = msg.get("content")

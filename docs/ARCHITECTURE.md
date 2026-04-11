@@ -1,4 +1,4 @@
-# Ouroboros v4.20.0 — Architecture & Reference
+# Ouroboros v4.21.0 — Architecture & Reference
 
 This document describes every component, page, button, API endpoint, and data flow.
 It is the single source of truth for how the system works. Keep it updated.
@@ -540,15 +540,21 @@ backward compatibility but is not the runtime authority.
   for the real result (hard ceiling: 1800s). This prevents ambiguous "tool timed out, maybe
   still running" states for commit operations.
 - Context compaction kicks in after round 8 (summarizes old tool results)
-- **Loop checkpoint** (`_maybe_inject_self_check`): every 15 rounds, a self-audit message is
+- **Loop checkpoint** (`_maybe_inject_self_check`): every 15 rounds, a freeform self-audit message is
   injected into the transcript. Includes: checkpoint number, round/max, token count, cost so far,
   and a **last-15-tool-call trace** built by `_build_recent_tool_trace` (P3 LLM-First — trace is
-  provided as factual data, the LLM decides if it represents repetition). Emits a `task_checkpoint`
-  event via `_emit_live_log` → `event_queue` → `supervisor/events.py::_handle_log_event`, which
-  both pushes the event to the live UI bridge AND persists it to `logs/events.jsonl` for durable
-  postmortem analysis. When `event_queue` is `None` (direct/test path), `_emit_checkpoint_event`
-  falls back to direct `append_jsonl`. Passes `event_queue`, `task_id`, and `drive_logs` from
-  `run_llm_loop` for observability.
+  provided as factual data, the LLM decides if it represents repetition). The checkpoint prompt
+  asks the LLM to write a brief `CHECKPOINT_REFLECTION:` in plain text (4 bullets / ~80 words),
+  then continue with a tool call. **No parsing** — the reflection stays in the transcript as
+  natural assistant content (P3 LLM-First, P5 Minimalism). If the LLM returns text-only (no tool
+  calls) on a checkpoint round, the task terminates normally — the text-only response is treated
+  as a final answer, matching the checkpoint prompt instruction "give the final answer instead."
+  A `task_checkpoint` event is emitted via
+  `_emit_live_log` → `event_queue` → `supervisor/events.py::_handle_log_event`, which pushes it
+  to the live UI bridge and persists it to `logs/events.jsonl`. After the LLM responds on a
+  checkpoint round, `_emit_checkpoint_reflection_event` emits a `task_checkpoint_reflection` event
+  with the full assistant content (no truncation, P1 Continuity). When `event_queue` is `None`
+  (direct/test path), both event types fall back to direct `append_jsonl`.
 
 ### Claude runtime (gateways/claude_code.py + platform_layer.py)
 
