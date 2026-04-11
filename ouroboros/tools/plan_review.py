@@ -303,10 +303,14 @@ async def _query_reviewer(
                 "tokens_in": 0, "tokens_out": 0,
             }
         except Exception as e:
-            # Preserve full exception text — truncation here loses diagnostic provenance.
+            # Produce a human-readable error message that distinguishes the most
+            # common failure modes, especially the hard-to-diagnose JSONDecodeError
+            # that surfaces when a provider returns a non-JSON HTTP body (e.g. a
+            # 413/429/500 error page) for an oversized prompt.
+            error_msg = _classify_reviewer_error(e, model)
             return {
                 "model": model, "request_model": model,
-                "text": "", "error": str(e),
+                "text": "", "error": error_msg,
                 "tokens_in": 0, "tokens_out": 0,
             }
 
@@ -525,6 +529,63 @@ def _build_user_content(
 # ------------------------------------------------------------------ #
 # Helpers
 # ------------------------------------------------------------------ #
+
+def _classify_reviewer_error(exc: BaseException, model: str) -> str:
+    """Return a human-readable error string for a reviewer failure.
+
+    Distinguishes common failure modes so the agent can act on the error
+    rather than staring at a raw ``JSONDecodeError`` or a cryptic SDK string.
+
+    Categories:
+    - Oversized prompt (JSONDecodeError / json.decoder.JSONDecodeError):
+      Providers like OpenRouter return an HTML or plain-text error page when
+      the prompt is too large.  The OpenAI SDK tries to ``json.loads`` that
+      response body and raises JSONDecodeError.  The root cause is the prompt
+      size, not a JSON formatting problem.
+    - Rate limit / quota: 429 responses from the provider.
+    - Bad request: 400 from the provider (often prompt too large for that model).
+    - API connection error: network-level failure.
+    - Fallback: full repr so nothing is silently swallowed.
+    """
+    import json
+
+    exc_type = type(exc).__name__
+    exc_str = str(exc)
+
+    # JSONDecodeError: almost always "provider returned non-JSON error body".
+    if isinstance(exc, json.JSONDecodeError):
+        return (
+            f"API error (provider returned non-JSON response body — likely oversized prompt "
+            f"or HTTP error from {model}): {exc_str}"
+        )
+
+    # OpenAI SDK APIError hierarchy — import lazily so the module still loads
+    # even if openai is not installed.
+    try:
+        from openai import (
+            APIConnectionError,
+            APIStatusError,
+            BadRequestError,
+            RateLimitError,
+        )
+        if isinstance(exc, RateLimitError):
+            return f"Rate limit / quota exceeded for {model} (HTTP 429): {exc_str}"
+        if isinstance(exc, BadRequestError):
+            return (
+                f"Bad request for {model} (HTTP 400 — prompt may be too large "
+                f"for this model's context window): {exc_str}"
+            )
+        if isinstance(exc, APIConnectionError):
+            return f"API connection error for {model} (network failure): {exc_str}"
+        if isinstance(exc, APIStatusError):
+            status = getattr(exc, "status_code", "?")
+            return f"API status error {status} for {model}: {exc_str}"
+    except ImportError:
+        pass
+
+    # Catch-all: preserve full repr for unknown exception types.
+    return f"{exc_type}: {exc_str}"
+
 
 def _parse_aggregate_signal(text: str) -> str:
     """Extract the aggregate signal from a reviewer's response.

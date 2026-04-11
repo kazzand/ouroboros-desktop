@@ -320,5 +320,71 @@ class TestPlanReviewToolRegistration(unittest.TestCase):
         self.assertIn("code", desc)
 
 
+class TestClassifyReviewerError(unittest.TestCase):
+    """Tests for _classify_reviewer_error — readable error messages for reviewer failures."""
+
+    def setUp(self):
+        from ouroboros.tools.plan_review import _classify_reviewer_error
+        self.classify = _classify_reviewer_error
+
+    def test_json_decode_error_mentions_oversized_prompt(self):
+        """JSONDecodeError → message explains the likely oversized-prompt root cause."""
+        import json
+        exc = json.JSONDecodeError("Expecting value", "", 0)
+        msg = self.classify(exc, "openai/gpt-5.4")
+        self.assertIn("non-JSON response body", msg)
+        self.assertIn("oversized prompt", msg)
+        self.assertIn("openai/gpt-5.4", msg)
+
+    def test_json_decode_error_does_not_say_json_formatting_problem(self):
+        """The user should not think it's a JSON format issue in our code."""
+        import json
+        exc = json.JSONDecodeError("Expecting value", "doc", 902)
+        msg = self.classify(exc, "google/gemini-3.1-pro-preview")
+        # Should NOT say things like "JSON format" or "checklist formatting"
+        self.assertNotIn("format", msg.lower().replace("non-JSON", ""))
+
+    def test_json_decode_error_realistic_message(self):
+        """Reproduces the exact JSONDecodeError seen in production logs."""
+        import json
+        # Exact args from the production failure:
+        # "Expecting value: line 165 column 1 (char 902)"
+        exc = json.JSONDecodeError("Expecting value", "line 165 column 1 (char 902)", 0)
+        msg = self.classify(exc, "openai/gpt-5.4")
+        self.assertIn("openai/gpt-5.4", msg)
+        self.assertIn("non-JSON", msg)
+        self.assertIn("oversized", msg)
+        # The raw JSONDecodeError text should not be the ONLY content
+        self.assertNotEqual(msg, str(exc))
+
+    def test_generic_exception_preserves_type_and_message(self):
+        """Unknown exception types fall back to 'TypeName: message' format."""
+        exc = ValueError("something went wrong")
+        msg = self.classify(exc, "some/model")
+        self.assertIn("ValueError", msg)
+        self.assertIn("something went wrong", msg)
+
+    def test_timeout_error_fallback(self):
+        """TimeoutError (if not caught before) is reported with its type."""
+        exc = TimeoutError("connection timed out")
+        msg = self.classify(exc, "my/model")
+        self.assertIn("TimeoutError", msg)
+        self.assertIn("connection timed out", msg)
+
+    def test_model_name_always_included(self):
+        """Model name should always appear in error message for traceability."""
+        import json
+        exc = json.JSONDecodeError("Expecting value", "", 0)
+        msg = self.classify(exc, "very-specific/model-id-xyz")
+        self.assertIn("very-specific/model-id-xyz", msg)
+
+    def test_empty_exception_message_does_not_crash(self):
+        """Exception with empty message string should not crash the helper."""
+        exc = Exception("")
+        msg = self.classify(exc, "test/model")
+        self.assertIsInstance(msg, str)
+        self.assertGreater(len(msg), 0)
+
+
 if __name__ == "__main__":
     unittest.main()
