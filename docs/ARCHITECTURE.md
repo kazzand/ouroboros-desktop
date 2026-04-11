@@ -1,4 +1,4 @@
-# Ouroboros v4.27.3 — Architecture & Reference
+# Ouroboros v4.28.0 — Architecture & Reference
 
 This document describes every component, page, button, API endpoint, and data flow.
 It is the single source of truth for how the system works. Keep it updated.
@@ -302,7 +302,7 @@ The Dashboard tab has been removed. Its functionality is now distributed:
 - **Review Enforcement**: `Advisory` or `Blocking` for pre-commit review behavior.
   Backed by `OUROBOROS_REVIEW_ENFORCEMENT`. Review always runs in both modes.
 - **Advanced**: local model runtime, max workers, total budget, per-task soft threshold, tool timeout, soft/hard timeout, web search model, review enforcement, legacy compatibility, and reset controls.
-- **Local Model Runtime**: source, GGUF filename, port, GPU layers, context length, chat format, start/stop/test buttons, live local-model status, real download progress bar (updates via `download_progress` from `/api/local-model/status`), and an **Install Local Runtime** button (hidden until runtime is missing). The Start button performs a preflight check via `/api/local-model/start` before downloading; on a `runtime_missing` (HTTP 412) response it surfaces the install button and a human-readable hint instead of a raw traceback. After install completes (`runtime_status == "install_ok"`), the start flow resumes automatically if a source was configured.
+- **Local Model Runtime**: source, GGUF filename, port, GPU layers, context length, chat format, start/stop/test buttons, live local-model status, real download progress bar (updates via `download_progress` from `/api/local-model/status`), and an **Install Local Runtime** button (hidden until runtime is missing). The Start button performs a preflight check via `/api/local-model/start` before downloading; on a `runtime_missing` (HTTP 412) response it surfaces the install button and a human-readable hint instead of a raw traceback. After install completes (`runtime_status == "install_ok"`), the start flow resumes automatically if a source was configured. `LOCAL_MODEL_FILENAME` now accepts subfolder paths (`quant/model.gguf`) and split GGUF patterns (`quant/model-00001-of-00003.gguf`); all shards are downloaded automatically and the server is started with the first shard.
 - **Telegram**: Bot Token and primary chat id. If no primary chat id is pinned, the bridge binds to the first active Telegram chat and keeps replies attached there.
 - **GitHub**: Token + Repo (for remote sync).
 - **Save Settings** button → POST `/api/settings`. Applies to env immediately.
@@ -536,6 +536,7 @@ backward compatibility but is not the runtime authority.
 - `set_tool_timeout` persists `OUROBOROS_TOOL_TIMEOUT_SEC` to `settings.json` and hot-applies it without restart.
 - `/api/claude-code/status` returns app-managed Claude runtime status (SDK version, CLI path/version, app-managed flag, legacy detection, API key readiness, last stderr on failure); `/api/claude-code/install` repairs/updates the app-managed runtime.
 - Desktop onboarding shows Claude runtime status and repair action (the runtime is managed automatically by the app).
+- **Local model tool-call parsing** (`LLMClient._parse_tool_calls_from_content`): when a local model returns text instead of structured `tool_calls`, this static method detects `<tool_call>{"name":...,"arguments":...}</tool_call>` XML blocks and converts them to the standard tool-call format. Safety guard: response must consist *solely* of one or more `<tool_call>` blocks — mixed prose is rejected. **Qwen3 think mode** (v4.28.0): `<think>...</think>` and `<reasoning>...</reasoning>` wrappers are stripped before the full-match safety guard; the extracted reasoning text is preserved in `msg["content"]` so `loop.py` can emit it as a progress note. Arbitrary prose without a think wrapper is still rejected, keeping the false-positive rate low. Double-brace `{{...}}` Qwen Jinja2 template artefacts are also handled.
 - **`seal_task_transcript`**: called after compaction and before each `call_llm_with_retry`. Marks one stable tool-result boundary with `cache_control: ephemeral` to improve Anthropic prompt cache hits. Reverts all previous seals first so compaction always sees plain strings. Provider handling: OpenRouter (Anthropic models) passes list content blocks through as-is; direct Anthropic path preserves list content for `tool_result` (Anthropic API supports content blocks there); `_strip_cache_control` in `llm.py` now flattens tool-role list content back to a plain string for OpenAI, OpenAI-compatible, Cloud.ru, and local providers.
 - **Reviewed mutative tool timeout handling** (v4.9.0): `repo_commit` and `repo_write_commit`
   are classified as `REVIEWED_MUTATIVE_TOOLS`. When they exceed the configured tool timeout,
@@ -1117,7 +1118,7 @@ Settings file: `~/Ouroboros/data/settings.json`. File-locked for concurrent acce
 | OUROBOROS_SOFT_TIMEOUT_SEC | 600 | Soft timeout warning (10 min) |
 | OUROBOROS_HARD_TIMEOUT_SEC | 1800 | Hard timeout kill (30 min) |
 | LOCAL_MODEL_SOURCE | "" | HuggingFace repo for local model |
-| LOCAL_MODEL_FILENAME | "" | GGUF filename within repo |
+| LOCAL_MODEL_FILENAME | "" | GGUF filename within repo. Accepts subfolder paths (`quant/model.gguf`) and split GGUF patterns (`quant/model-00001-of-00003.gguf`). All shards are downloaded automatically; specify the first shard. |
 | LOCAL_MODEL_CONTEXT_LENGTH | 16384 | Context window for local model |
 | LOCAL_MODEL_N_GPU_LAYERS | 0 | GPU layers (-1=all, 0=CPU/mmap) |
 | USE_LOCAL_MAIN | false | Route main model to local server |

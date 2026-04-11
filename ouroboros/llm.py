@@ -697,6 +697,57 @@ class LLMClient:
         return msg, usage
 
     @staticmethod
+    def _strip_reasoning_wrappers(text: str):
+        """Remove leading reasoning wrapper tags and return (cleaned_text, reasoning_text).
+
+        Strips ``<think>...</think>`` and ``<reasoning>...</reasoning>`` blocks
+        (Qwen3 style) from the **outer envelope** of *text* — i.e. from the
+        portion that precedes the first ``<tool_call>`` block.  This avoids
+        accidentally altering JSON payloads inside ``<tool_call>...</tool_call>``
+        that may themselves contain literal ``<think>`` or ``<reasoning>`` text
+        as argument values.
+
+        Strategy:
+        1. Split *text* at the first ``<tool_call>`` occurrence.
+        2. Strip reasoning wrappers only from the prefix (part before the first
+           ``<tool_call>``).
+        3. Concatenate the stripped prefix with the unchanged tool-call section.
+
+        Returns:
+            (cleaned_text, reasoning_text) where:
+              - cleaned_text is *text* with reasoning wrappers removed from the
+                prefix only, surrounding whitespace stripped.
+              - reasoning_text is the concatenated inner content of all reasoning
+                blocks found in the prefix (stripped), or an empty string when
+                no blocks were found.
+        """
+        # Split at first <tool_call> so we never touch JSON inside tool payloads.
+        tool_call_start = re.search(r"<tool_call\b", text, re.IGNORECASE)
+        if tool_call_start:
+            prefix = text[: tool_call_start.start()]
+            suffix = text[tool_call_start.start():]
+        else:
+            prefix = text
+            suffix = ""
+
+        reasoning_parts: list = []
+
+        def _extract(tag: str, s: str) -> str:
+            pattern = re.compile(
+                r"<" + re.escape(tag) + r">(.*?)</" + re.escape(tag) + r">",
+                re.DOTALL | re.IGNORECASE,
+            )
+            inner_texts = pattern.findall(s)
+            reasoning_parts.extend(p.strip() for p in inner_texts if p.strip())
+            return pattern.sub("", s)
+
+        cleaned_prefix = _extract("think", prefix)
+        cleaned_prefix = _extract("reasoning", cleaned_prefix)
+
+        combined = (cleaned_prefix.strip() + ("\n" if cleaned_prefix.strip() and suffix else "") + suffix).strip()
+        return combined, "\n\n".join(reasoning_parts)
+
+    @staticmethod
     def _parse_tool_calls_from_content(
         msg: Dict[str, Any],
         allowed_tool_names: Optional[Set[str]] = None,
@@ -705,15 +756,34 @@ class LLMClient:
 
         Works around llama-cpp-python not parsing Qwen/Hermes-style tool calls
         (https://github.com/abetlen/llama-cpp-python/issues/1784).
+
+        Qwen3 models with ``enable_thinking=True`` (default) wrap their chain-of-
+        thought in ``<think>...</think>`` before emitting the actual ``<tool_call>``
+        block.  This method strips the reasoning wrapper first, then applies the
+        strict full-match safety guard so responses that contain genuine prose
+        alongside tool call text are still rejected.
+
+        Contract: when tool calls are successfully parsed, ``msg["content"]`` is
+        set to the extracted reasoning text (may be an empty string).  Callers in
+        ``loop.py`` check ``content`` truthiness — non-empty reasoning text will
+        surface as a progress/reasoning note in the UI, which is the intended
+        behaviour for thinking models.
         """
         content = str(msg.get("content", "") or "")
-        stripped = content.strip()
-        if not stripped:
+        stripped_raw = content.strip()
+        if not stripped_raw:
             return msg
 
-        # Safety: only upgrade the response when it consists solely of
-        # one or more <tool_call> blocks. If the model mixed prose with
-        # examples or explanations, leave it as plain text.
+        # Phase 1: strip known reasoning wrappers (<think>, <reasoning>).
+        # Only these explicit tag pairs are removed; arbitrary prose is left.
+        stripped, reasoning = LLMClient._strip_reasoning_wrappers(stripped_raw)
+        if not stripped:
+            # Content was only reasoning text — nothing actionable.
+            return msg
+
+        # Phase 2: Safety guard — only upgrade the response when the remaining
+        # text consists solely of one or more <tool_call> blocks.  Mixed prose
+        # (without a reasoning wrapper) is left as plain text.
         full_pattern = re.compile(
             r"^(?:\s*<tool_call>\s*\{.*?\}\s*</tool_call>\s*)+$",
             re.DOTALL,
@@ -764,7 +834,11 @@ class LLMClient:
 
         msg = dict(msg)
         msg["tool_calls"] = tool_calls
-        msg["content"] = None
+        # Preserve reasoning text in content so loop.py can emit it as a
+        # progress/reasoning note (P1 Continuity).  Empty string when no think
+        # wrapper was present (original behaviour: content was None in that case,
+        # but an empty string is equally falsy for callers that check truthiness).
+        msg["content"] = reasoning or None
         log.info("Parsed %d local tool call(s) from text output", len(tool_calls))
         return msg
 

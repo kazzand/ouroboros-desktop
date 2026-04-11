@@ -242,6 +242,76 @@ class LocalModelManager:
             log.error("llama-cpp-python install exception: %s", exc)
 
     # ------------------------------------------------------------------
+    # Download helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _normalize_hf_filename(filename: str):
+        """Split a HuggingFace filename into (subfolder, basename).
+
+        Handles:
+        - Simple filename: "model.gguf" → (None, "model.gguf")
+        - Subfolder path: "quant/model.gguf" → ("quant", "model.gguf")
+        - Subfolder + split: "quant/model-00001-of-00003.gguf" → ("quant", "model-00001-of-00003.gguf")
+        """
+        filename = filename.strip()
+        if "/" in filename:
+            subfolder, basename = filename.rsplit("/", 1)
+            return subfolder.strip() or None, basename.strip()
+        return None, filename
+
+    @staticmethod
+    def _detect_shard_info(basename: str):
+        """Detect split GGUF shard metadata from a filename.
+
+        Returns ``(prefix, shard_num, total_shards, shard_width, total_width, suffix)``
+        if the basename matches the ``-NNNNN-of-MMMMM.gguf`` pattern, else None.
+        The ``shard_width`` and ``total_width`` fields preserve the **original digit
+        widths** used in the filename so ``_all_shard_basenames`` can reconstruct
+        sibling names without introducing a width mismatch.
+
+        Examples:
+            "model-00001-of-00003.gguf" → ("model", 1, 3, 5, 5, ".gguf")
+            "model-01-of-03.gguf"       → ("model", 1, 3, 2, 2, ".gguf")
+            "model.gguf"               → None
+        """
+        import re
+        m = re.match(r"^(.*?)-(\d+)-of-(\d+)(\.gguf)$", basename, re.IGNORECASE)
+        if m:
+            prefix, shard_str, total_str, suffix = m.groups()
+            shard_num = int(shard_str)
+            total_shards = int(total_str)
+            if total_shards >= 1 and 1 <= shard_num <= total_shards:
+                return prefix, shard_num, total_shards, len(shard_str), len(total_str), suffix
+        return None
+
+    @staticmethod
+    def _all_shard_basenames(
+        prefix: str,
+        total_shards: int,
+        suffix: str,
+        shard_width: int = 5,
+        total_width: int = 5,
+    ):
+        """Yield all shard basenames for a split GGUF in order.
+
+        ``shard_width`` and ``total_width`` must match the widths of the digit
+        fields in the original shard filename (as returned by ``_detect_shard_info``)
+        so that reconstructed sibling names are identical to the actual files on
+        HuggingFace.
+
+        Examples::
+
+            _all_shard_basenames("model", 3, ".gguf", 5, 5)
+            → "model-00001-of-00003.gguf", "model-00002-of-00003.gguf", ...
+
+            _all_shard_basenames("model", 3, ".gguf", 2, 2)
+            → "model-01-of-03.gguf", "model-02-of-03.gguf", ...
+        """
+        for i in range(1, total_shards + 1):
+            yield f"{prefix}-{str(i).zfill(shard_width)}-of-{str(total_shards).zfill(total_width)}{suffix}"
+
+    # ------------------------------------------------------------------
     # Download
     # ------------------------------------------------------------------
 
@@ -257,10 +327,16 @@ class LocalModelManager:
             source: HF repo ID (e.g. "bartowski/Llama-3.3-70B-Instruct-GGUF")
                     or absolute path to a .gguf file.
             filename: Specific file within the HF repo (required for HF repos).
+                      Supports subfolder paths (e.g. "quant/model.gguf") and
+                      split GGUF patterns (e.g. "quant/model-00001-of-00003.gguf").
+                      When a split GGUF is detected, all shards are downloaded
+                      automatically and the path to the first shard is returned.
+                      If a non-first shard is specified, a ValueError is raised.
             progress_cb: Optional callback(fraction) for download progress.
 
         Returns:
-            Absolute path to the downloaded/resolved .gguf file.
+            Absolute path to the downloaded/resolved .gguf file (first shard
+            for split GGUFs).
 
         Note:
             This method is focused on artifact resolution/download only.
@@ -290,36 +366,81 @@ class LocalModelManager:
         if not filename:
             raise ValueError(
                 "filename is required when source is a HuggingFace repo ID. "
-                "Example: filename='model-Q4_K_M.gguf'"
+                "Example: filename='model-Q4_K_M.gguf' or 'quant/model-00001-of-00003.gguf'"
             )
+
+        # Normalize to (subfolder, basename) — handles both subfolder paths and
+        # flat filenames uniformly before shard detection.
+        subfolder, basename = self._normalize_hf_filename(filename)
+        shard_info = self._detect_shard_info(basename)
+
+        if shard_info is not None:
+            _prefix, shard_num, total_shards, _shard_w, _total_w, _suffix = shard_info
+            if shard_num != 1:
+                first_basename = next(self._all_shard_basenames(_prefix, total_shards, _suffix, _shard_w, _total_w))
+                first_filename = f"{subfolder}/{first_basename}" if subfolder else first_basename
+                raise ValueError(
+                    f"Split GGUF: shard {shard_num} of {total_shards} specified. "
+                    f"Please use the first shard to start the server. "
+                    f"Change filename to: '{first_filename}'"
+                )
 
         self._status = "downloading"
         self._download_progress = 0.0
         log.info("Downloading %s/%s from HuggingFace...", source, filename)
 
-        # Build a tqdm subclass that forwards progress to our callback and manager
+        # Build a tqdm subclass that forwards shard-aware global progress
+        # to our callback and manager.
+        # For split GGUFs the global fraction is:
+        #   (shard_index - 1 + per_file_fraction) / total_shards
         manager_ref = self
 
-        class _ProgressTqdm(_base_tqdm):
-            def update(self, n=1):
-                result = super().update(n)
-                try:
-                    if self.total and self.total > 0:
-                        fraction = min(self.n / self.total, 1.0)
-                        manager_ref._download_progress = fraction
-                        if progress_cb is not None:
-                            progress_cb(fraction)
-                except Exception:
-                    pass
-                return result
+        def _make_progress_tqdm(shard_index: int, total_shards_count: int):
+            class _ProgressTqdm(_base_tqdm):
+                def update(self, n=1):
+                    result = super().update(n)
+                    try:
+                        if self.total and self.total > 0:
+                            file_fraction = min(self.n / self.total, 1.0)
+                            global_fraction = (shard_index - 1 + file_fraction) / total_shards_count
+                            manager_ref._download_progress = global_fraction
+                            if progress_cb is not None:
+                                progress_cb(global_fraction)
+                    except Exception:
+                        pass
+                    return result
+            return _ProgressTqdm
+
+        def _download_one(basename_: str, subfolder_: Optional[str], shard_idx: int, total: int) -> str:
+            """Download one file; return the local path."""
+            return hf_hub_download(
+                repo_id=source,
+                filename=basename_,
+                subfolder=subfolder_ or None,
+                resume_download=True,
+                tqdm_class=_make_progress_tqdm(shard_idx, total),
+            )
 
         try:
-            path = hf_hub_download(
-                repo_id=source,
-                filename=filename,
-                resume_download=True,
-                tqdm_class=_ProgressTqdm,
-            )
+            if shard_info is not None:
+                # Split GGUF: download all shards, return path of the first
+                _prefix, _shard_num, total_shards, _shard_w, _total_w, _suffix = shard_info
+                first_path: Optional[str] = None
+                for idx, shard_basename in enumerate(
+                    self._all_shard_basenames(_prefix, total_shards, _suffix, _shard_w, _total_w), start=1
+                ):
+                    log.info(
+                        "Downloading shard %d/%d: %s/%s",
+                        idx, total_shards, subfolder or "", shard_basename,
+                    )
+                    p = _download_one(shard_basename, subfolder, idx, total_shards)
+                    if idx == 1:
+                        first_path = p
+                path = first_path  # type: ignore[assignment]
+            else:
+                # Single file (with optional subfolder)
+                path = _download_one(basename, subfolder, 1, 1)
+
             self._download_progress = 1.0
             if progress_cb:
                 progress_cb(1.0)

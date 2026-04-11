@@ -193,7 +193,8 @@ class TestDownloadProgressCallback(unittest.TestCase):
         progress_values = []
 
         # Simulate hf_hub_download calling tqdm update
-        def fake_hf_hub_download(repo_id, filename, resume_download, tqdm_class):
+        def fake_hf_hub_download(repo_id, filename, resume_download=True,
+                                 tqdm_class=None, subfolder=None):
             # Simulate progress updates
             bar = tqdm_class(total=100)
             bar.update(50)
@@ -448,6 +449,298 @@ class TestGetInstallCommand(unittest.TestCase):
              patch("ouroboros.local_model.IS_WINDOWS", False):
             env = _get_install_env()
         self.assertNotIn("CMAKE_ARGS", env)
+
+
+class TestNormalizeHfFilename(unittest.TestCase):
+    """Tests for LocalModelManager._normalize_hf_filename."""
+
+    def _mgr(self):
+        from ouroboros.local_model import LocalModelManager
+        return LocalModelManager
+
+    def test_simple_filename(self):
+        cls = self._mgr()
+        subfolder, basename = cls._normalize_hf_filename("model.gguf")
+        self.assertIsNone(subfolder)
+        self.assertEqual(basename, "model.gguf")
+
+    def test_subfolder_path(self):
+        cls = self._mgr()
+        subfolder, basename = cls._normalize_hf_filename("UD-Q5_K_XL/model.gguf")
+        self.assertEqual(subfolder, "UD-Q5_K_XL")
+        self.assertEqual(basename, "model.gguf")
+
+    def test_subfolder_plus_split(self):
+        cls = self._mgr()
+        subfolder, basename = cls._normalize_hf_filename(
+            "UD-Q5_K_XL/Qwen3.5-00001-of-00003.gguf"
+        )
+        self.assertEqual(subfolder, "UD-Q5_K_XL")
+        self.assertEqual(basename, "Qwen3.5-00001-of-00003.gguf")
+
+    def test_strips_whitespace(self):
+        cls = self._mgr()
+        subfolder, basename = cls._normalize_hf_filename("  subdir/model.gguf  ")
+        self.assertEqual(subfolder, "subdir")
+        self.assertEqual(basename, "model.gguf")
+
+
+class TestDetectShardInfo(unittest.TestCase):
+    """Tests for LocalModelManager._detect_shard_info."""
+
+    def _cls(self):
+        from ouroboros.local_model import LocalModelManager
+        return LocalModelManager
+
+    def test_detects_split_gguf(self):
+        result = self._cls()._detect_shard_info("model-00001-of-00003.gguf")
+        self.assertIsNotNone(result)
+        prefix, shard_num, total_shards, shard_w, total_w, suffix = result
+        self.assertEqual(prefix, "model")
+        self.assertEqual(shard_num, 1)
+        self.assertEqual(total_shards, 3)
+        self.assertEqual(shard_w, 5)
+        self.assertEqual(total_w, 5)
+        self.assertEqual(suffix, ".gguf")
+
+    def test_detects_non_first_shard(self):
+        result = self._cls()._detect_shard_info("model-00003-of-00003.gguf")
+        self.assertIsNotNone(result)
+        _, shard_num, total_shards, _sw, _tw, _ = result
+        self.assertEqual(shard_num, 3)
+        self.assertEqual(total_shards, 3)
+
+    def test_degenerate_single_shard(self):
+        result = self._cls()._detect_shard_info("model-00001-of-00001.gguf")
+        self.assertIsNotNone(result)
+        _, shard_num, total_shards, _sw, _tw, _ = result
+        self.assertEqual(shard_num, 1)
+        self.assertEqual(total_shards, 1)
+
+    def test_non_split_filename_returns_none(self):
+        self.assertIsNone(self._cls()._detect_shard_info("model-Q4_K_M.gguf"))
+        self.assertIsNone(self._cls()._detect_shard_info("model.gguf"))
+
+    def test_case_insensitive(self):
+        result = self._cls()._detect_shard_info("model-00001-of-00002.GGUF")
+        self.assertIsNotNone(result)
+
+    def test_detect_preserves_non_standard_width(self):
+        """2-digit width must be preserved, not normalized to 5."""
+        result = self._cls()._detect_shard_info("model-01-of-03.gguf")
+        self.assertIsNotNone(result)
+        prefix, shard_num, total, shard_w, total_w, suffix = result
+        self.assertEqual(shard_num, 1)
+        self.assertEqual(total, 3)
+        self.assertEqual(shard_w, 2, "original shard digit width must be preserved")
+        self.assertEqual(total_w, 2, "original total digit width must be preserved")
+
+
+class TestAllShardBasenames(unittest.TestCase):
+    """Tests for LocalModelManager._all_shard_basenames."""
+
+    def _cls(self):
+        from ouroboros.local_model import LocalModelManager
+        return LocalModelManager
+
+    def test_generates_all_shards(self):
+        shards = list(self._cls()._all_shard_basenames("model", 3, ".gguf", 5, 5))
+        self.assertEqual(len(shards), 3)
+        self.assertEqual(shards[0], "model-00001-of-00003.gguf")
+        self.assertEqual(shards[1], "model-00002-of-00003.gguf")
+        self.assertEqual(shards[2], "model-00003-of-00003.gguf")
+
+    def test_single_shard(self):
+        shards = list(self._cls()._all_shard_basenames("model", 1, ".gguf", 5, 5))
+        self.assertEqual(shards, ["model-00001-of-00001.gguf"])
+
+    def test_non_standard_width_preserved(self):
+        """2-digit width shards reconstruct with the same width."""
+        shards = list(self._cls()._all_shard_basenames("model", 3, ".gguf", 2, 2))
+        self.assertEqual(shards, [
+            "model-01-of-03.gguf",
+            "model-02-of-03.gguf",
+            "model-03-of-03.gguf",
+        ])
+
+    def test_defaults_to_5_width(self):
+        """Default shard/total width is 5 (backward compat)."""
+        shards = list(self._cls()._all_shard_basenames("m", 2, ".gguf"))
+        self.assertEqual(shards[0], "m-00001-of-00002.gguf")
+
+
+class TestDownloadModelSplitGGUF(unittest.TestCase):
+    """Tests for LocalModelManager.download_model with split and subfolder GGUFs."""
+
+    def _make_mgr(self):
+        from ouroboros.local_model import LocalModelManager
+        return LocalModelManager()
+
+    def test_non_first_shard_raises_value_error(self):
+        mgr = self._make_mgr()
+        mock_hf = MagicMock()
+        with patch.dict("sys.modules", {"huggingface_hub": mock_hf,
+                                        "tqdm": MagicMock(), "tqdm.auto": MagicMock()}):
+            mock_hf.hf_hub_download = MagicMock(return_value="/tmp/model.gguf")
+            # Simulate "from huggingface_hub import hf_hub_download" in the method
+            import builtins
+            real_import = builtins.__import__
+
+            def fake_import(name, *args, **kwargs):
+                if name == "huggingface_hub":
+                    return mock_hf
+                if name == "tqdm.auto":
+                    m = MagicMock()
+                    m.tqdm = MagicMock
+                    return m
+                return real_import(name, *args, **kwargs)
+
+            with patch("builtins.__import__", side_effect=fake_import):
+                with self.assertRaises(ValueError) as ctx:
+                    mgr.download_model("owner/repo", "UD-Q5/model-00002-of-00003.gguf")
+        self.assertIn("first shard", str(ctx.exception))
+        self.assertIn("00001", str(ctx.exception))
+
+    def test_normalize_helpers_combined(self):
+        """Verify that subfolder + split shard normalizes correctly together."""
+        from ouroboros.local_model import LocalModelManager
+        subfolder, basename = LocalModelManager._normalize_hf_filename(
+            "UD-Q5_K_XL/Qwen3.5-122B-00001-of-00003.gguf"
+        )
+        self.assertEqual(subfolder, "UD-Q5_K_XL")
+        shard_info = LocalModelManager._detect_shard_info(basename)
+        self.assertIsNotNone(shard_info)
+        prefix, shard_num, total_shards, shard_w, total_w, suffix = shard_info
+        self.assertEqual(shard_num, 1)
+        self.assertEqual(total_shards, 3)
+        # Generate all shard basenames and verify they all share the subfolder
+        shards = list(LocalModelManager._all_shard_basenames(prefix, total_shards, suffix, shard_w, total_w))
+        self.assertEqual(len(shards), 3)
+        self.assertTrue(shards[0].endswith("-00001-of-00003.gguf"))
+        self.assertTrue(shards[2].endswith("-00003-of-00003.gguf"))
+
+    def test_download_split_gguf_downloads_all_shards(self):
+        """All shards are downloaded; first shard path is returned."""
+        from ouroboros.local_model import LocalModelManager
+        mgr = LocalModelManager()
+        downloaded_files = []
+        expected_paths = [
+            "/cache/model-00001-of-00002.gguf",
+            "/cache/model-00002-of-00002.gguf",
+        ]
+
+        import builtins
+        real_import = builtins.__import__
+
+        def fake_hf_hub_download(repo_id, filename, subfolder=None, resume_download=True,
+                                 tqdm_class=None):
+            idx = len(downloaded_files)
+            downloaded_files.append((repo_id, filename, subfolder))
+            return expected_paths[idx]
+
+        def fake_import(name, *args, **kwargs):
+            if name == "huggingface_hub":
+                mod = MagicMock()
+                mod.hf_hub_download = fake_hf_hub_download
+                return mod
+            if name == "tqdm.auto":
+                m = MagicMock()
+                m.tqdm = MagicMock
+                return m
+            return real_import(name, *args, **kwargs)
+
+        with patch("builtins.__import__", side_effect=fake_import):
+            result = mgr.download_model("owner/repo", "model-00001-of-00002.gguf")
+
+        self.assertEqual(result, expected_paths[0])
+        self.assertEqual(len(downloaded_files), 2)
+        self.assertEqual(downloaded_files[0][1], "model-00001-of-00002.gguf")
+        self.assertEqual(downloaded_files[1][1], "model-00002-of-00002.gguf")
+
+    def test_download_split_gguf_global_progress_fractions(self):
+        """Progress callback receives correct global fractions across shards."""
+        from ouroboros.local_model import LocalModelManager
+        mgr = LocalModelManager()
+        progress_values = []
+        call_count = [0]
+
+        import builtins
+        real_import = builtins.__import__
+
+        class FakeTqdm:
+            def __init__(self, *a, **kw):
+                pass
+            def __enter__(self):
+                return self
+            def __exit__(self, *a):
+                pass
+
+        captured_tqdm_classes = []
+
+        def fake_hf_hub_download(repo_id, filename, subfolder=None, resume_download=True,
+                                 tqdm_class=None):
+            captured_tqdm_classes.append(tqdm_class)
+            call_count[0] += 1
+            return f"/cache/{filename}"
+
+        def fake_import(name, *args, **kwargs):
+            if name == "huggingface_hub":
+                mod = MagicMock()
+                mod.hf_hub_download = fake_hf_hub_download
+                return mod
+            if name == "tqdm.auto":
+                m = MagicMock()
+                m.tqdm = FakeTqdm
+                return m
+            return real_import(name, *args, **kwargs)
+
+        with patch("builtins.__import__", side_effect=fake_import):
+            mgr.download_model(
+                "owner/repo",
+                "model-00001-of-00002.gguf",
+                progress_cb=progress_values.append,
+            )
+
+        # Two shards should have been downloaded
+        self.assertEqual(call_count[0], 2)
+        # Each tqdm_class should have been created (not None)
+        self.assertEqual(len(captured_tqdm_classes), 2)
+        # Final progress should be 1.0
+        self.assertEqual(mgr._download_progress, 1.0)
+        self.assertEqual(progress_values[-1], 1.0)
+
+    def test_download_subfolder_single_file(self):
+        """Subfolder path without split: hf_hub_download called with subfolder kwarg."""
+        from ouroboros.local_model import LocalModelManager
+        mgr = LocalModelManager()
+        call_args_list = []
+
+        import builtins
+        real_import = builtins.__import__
+
+        def fake_hf_hub_download(repo_id, filename, subfolder=None, resume_download=True,
+                                 tqdm_class=None):
+            call_args_list.append({"repo_id": repo_id, "filename": filename, "subfolder": subfolder})
+            return "/cache/model.gguf"
+
+        def fake_import(name, *args, **kwargs):
+            if name == "huggingface_hub":
+                mod = MagicMock()
+                mod.hf_hub_download = fake_hf_hub_download
+                return mod
+            if name == "tqdm.auto":
+                m = MagicMock()
+                m.tqdm = MagicMock
+                return m
+            return real_import(name, *args, **kwargs)
+
+        with patch("builtins.__import__", side_effect=fake_import):
+            result = mgr.download_model("owner/repo", "UD-Q5/model.gguf")
+
+        self.assertEqual(result, "/cache/model.gguf")
+        self.assertEqual(len(call_args_list), 1)
+        self.assertEqual(call_args_list[0]["subfolder"], "UD-Q5")
+        self.assertEqual(call_args_list[0]["filename"], "model.gguf")
 
 
 if __name__ == "__main__":
