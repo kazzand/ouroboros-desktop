@@ -246,6 +246,47 @@ class LocalModelManager:
     # ------------------------------------------------------------------
 
     @staticmethod
+    def _resolve_hf_path(source: str, filename: str) -> str:
+        """Auto-resolve full HF path when user omits the subfolder prefix.
+
+        If *filename* already contains a ``/``, it is returned as-is.
+        Otherwise, ``list_repo_files`` is queried and all paths whose
+        basename matches *filename* are collected.  The first match is
+        returned as the resolved path (e.g. ``"UD-Q5_K_XL/model-00001-of-00003.gguf"``).
+
+        Returns the original *filename* unchanged if:
+        - it already contains ``/``
+        - ``huggingface_hub`` is not available
+        - no match is found in the repo
+        - any network/API error occurs (fail-open so the original error propagates)
+        """
+        if "/" in filename:
+            return filename
+        try:
+            from huggingface_hub import list_repo_files
+            all_paths = list(list_repo_files(source))
+        except Exception:
+            return filename  # fail-open: caller will get the original 404 error
+        matches = [p for p in all_paths if p.endswith("/" + filename) or p == filename]
+        if not matches:
+            return filename
+        if len(matches) > 1:
+            paths_str = "\n  ".join(matches)
+            raise ValueError(
+                f"Ambiguous filename '{filename}' in repo '{source}' — found in multiple locations:\n"
+                f"  {paths_str}\n"
+                f"Specify the full path including subfolder, "
+                f"e.g. '{matches[0]}'"
+            )
+        resolved = matches[0]
+        if resolved != filename:
+            log.info(
+                "Auto-resolved HF path: '%s' → '%s' (subfolder detected automatically)",
+                filename, resolved,
+            )
+        return resolved
+
+    @staticmethod
     def _normalize_hf_filename(filename: str):
         """Split a HuggingFace filename into (subfolder, basename).
 
@@ -368,6 +409,12 @@ class LocalModelManager:
                 "filename is required when source is a HuggingFace repo ID. "
                 "Example: filename='model-Q4_K_M.gguf' or 'quant/model-00001-of-00003.gguf'"
             )
+
+        # Auto-resolve subfolder when user omits it (e.g. types just the basename
+        # from the HF URL without the containing directory prefix).
+        # This is a common UX mistake: copying "model-00001-of-00003.gguf" from the
+        # browser URL instead of "UD-Q5_K_XL/model-00001-of-00003.gguf".
+        filename = self._resolve_hf_path(source, filename)
 
         # Normalize to (subfolder, basename) — handles both subfolder paths and
         # flat filenames uniformly before shard detection.

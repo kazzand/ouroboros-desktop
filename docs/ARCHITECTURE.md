@@ -1,4 +1,4 @@
-# Ouroboros v4.28.0 — Architecture & Reference
+# Ouroboros v4.28.1 — Architecture & Reference
 
 This document describes every component, page, button, API endpoint, and data flow.
 It is the single source of truth for how the system works. Keep it updated.
@@ -302,7 +302,7 @@ The Dashboard tab has been removed. Its functionality is now distributed:
 - **Review Enforcement**: `Advisory` or `Blocking` for pre-commit review behavior.
   Backed by `OUROBOROS_REVIEW_ENFORCEMENT`. Review always runs in both modes.
 - **Advanced**: local model runtime, max workers, total budget, per-task soft threshold, tool timeout, soft/hard timeout, web search model, review enforcement, legacy compatibility, and reset controls.
-- **Local Model Runtime**: source, GGUF filename, port, GPU layers, context length, chat format, start/stop/test buttons, live local-model status, real download progress bar (updates via `download_progress` from `/api/local-model/status`), and an **Install Local Runtime** button (hidden until runtime is missing). The Start button performs a preflight check via `/api/local-model/start` before downloading; on a `runtime_missing` (HTTP 412) response it surfaces the install button and a human-readable hint instead of a raw traceback. After install completes (`runtime_status == "install_ok"`), the start flow resumes automatically if a source was configured. `LOCAL_MODEL_FILENAME` now accepts subfolder paths (`quant/model.gguf`) and split GGUF patterns (`quant/model-00001-of-00003.gguf`); all shards are downloaded automatically and the server is started with the first shard.
+- **Local Model Runtime**: source, GGUF filename, port, GPU layers, context length, chat format, start/stop/test buttons, live local-model status, real download progress bar (updates via `download_progress` from `/api/local-model/status`), and an **Install Local Runtime** button (hidden until runtime is missing). The Start button performs a preflight check via `/api/local-model/start` before downloading; on a `runtime_missing` (HTTP 412) response it surfaces the install button and a human-readable hint instead of a raw traceback. After install completes (`runtime_status == "install_ok"`), the start flow resumes automatically if a source was configured. `LOCAL_MODEL_FILENAME` now accepts subfolder paths (`quant/model.gguf`) and split GGUF patterns (`quant/model-00001-of-00003.gguf`); all shards are downloaded automatically and the server is started with the first shard. If the user omits the subfolder prefix (types just the bare filename), `_resolve_hf_path` auto-resolves the full path by querying `list_repo_files` on the HF repo (fail-open on network errors).
 - **Telegram**: Bot Token and primary chat id. If no primary chat id is pinned, the bridge binds to the first active Telegram chat and keeps replies attached there.
 - **GitHub**: Token + Repo (for remote sync).
 - **Save Settings** button → POST `/api/settings`. Applies to env immediately.

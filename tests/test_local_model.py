@@ -743,5 +743,128 @@ class TestDownloadModelSplitGGUF(unittest.TestCase):
         self.assertEqual(call_args_list[0]["filename"], "model.gguf")
 
 
+class TestResolveHfPath(unittest.TestCase):
+    """Tests for LocalModelManager._resolve_hf_path auto-subfolder resolution."""
+
+    def setUp(self):
+        from ouroboros.local_model import LocalModelManager
+        self.mgr = LocalModelManager()
+        self.resolve = LocalModelManager._resolve_hf_path
+
+    def _patch_list_repo_files(self, return_value=None, side_effect=None):
+        """Patch the list_repo_files import inside _resolve_hf_path."""
+        import ouroboros.local_model as lm_module
+        mock_fn = MagicMock(return_value=return_value, side_effect=side_effect)
+
+        def fake_import(name, fromlist=(), *args, **kwargs):
+            if name == "huggingface_hub" and "list_repo_files" in (fromlist or ()):
+                class _FakeHF:
+                    list_repo_files = staticmethod(mock_fn)
+                return _FakeHF()
+            return real_import(name, fromlist, *args, **kwargs)
+
+        import builtins
+        real_import = builtins.__import__
+        return patch("builtins.__import__", side_effect=fake_import), mock_fn
+
+    def test_passthrough_when_slash_present(self):
+        """If filename already has a slash, return it unchanged without any API call."""
+        # No need to mock — the method returns immediately when '/' is in filename
+        result = self.resolve("owner/repo", "UD-Q5_K_XL/model-00001-of-00003.gguf")
+        self.assertEqual(result, "UD-Q5_K_XL/model-00001-of-00003.gguf")
+
+    def test_auto_resolves_subfolder_from_hf(self):
+        """When filename has no slash, list_repo_files is queried and subfolder is added."""
+        import builtins
+        real_import = builtins.__import__
+        mock_list = MagicMock(return_value=[
+            "UD-Q5_K_XL/model-00001-of-00003.gguf",
+            "UD-Q5_K_XL/model-00002-of-00003.gguf",
+            "UD-Q5_K_XL/model-00003-of-00003.gguf",
+            "README.md",
+        ])
+
+        def fake_import(name, *args, **kwargs):
+            if name == "huggingface_hub":
+                mod = MagicMock()
+                mod.list_repo_files = mock_list
+                return mod
+            return real_import(name, *args, **kwargs)
+
+        with patch("builtins.__import__", side_effect=fake_import):
+            result = self.resolve("owner/repo", "model-00001-of-00003.gguf")
+        self.assertEqual(result, "UD-Q5_K_XL/model-00001-of-00003.gguf")
+
+    def test_returns_original_when_not_found(self):
+        """If no match in repo, return original filename (fail-open)."""
+        import builtins
+        real_import = builtins.__import__
+
+        def fake_import(name, *args, **kwargs):
+            if name == "huggingface_hub":
+                mod = MagicMock()
+                mod.list_repo_files = MagicMock(return_value=["README.md"])
+                return mod
+            return real_import(name, *args, **kwargs)
+
+        with patch("builtins.__import__", side_effect=fake_import):
+            result = self.resolve("owner/repo", "unknown-model.gguf")
+        self.assertEqual(result, "unknown-model.gguf")
+
+    def test_returns_original_on_network_error(self):
+        """If list_repo_files raises, return original filename (fail-open)."""
+        import builtins
+        real_import = builtins.__import__
+
+        def fake_import(name, *args, **kwargs):
+            if name == "huggingface_hub":
+                mod = MagicMock()
+                mod.list_repo_files = MagicMock(side_effect=Exception("network error"))
+                return mod
+            return real_import(name, *args, **kwargs)
+
+        with patch("builtins.__import__", side_effect=fake_import):
+            result = self.resolve("owner/repo", "model.gguf")
+        self.assertEqual(result, "model.gguf")
+
+    def test_raises_on_ambiguous_match(self):
+        """When multiple paths match the bare filename, raise ValueError with candidates."""
+        import builtins
+        real_import = builtins.__import__
+
+        def fake_import(name, *args, **kwargs):
+            if name == "huggingface_hub":
+                mod = MagicMock()
+                mod.list_repo_files = MagicMock(return_value=[
+                    "Q4_K_M/model.gguf",
+                    "Q5_K_XL/model.gguf",
+                ])
+                return mod
+            return real_import(name, *args, **kwargs)
+
+        with patch("builtins.__import__", side_effect=fake_import):
+            with self.assertRaises(ValueError) as ctx:
+                self.resolve("owner/repo", "model.gguf")
+        self.assertIn("Ambiguous filename", str(ctx.exception))
+        self.assertIn("Q4_K_M/model.gguf", str(ctx.exception))
+        self.assertIn("Q5_K_XL/model.gguf", str(ctx.exception))
+
+    def test_flat_file_at_root_not_doubled(self):
+        """A file that lives at root (no subfolder) is returned as-is."""
+        import builtins
+        real_import = builtins.__import__
+
+        def fake_import(name, *args, **kwargs):
+            if name == "huggingface_hub":
+                mod = MagicMock()
+                mod.list_repo_files = MagicMock(return_value=["model.gguf", "README.md"])
+                return mod
+            return real_import(name, *args, **kwargs)
+
+        with patch("builtins.__import__", side_effect=fake_import):
+            result = self.resolve("owner/repo", "model.gguf")
+        self.assertEqual(result, "model.gguf")
+
+
 if __name__ == "__main__":
     unittest.main()
