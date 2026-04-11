@@ -42,6 +42,9 @@ When a new reviewable concern appears, add it here — not in prompts or docs.
   to confirm each obligation is resolved, though the gate does not enforce this at the code level.
 - Open obligations are cleared automatically on a successful commit.
 - Both triad-review blocks and scope-review blocks produce structured obligations.
+- **Obligation storage policy:** All obligations are stored; deduplication is the agent's responsibility.
+  Multiple obligations describing the same root cause (from reviewer rephrasing across attempts) are
+  expected — address them together and explain this in `review_rebuttal`.
 - **Note:** conservative false-stale is acceptable. If you are unsure whether a mutating path
   changed the relevant repo snapshot, re-run `advisory_pre_review` explicitly.
 

@@ -400,6 +400,16 @@ The reviewed commit path then runs the unified blocking review against
 plus a blocking scope review in parallel. `Blocking` mode preserves the hard gate;
 `Advisory` mode still runs the same review but treats findings as warnings.
 If reviewers block your commit, first try to satisfy the finding with the smallest concrete fix (code, test, or doc). Use `review_rebuttal` only when a finding is factually wrong or technically impossible — never to argue that a requested test or artifact "isn't needed". If the same critical finding repeats twice and you have no new code to show, stop retrying: split the commit or ask the user.
+
+**Obligation semantics and deduplication:**
+Open obligations accumulate across blocked commits — every unique `(item, reason)` pair creates a separate obligation. LLMs rephrase reasons slightly between attempts, so you may see multiple obligations that describe the same root cause. This is intentional: the system stores all findings and delegates deduplication to you.
+
+When you see similar obligations:
+- Read each one. If two obligations describe the same root cause (same file, same symbol, same fix), note this in `review_rebuttal`: `"Obligations X and Y both describe the same issue in foo.py — resolved by this commit."` You do not need to fix each separately.
+- Only rebut when you have actual code to show. Saying "these are duplicates" without a fix is not sufficient.
+- After a successful commit, all open obligations are cleared automatically.
+
+When reading the `Review Continuity` section: a large number of open obligations from a single blocked session (e.g. 10+ obligations) often contains significant duplication from reviewer rephrasing. Group them by file/symbol before deciding how many distinct fixes are needed.
 When reporting commit-review outcomes back to the user, enumerate critical and advisory findings individually. Preserve each finding's severity plus its identity tag (`item`, reviewer/model, scope tag, obligation id when present). Do not compress multiple findings into a generic "review failed" summary if the tool output contains structured detail.
 
 ### Change Propagation Checklist

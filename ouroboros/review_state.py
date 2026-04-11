@@ -398,10 +398,11 @@ class AdvisoryReviewState:
         return hashlib.sha256(key.encode()).hexdigest()[:12]
 
     def _update_obligations_from_attempt(self, attempt: CommitAttemptRecord) -> List[str]:
-        """Merge critical findings into open obligations keyed by per-finding fingerprint.
+        """Accumulate critical findings as open obligations keyed by per-finding fingerprint.
 
-        Different reasons → different obligations (no moving-target collapse).
-        Same reason repeated → merges into existing obligation (reason deduped).
+        Different reasons → different obligations (separate fingerprints, never collapsed).
+        Same reason repeated → updates timestamp only; reason text stays stable.
+        All obligations are stored — deduplication is the agent's responsibility via rebuttal.
         """
         if not attempt.critical_findings:
             return []
@@ -422,11 +423,8 @@ class AdvisoryReviewState:
             ob_id = self._make_obligation_id(item, reason)
 
             if ob_id in existing:
-                # Same finding reappeared — update timestamp, dedup reason text.
+                # Same finding reappeared — update timestamp only; reason is stable.
                 ob = existing[ob_id]
-                prev = [s.strip() for s in (ob.reason or "").split(" | ") if s.strip()]
-                if reason.strip() not in set(prev):
-                    ob.reason = " | ".join(prev + [reason.strip()]) if prev else reason
                 ob.source_attempt_ts = attempt.ts
                 ob.source_attempt_msg = attempt.commit_message
             else:

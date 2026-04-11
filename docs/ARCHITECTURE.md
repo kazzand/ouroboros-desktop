@@ -1,4 +1,4 @@
-# Ouroboros v4.22.0 — Architecture & Reference
+# Ouroboros v4.23.0 — Architecture & Reference
 
 This document describes every component, page, button, API endpoint, and data flow.
 It is the single source of truth for how the system works. Keep it updated.
@@ -655,13 +655,15 @@ Enforces: (1) exact repo-local artifact required before CRITICAL; (2) hypothetic
 plugin/env concerns → advisory; (3) one root cause = one FAIL; (4) do not hold
 obligation open by abstracting a fixed concrete issue.
 
-### Obligation grouping (P3, `ouroboros/review_state.py::_update_obligations_from_attempt`)
+### Obligation accumulation (P3, `ouroboros/review_state.py::_update_obligations_from_attempt`)
 
 Each critical finding is identified by a stable fingerprint `sha256(f"{item}:{reason}")[:12]`.
-Two findings with the same `item` but **different reasons** produce **separate obligations**,
-so a reviewer cannot rotate or widen a finding while keeping it formally "open" as a
-moving-target obligation.  An identical finding (same item + same reason) repeated across
-attempts merges into the existing obligation (reason text deduped) instead of duplicating.
+Every unique `(item, reason)` pair creates a **separate obligation** — obligations are never
+merged or collapsed. LLMs rephrase reasons slightly across attempts, so the same root cause may
+appear as multiple obligations with different fingerprints. This is intentional: deduplication
+is the agent's responsibility via `review_rebuttal`, not code-level merging. An identical
+finding repeated across attempts (same fingerprint) only updates the timestamp — reason
+text stays stable.
 
 `_resolve_matching_obligations` in `ouroboros/tools/claude_advisory_review.py` resolves
 by both `obligation_id` (primary) and `item.lower()` (fallback for legacy saved state),

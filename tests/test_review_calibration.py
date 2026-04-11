@@ -4,7 +4,7 @@ Covers:
 - P1: New deterministic preflight checks 5-8 (version sync via staged content,
       readme changelog row, conftest test functions)
 - P2: Structured self-verification in blocked message (attempt >= 2)
-- P3: Obligation grouping — multiple findings with same item get combined reason
+- P3: Obligation accumulation — findings stored separately, dedup is agent's job
 """
 from __future__ import annotations
 
@@ -303,11 +303,12 @@ class TestSelfVerificationInBlockedMessage:
 
 
 # ---------------------------------------------------------------------------
-# P3: obligation grouping — multiple same-item findings
+# P3: obligation accumulation — findings stored separately, dedup is agent's job
 # ---------------------------------------------------------------------------
 
 class TestObligationGrouping:
-    """Multiple findings with the same item are grouped into one obligation."""
+    """Obligations accumulate without merging. Same fingerprint = timestamp update only.
+    Different reasons = separate obligations. Deduplication is the agent's responsibility."""
 
     def _make_state(self):
         from ouroboros.review_state import AdvisoryReviewState
@@ -461,6 +462,21 @@ class TestObligationGrouping:
         # Same fingerprint → same obligation_id → only one created
         assert len(cq_obs) == 1
         assert cq_obs[0].reason.count("Same bug") == 1
+
+    def test_reason_not_pipe_joined_on_repeat(self):
+        """Repeated same finding must NOT produce 'reason | reason' strings — reason stays stable."""
+        state = self._make_state()
+        reason = "Bug in loop.py line 42"
+        for i in range(3):
+            attempt = _make_attempt(f"attempt {i}", [
+                {"verdict": "FAIL", "severity": "critical", "item": "code_quality", "reason": reason},
+            ])
+            state._update_obligations_from_attempt(attempt)
+        cq_obs = [o for o in state.get_open_obligations() if o.item.lower() == "code_quality"]
+        assert len(cq_obs) == 1
+        # Reason must be exactly the original string — no pipe-joined duplicates
+        assert cq_obs[0].reason == reason
+        assert "|" not in cq_obs[0].reason
 
 
 # ---------------------------------------------------------------------------
