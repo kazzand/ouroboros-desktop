@@ -1,4 +1,4 @@
-# Ouroboros v4.24.0 — Architecture & Reference
+# Ouroboros v4.24.1 — Architecture & Reference
 
 This document describes every component, page, button, API endpoint, and data flow.
 It is the single source of truth for how the system works. Keep it updated.
@@ -850,10 +850,11 @@ errors surface via the same observability path.
   **LLM-first parse fallback** (v4.24.0): when the SDK returns a narrative-style response where
   JSON findings appear after long reasoning text (common on large diffs), the structural JSON
   extractor may fail to find items. If `_parse_advisory_output()` returns empty but `raw_text`
-  is non-empty, `_llm_extract_advisory_items()` makes a cheap light-model call (`no_proxy=True`,
-  `reasoning_effort="low"`) asking the LLM to extract the JSON array from the narrative. This
-  converts `parse_failure` → `fresh` run on the vast majority of real advisory outputs, saving
-  $32–64 per bypass cycle.
+  is non-empty, `_llm_extract_advisory_items()` makes a cheap call to `OUROBOROS_MODEL_LIGHT`
+  (`no_proxy=True`, `reasoning_effort="low"`) asking the LLM to extract the JSON array from the
+  narrative. Uses a head+tail window so JSON near the end of long responses is always included.
+  This converts `parse_failure` → `fresh` run on the vast majority of real advisory outputs,
+  saving $32–64 per bypass cycle.
   Model resolved via `resolve_claude_code_model()` — respects `CLAUDE_CODE_MODEL` setting,
   defaults to `opus` (same helper used by `claude_code_edit`). Shared Claude Code turn budget:
   50 turns for both advisory and edit paths. Per-tool timeout floor: 1200s (20 min).

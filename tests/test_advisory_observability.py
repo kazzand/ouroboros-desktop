@@ -826,16 +826,17 @@ class TestLLMFallbackExtraction:
         # Window must be shorter than full raw_text
         assert len(window) < len(raw_text)
 
-    def test_resolve_fallback_model_anthropic_only(self, monkeypatch):
-        """On Anthropic-only installations, fallback model must use anthropic:: prefix."""
-        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
-        monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    def test_resolve_fallback_model_no_env_uses_config_default(self, monkeypatch):
+        """When OUROBOROS_MODEL_LIGHT is not set, fallback model comes from SETTINGS_DEFAULTS."""
         monkeypatch.delenv("OUROBOROS_MODEL_LIGHT", raising=False)
 
         model = self.mod._resolve_fallback_model()
-        assert model.startswith("anthropic::"), (
-            f"Anthropic-only install must use direct-provider prefix, got: {model!r}"
+        from ouroboros.config import SETTINGS_DEFAULTS
+        expected = str(SETTINGS_DEFAULTS.get("OUROBOROS_MODEL_LIGHT", ""))
+        assert model == expected, (
+            f"Expected config default {expected!r}, got: {model!r}"
         )
+        assert model, "Fallback model must be non-empty"
 
     def test_resolve_fallback_model_uses_env_var(self, monkeypatch):
         """OUROBOROS_MODEL_LIGHT must take priority over auto-detection."""

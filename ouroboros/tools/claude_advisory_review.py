@@ -340,32 +340,16 @@ def _build_fallback_window(raw_text: str) -> str:
 
 
 def _resolve_fallback_model() -> str:
-    """Resolve the light extraction model that works on the current provider configuration.
+    """Resolve the light extraction model for the LLM-first advisory fallback.
 
-    Priority:
-      1. OUROBOROS_MODEL_LIGHT env var if set and non-empty
-      2. If only ANTHROPIC_API_KEY is configured (no OpenRouter), use a direct
-         Anthropic model so the call actually routes to the right provider.
-      3. Otherwise default to the OpenRouter-style light model.
-
-    This prevents the failure mode where advisory SDK succeeds (Anthropic-only)
-    but the extraction fallback fails because it chose an OpenRouter-style default.
+    Uses OUROBOROS_MODEL_LIGHT (user-configured light model) if set, otherwise
+    falls back to the system default from config.  Never hardcodes a specific
+    model ID — all model selection is delegated to configuration (P3 LLM-First).
     """
     import os as _os
+    from ouroboros.config import SETTINGS_DEFAULTS  # type: ignore[attr-defined]
     env_light = (_os.environ.get("OUROBOROS_MODEL_LIGHT") or "").strip()
-    if env_light:
-        return env_light
-
-    has_openrouter = bool((_os.environ.get("OPENROUTER_API_KEY") or "").strip())
-    has_anthropic = bool((_os.environ.get("ANTHROPIC_API_KEY") or "").strip())
-
-    if has_anthropic and not has_openrouter:
-        # Anthropic-only installation: use direct-provider prefix so LLMClient
-        # routes to the Anthropic API rather than OpenRouter.
-        return "anthropic::claude-haiku-3-5"
-
-    # OpenRouter available (default multi-provider path)
-    return "anthropic/claude-haiku-3-5"
+    return env_light or str(SETTINGS_DEFAULTS.get("OUROBOROS_MODEL_LIGHT", ""))
 
 
 def _llm_extract_advisory_items(raw_text: str, ctx: object) -> list:
