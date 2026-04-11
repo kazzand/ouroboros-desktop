@@ -1,4 +1,4 @@
-# Ouroboros v4.25.1 — Architecture & Reference
+# Ouroboros v4.26.0 — Architecture & Reference
 
 This document describes every component, page, button, API endpoint, and data flow.
 It is the single source of truth for how the system works. Keep it updated.
@@ -301,7 +301,7 @@ The Dashboard tab has been removed. Its functionality is now distributed:
 - **Review Enforcement**: `Advisory` or `Blocking` for pre-commit review behavior.
   Backed by `OUROBOROS_REVIEW_ENFORCEMENT`. Review always runs in both modes.
 - **Advanced**: local model runtime, max workers, total budget, per-task soft threshold, tool timeout, soft/hard timeout, web search model, review enforcement, legacy compatibility, and reset controls.
-- **Local Model Runtime**: source, GGUF filename, port, GPU layers, context length, chat format, start/stop/test buttons, live local-model status.
+- **Local Model Runtime**: source, GGUF filename, port, GPU layers, context length, chat format, start/stop/test buttons, live local-model status, real download progress bar (updates via `download_progress` from `/api/local-model/status`), and an **Install Local Runtime** button (hidden until runtime is missing). The Start button performs a preflight check via `/api/local-model/start` before downloading; on a `runtime_missing` (HTTP 412) response it surfaces the install button and a human-readable hint instead of a raw traceback. After install completes (`runtime_status == "install_ok"`), the start flow resumes automatically if a source was configured.
 - **Telegram**: Bot Token and primary chat id. If no primary chat id is pinned, the bridge binds to the first active Telegram chat and keeps replies attached there.
 - **GitHub**: Token + Repo (for remote sync).
 - **Save Settings** button → POST `/api/settings`. Applies to env immediately.
@@ -411,6 +411,7 @@ authentication. If the password is blank, non-loopback access stays open by desi
 | POST | `/api/chat/upload` | Upload a file attachment; saved to `data/uploads/` with UUID-prefixed unique name; returns `{ok, filename, display_name, path, size, mime}` |
 | DELETE | `/api/chat/upload` | Delete a previously uploaded chat attachment by filename |
 | POST | `/api/local-model/test` | Local model sanity test (chat + tool calling) |
+| POST | `/api/local-model/install-runtime` | Install llama-cpp-python into the app-managed interpreter; returns `{status: "installing"}` immediately. Poll `/api/local-model/status` for `runtime_status` field (`installing` → `install_ok` / `install_error`). On macOS, sets `CMAKE_ARGS="-DGGML_METAL=on"` for Metal acceleration. |
 | GET/POST | `/auth/login` | Password gate entrypoint for non-localhost browser/API access |
 | GET/POST | `/auth/logout` | Clear auth cookie/session |
 | WS | `/ws` | WebSocket: chat messages, commands, log streaming |

@@ -321,6 +321,10 @@ export function renderSettingsPage() {
                             <button class="btn btn-primary" id="btn-local-test">Test Tool Calling</button>
                         </div>
                         <div id="local-model-status" class="settings-inline-status">Status: Offline</div>
+                        <div id="local-model-progress-wrap" class="local-model-progress-wrap local-model-hidden" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+                            <div id="local-model-progress-bar" class="local-model-progress-bar"></div>
+                        </div>
+                        <button class="btn btn-secondary local-model-install-btn local-model-hidden" id="btn-local-install-runtime">Install Local Runtime</button>
                         <div id="local-model-test-result" class="settings-test-result"></div>
                     </div>
 

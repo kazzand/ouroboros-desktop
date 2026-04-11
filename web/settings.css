@@ -227,6 +227,33 @@
     line-height: 1.45;
 }
 
+/* Utility: hide elements that start as hidden and are revealed via JS */
+.local-model-hidden {
+    display: none !important;
+}
+
+/* Local model download progress bar */
+.local-model-progress-wrap {
+    margin-top: 8px;
+    height: 6px;
+    border-radius: var(--radius-xs);
+    background: rgba(255, 255, 255, 0.08);
+    overflow: hidden;
+}
+
+.local-model-progress-bar {
+    height: 100%;
+    border-radius: var(--radius-xs);
+    background: var(--accent);
+    width: 0%;
+    transition: width 0.4s ease;
+}
+
+/* Install Local Runtime button */
+.local-model-install-btn {
+    margin-top: 10px;
+}
+
 .settings-inline-status[data-tone="ok"],
 .settings-test-result[data-tone="ok"] {
     color: var(--green);

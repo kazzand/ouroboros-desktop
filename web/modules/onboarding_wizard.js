@@ -892,12 +892,26 @@
                 }
                 setLocalTestResult('', 'muted');
                 try {
-                    await apiRequest('/api/local-model/start', {
+                    const resp = await fetch('/api/local-model/start', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify(body),
                     });
-                    updateLocalStatus();
+                    const data = await resp.json().catch(() => ({}));
+                    if (resp.status === 412 && data.error === 'runtime_missing') {
+                        // llama-cpp-python not installed — show actionable message
+                        setLocalTestResult(
+                            'Local runtime (llama-cpp-python) is not installed.\n' +
+                            'Go to Settings → Advanced → Local Model Runtime\n' +
+                            'and click "Install Local Runtime".\n\n' +
+                            'Manual: ' + (data.hint || 'pip install llama-cpp-python[server]'),
+                            'error'
+                        );
+                    } else if (data.error) {
+                        setLocalTestResult(`Start failed: ${data.error}`, 'error');
+                    } else {
+                        updateLocalStatus();
+                    }
                 } catch (error) {
                     setLocalTestResult(`Start failed: ${error.message}`, 'error');
                 }

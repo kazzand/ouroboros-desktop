@@ -989,6 +989,7 @@ async def api_evolution_data(request: Request) -> JSONResponse:
 from ouroboros.local_model_api import (
     api_local_model_start, api_local_model_stop,
     api_local_model_status, api_local_model_test,
+    api_local_model_install_runtime,
 )
 from ouroboros.chat_upload_api import api_chat_upload, api_chat_upload_delete
 
@@ -1025,6 +1026,7 @@ routes = [
     Route("/api/local-model/stop", endpoint=api_local_model_stop, methods=["POST"]),
     Route("/api/local-model/status", endpoint=api_local_model_status),
     Route("/api/local-model/test", endpoint=api_local_model_test, methods=["POST"]),
+    Route("/api/local-model/install-runtime", endpoint=api_local_model_install_runtime, methods=["POST"]),
     WebSocketRoute("/ws", endpoint=ws_endpoint),
     Mount("/static", app=NoCacheStaticFiles(directory=str(web_dir)), name="static"),
 ]

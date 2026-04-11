@@ -24,6 +24,29 @@ log = logging.getLogger(__name__)
 
 _LOCAL_MODEL_DEFAULT_PORT = 8766
 
+# Install command for llama-cpp-python, platform-aware
+def _get_install_command() -> list:
+    """Return the pip install command list for llama-cpp-python."""
+    base = [sys.executable, "-m", "pip", "install", "--upgrade", "llama-cpp-python[server]"]
+    return base
+
+
+def _get_install_env() -> dict:
+    """Return env vars for the pip install subprocess (Metal flags on macOS)."""
+    env = os.environ.copy()
+    if IS_MACOS:
+        env["CMAKE_ARGS"] = "-DGGML_METAL=on"
+        env["FORCE_CMAKE"] = "1"
+    return env
+
+
+def _get_runtime_hint() -> str:
+    """Return a human-readable install hint for llama-cpp-python."""
+    if IS_MACOS:
+        return 'CMAKE_ARGS="-DGGML_METAL=on" pip install llama-cpp-python[server]'
+    return "pip install llama-cpp-python[server]"
+
+
 def _with_hidden_subprocess(kwargs: Dict[str, Any]) -> Dict[str, Any]:
     """Merge platform-appropriate hidden-window flags into subprocess kwargs."""
     hidden = subprocess_hidden_kwargs()
@@ -51,6 +74,7 @@ class LocalModelManager:
 
     def __init__(self) -> None:
         self._proc: Optional[subprocess.Popen] = None
+        self._install_proc: Optional[subprocess.Popen] = None
         self._lock = threading.Lock()
         self._status = "offline"
         self._error: Optional[str] = None
@@ -60,6 +84,12 @@ class LocalModelManager:
         self._model_name: str = ""
         self._download_progress: float = 0.0
         self._stderr_buf: bytes = b""
+        # Runtime (llama-cpp-python) install state
+        self._runtime_status: str = "unknown"  # unknown | ok | missing | installing | install_ok | install_error
+        self._runtime_install_log: str = ""
+        # Cancellation flag — set in stop_server() so _run_install() can abort
+        # even before _install_proc is assigned, closing the panic-window race.
+        self._install_cancelled = threading.Event()
 
     # ------------------------------------------------------------------
     # Properties
@@ -89,7 +119,127 @@ class LocalModelManager:
             "context_length": self._context_length,
             "port": self._port,
             "download_progress": self._download_progress,
+            "runtime_status": self._runtime_status,
+            "runtime_install_log": self._runtime_install_log[-500:] if self._runtime_install_log else "",
         }
+
+    # ------------------------------------------------------------------
+    # Runtime (llama_cpp) check & install
+    # ------------------------------------------------------------------
+
+    def check_runtime(self) -> bool:
+        """Check whether llama-cpp-python is importable.
+
+        Updates ``_runtime_status`` to ``"ok"`` or ``"missing"``.
+        Returns True if available, False otherwise.
+        """
+        try:
+            probe = subprocess.run(
+                [sys.executable, "-c", "import llama_cpp"],
+                **_with_hidden_subprocess({
+                    "capture_output": True,
+                    "text": True,
+                    "timeout": 15,
+                }),
+            )
+            if probe.returncode == 0:
+                self._runtime_status = "ok"
+                return True
+            else:
+                self._runtime_status = "missing"
+                return False
+        except Exception as exc:
+            log.warning("Runtime check failed: %s", exc)
+            self._runtime_status = "missing"
+            return False
+
+    def install_runtime(self) -> None:
+        """Install llama-cpp-python in a background thread.
+
+        The install subprocess is tracked on ``_install_proc`` so that
+        ``stop_server()`` (called on panic/shutdown) can terminate it.
+        Updates ``_runtime_status`` throughout the process.
+        """
+        with self._lock:
+            if self._runtime_status == "installing":
+                log.info("Runtime install already in progress")
+                return
+            # Clear the cancellation flag for a fresh install attempt
+            # (stop_server may have set it in a previous lifecycle).
+            self._install_cancelled.clear()
+            self._runtime_status = "installing"
+            self._runtime_install_log = ""
+
+        threading.Thread(
+            target=self._run_install, daemon=True, name="llama-install"
+        ).start()
+
+    def _run_install(self) -> None:
+        """Background install worker."""
+        # Check cancellation BEFORE spawning — handles the window between
+        # install_runtime() starting the thread and Popen being called.
+        if self._install_cancelled.is_set():
+            self._runtime_status = "missing"
+            return
+
+        cmd = _get_install_command()
+        env = _get_install_env()
+        log.info("Installing llama-cpp-python: %s", " ".join(cmd))
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                env=env,
+                **_with_hidden_subprocess({
+                    "stdout": subprocess.PIPE,
+                    "stderr": subprocess.STDOUT,
+                    "stdin": subprocess.DEVNULL,
+                }),
+            )
+            self._install_proc = proc
+
+            # Check again immediately after Popen — stop_server() may have
+            # been called while we were spawning.  If so, kill the process now.
+            if self._install_cancelled.is_set():
+                try:
+                    terminate_process_tree(proc)
+                except Exception:
+                    pass
+                self._install_proc = None
+                self._runtime_status = "missing"
+                return
+            output_bytes = b""
+            try:
+                if proc.stdout:
+                    fd = proc.stdout.fileno()
+                    while True:
+                        chunk = os.read(fd, 4096)
+                        if not chunk:
+                            break
+                        output_bytes = (output_bytes + chunk)[-4096:]
+            except Exception:
+                pass
+            proc.wait()
+            self._install_proc = None
+            output = output_bytes.decode("utf-8", errors="replace")
+            self._runtime_install_log = output
+
+            if proc.returncode == 0:
+                # Verify the install actually works
+                if self.check_runtime():
+                    self._runtime_status = "install_ok"
+                    log.info("llama-cpp-python installed successfully")
+                else:
+                    self._runtime_status = "install_error"
+                    self._runtime_install_log += "\nInstall succeeded but import still fails."
+                    log.warning("llama-cpp-python install ran but import still fails")
+            else:
+                self._runtime_status = "install_error"
+                log.error("llama-cpp-python install failed (rc=%d)", proc.returncode)
+        except Exception as exc:
+            self._install_proc = None
+            self._runtime_status = "install_error"
+            self._runtime_install_log = str(exc)
+            log.error("llama-cpp-python install exception: %s", exc)
 
     # ------------------------------------------------------------------
     # Download
@@ -111,6 +261,11 @@ class LocalModelManager:
 
         Returns:
             Absolute path to the downloaded/resolved .gguf file.
+
+        Note:
+            This method is focused on artifact resolution/download only.
+            Callers (api_local_model_start, auto_start_local_model) are
+            responsible for calling check_runtime() before invoking this method.
         """
         if os.path.isfile(source):
             log.info("Using local model file: %s", source)
@@ -125,6 +280,7 @@ class LocalModelManager:
         # HuggingFace download
         try:
             from huggingface_hub import hf_hub_download
+            from tqdm.auto import tqdm as _base_tqdm
         except ImportError:
             raise RuntimeError(
                 "huggingface_hub is required for downloading models. "
@@ -141,11 +297,28 @@ class LocalModelManager:
         self._download_progress = 0.0
         log.info("Downloading %s/%s from HuggingFace...", source, filename)
 
+        # Build a tqdm subclass that forwards progress to our callback and manager
+        manager_ref = self
+
+        class _ProgressTqdm(_base_tqdm):
+            def update(self, n=1):
+                result = super().update(n)
+                try:
+                    if self.total and self.total > 0:
+                        fraction = min(self.n / self.total, 1.0)
+                        manager_ref._download_progress = fraction
+                        if progress_cb is not None:
+                            progress_cb(fraction)
+                except Exception:
+                    pass
+                return result
+
         try:
             path = hf_hub_download(
                 repo_id=source,
                 filename=filename,
                 resume_download=True,
+                tqdm_class=_ProgressTqdm,
             )
             self._download_progress = 1.0
             if progress_cb:
@@ -169,7 +342,14 @@ class LocalModelManager:
         n_ctx: int = 0,
         chat_format: str = "",
     ) -> None:
-        """Start the llama-cpp-python server as a subprocess."""
+        """Start the llama-cpp-python server as a subprocess.
+
+        Callers must invoke check_runtime() before this method to provide
+        a clear error message before any download starts.  This method
+        also verifies the runtime as a safety net, but does NOT raise a
+        LlamaRuntimeMissingError — it raises RuntimeError like before so
+        that callers that skip the early check still get a useful message.
+        """
         with self._lock:
             if self._proc is not None and self._proc.poll() is None:
                 raise RuntimeError("Local model server is already running")
@@ -210,10 +390,7 @@ class LocalModelManager:
             if probe.returncode != 0:
                 self._status = "error"
                 details = (probe.stderr or probe.stdout or "").strip()
-                if IS_MACOS:
-                    hint = 'CMAKE_ARGS="-DGGML_METAL=on" pip install llama-cpp-python[server]'
-                else:
-                    hint = "pip install llama-cpp-python[server]"
+                hint = _get_runtime_hint()
                 self._error = f"llama-cpp-python is not installed or failed to import. Install with: {hint}"
                 if details:
                     self._error += f": {details[-500:]}"
@@ -300,15 +477,33 @@ class LocalModelManager:
         log.error(self._error)
 
     def stop_server(self) -> None:
-        """Stop the local model server subprocess."""
+        """Stop the local model server subprocess and any ongoing install."""
+        # Signal _run_install() to abort even if Popen hasn't been called yet.
+        # This closes the race window between install_runtime() spawning the
+        # thread and _install_proc being assigned.
+        self._install_cancelled.set()
+
         with self._lock:
             proc = self._proc
+            install_proc = self._install_proc
             self._proc = None
+            self._install_proc = None
             self._status = "offline"
             self._error = None
             self._context_length = 0
             self._model_name = ""
             self._stderr_buf = b""
+
+        if install_proc is not None:
+            log.info("Terminating ongoing llama-cpp-python install (pid=%s)...", install_proc.pid)
+            try:
+                terminate_process_tree(install_proc)
+                install_proc.wait(timeout=5)
+            except Exception:
+                try:
+                    kill_process_tree(install_proc)
+                except Exception:
+                    pass
 
         if proc is None:
             return
