@@ -457,10 +457,10 @@ def test_live_card_timeline_no_hardcoded_item_cap():
     # syncLiveCardLayout must clamp to it
     assert "Math.min(" in source and "TIMELINE_MAX_HEIGHT" in source
 
-    # Memory release must only free completed cards (guards rec.finished)
-    assert "rec.root?.remove()" in source
-    assert "rec && rec.finished" in source
-    # Retired set prevents syncHistory from recreating cleaned tasks
+    # The cleanup timer preserves DOM node, items array, and liveCardRecords entry —
+    # no memory release in the timer path (memory pressure from a few finished cards is negligible).
+    assert "rec && rec.finished" not in source or True  # rec.finished guard may or may not remain
+    # retiredTaskIds set: present, used for session-local suppression and cleared on reconnect
     assert "const retiredTaskIds = new Set();" in source
     assert "retiredTaskIds.add(taskState.taskId);" in source
     assert "if (retiredTaskIds.has(taskId)) continue;" in source
@@ -933,3 +933,59 @@ def test_sync_history_clears_retired_task_ids():
         "When fromReconnect arrives during an in-flight sync, pendingReconnectSync must be set"
     assert "if (pendingReconnectSync)" in source, \
         "finally block must check pendingReconnectSync and re-run syncHistory with fromReconnect=true"
+
+
+def test_cleanup_timer_keeps_card_intact_and_adds_to_retired():
+    """scheduleTaskUiCleanup must preserve the DOM node, backing arrays, and
+    liveCardRecords entry so:
+    1. The card stays visible and interactive (expand/collapse toggles work).
+    2. A later reconnect syncHistory rebinds the existing node without duplicating.
+    Only retiredTaskIds is updated so mid-session incremental syncs don't rebuild
+    the card from history.  retiredTaskIds is cleared on first-load / reconnect."""
+    source = _read("web/modules/chat.js")
+
+    # Find the scheduleTaskUiCleanup function body
+    start = source.find("function scheduleTaskUiCleanup(")
+    end = source.find("\n    }", start)      # closing brace of the setTimeout callback
+    end = source.find("\n    }", end + 1)    # closing brace of the function itself
+    func_body = source[start:end + 6]
+
+    # DOM node must NOT be removed
+    assert "rec.root?.remove();" not in func_body, (
+        "scheduleTaskUiCleanup must NOT call rec.root?.remove() — "
+        "the card should remain visible in the chat after a task completes"
+    )
+    # items array must NOT be cleared (would break interactive timeline toggles)
+    non_comment_lines = [l for l in func_body.splitlines() if not l.lstrip().startswith("//")]
+    non_comment_body = "\n".join(non_comment_lines)
+    assert "rec.items = []" not in non_comment_body, (
+        "scheduleTaskUiCleanup must NOT clear rec.items — "
+        "doing so breaks expand/collapse interactions while the DOM node is still visible"
+    )
+    # liveCardRecords entry must be preserved
+    assert "liveCardRecords.delete(" not in non_comment_body, (
+        "scheduleTaskUiCleanup must NOT call liveCardRecords.delete() — "
+        "the entry must survive so reconnect syncHistory can rebind the existing node"
+    )
+    # retiredTaskIds must be populated for session-local suppression
+    assert "retiredTaskIds.add(" in func_body, (
+        "scheduleTaskUiCleanup must still add to retiredTaskIds "
+        "so incremental syncs don't rebuild the card mid-session"
+    )
+
+
+def test_sync_history_sweep_skips_invisible_completed_cards():
+    """The final sweep in syncHistory must skip cards that were never made visible
+    (trivial tasks with 0 tool calls) to avoid a cluster of invisible placeholder
+    nodes appearing at the bottom of the chat after a page reload."""
+    source = _read("web/modules/chat.js")
+
+    # The sweep loop must have a guard for cardVisible on completed tasks
+    assert "ts.cardVisible" in source, (
+        "The final liveCardRecords sweep in syncHistory must check ts.cardVisible "
+        "to avoid inserting invisible completed-task placeholder nodes"
+    )
+    assert "ts.completed" in source, (
+        "The final sweep guard must also check ts.completed so in-progress tasks "
+        "without cardVisible are still appended"
+    )

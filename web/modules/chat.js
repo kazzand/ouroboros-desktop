@@ -358,16 +358,14 @@ export function initChat({ ws, state, updateUnreadBadge }) {
             // is still a finished card in the chat, it has been superseded by
             // the regular assistant/summary bubbles added by syncHistory) and
             // free the backing JS arrays to prevent unbounded memory growth.
-            const rec = liveCardRecords.get(taskState.taskId);
-            if (rec && rec.finished) {
-                rec.root?.remove();
-                rec.items = [];
-                rec.expandedLineKeys.clear();
-                liveCardRecords.delete(taskState.taskId);
-            }
-            // Mark as retired so syncHistory() never recreates the live card.
-            // Exempt reusable logical ids (see REUSABLE_TASK_IDS) because they
-            // can represent multiple independent cycles.
+            // Keep the DOM node, backing arrays, and liveCardRecords entry intact
+            // so the user keeps seeing the card with all its interactive expand/
+            // collapse toggles still functional.  Only add to retiredTaskIds so
+            // that routine incremental syncHistory() calls (fired after each new
+            // task) do NOT re-build the card from history mid-session.
+            // retiredTaskIds is cleared on first-load and on reconnect/restart,
+            // so cards are fully reconstructed from progress.jsonl after a page
+            // reload or soft restart.
             if (!REUSABLE_TASK_IDS.has(taskState.taskId) && taskState.taskId !== '') {
                 retiredTaskIds.add(taskState.taskId);
             }
@@ -1112,9 +1110,13 @@ export function initChat({ ws, state, updateUnreadBadge }) {
                 }
                 // Ensure any still-disconnected live cards (e.g. in-progress tasks with no
                 // reply yet, or background-consciousness cards) are appended at the end so
-                // they remain visible after a mid-task reload.
+                // they remain visible after a mid-task reload.  Skip cards that were never
+                // made visible (trivial tasks with 0 tool calls) to avoid a cluster of
+                // invisible placeholder nodes appearing at the bottom of the chat.
                 for (const [tid, rec] of liveCardRecords) {
                     if (rec && rec.root && !rec.root.isConnected && !retiredTaskIds.has(tid)) {
+                        const ts = taskUiStates.get(tid);
+                        if (ts && !ts.cardVisible && ts.completed) continue;
                         insertMessageNode(rec.root);
                     }
                 }

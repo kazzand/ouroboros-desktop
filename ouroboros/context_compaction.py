@@ -78,8 +78,20 @@ def _round_has_protected_content(messages: list, start: int, end: int) -> bool:
                 return True
         # Protect checkpoint rounds: assistant message with CHECKPOINT_REFLECTION
         # text must survive compaction so the reflection stays visible to future rounds.
-        if role == "assistant" and "CHECKPOINT_REFLECTION" in content:
-            return True
+        # Normalize list-content blocks (Anthropic multipart) to plain text before
+        # checking so we don't rely on Python's repr() of a list accidentally containing
+        # the marker string — that would break silently if the block format changes.
+        if role == "assistant":
+            raw = msg.get("content") or ""
+            if isinstance(raw, list):
+                plain = " ".join(
+                    b.get("text", "") for b in raw
+                    if isinstance(b, dict)
+                )
+            else:
+                plain = str(raw)
+            if "CHECKPOINT_REFLECTION" in plain:
+                return True
     return False
 
 

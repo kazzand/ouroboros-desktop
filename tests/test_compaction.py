@@ -178,3 +178,48 @@ def test_round_has_protected_content_ignores_non_checkpoint():
         },
     ]
     assert _round_has_protected_content(messages, 0, 1) is False
+
+
+def test_round_has_protected_content_handles_list_content():
+    """_round_has_protected_content must detect CHECKPOINT_REFLECTION in multipart
+    Anthropic content blocks (list of {type, text} dicts), not just plain strings.
+    Previously this relied on Python's repr() of the list, which worked accidentally;
+    now we use explicit plain-text extraction so the detection is robust."""
+    from ouroboros.context_compaction import _round_has_protected_content
+
+    messages = [
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "text", "text": "CHECKPOINT_REFLECTION:\n- Known: x\n- Blocker: none\n- Decision: proceed\n- Next: done"}
+            ],
+            "tool_calls": [{"id": "c1", "function": {"name": "repo_read", "arguments": "{}"}}],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "c1",
+            "content": "result",
+        },
+    ]
+    assert _round_has_protected_content(messages, 0, 1) is True
+
+
+def test_round_has_protected_content_list_without_marker():
+    """List content without CHECKPOINT_REFLECTION should not be protected."""
+    from ouroboros.context_compaction import _round_has_protected_content
+
+    messages = [
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "text", "text": "Just reasoning, nothing special here."}
+            ],
+            "tool_calls": [{"id": "c1", "function": {"name": "repo_read", "arguments": "{}"}}],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "c1",
+            "content": "result",
+        },
+    ]
+    assert _round_has_protected_content(messages, 0, 1) is False
