@@ -1,4 +1,4 @@
-# Ouroboros v4.28.2 — Architecture & Reference
+# Ouroboros v4.28.3 — Architecture & Reference
 
 This document describes every component, page, button, API endpoint, and data flow.
 It is the single source of truth for how the system works. Keep it updated.
@@ -305,8 +305,11 @@ The Dashboard tab has been removed. Its functionality is now distributed:
 - **Local Model Runtime**: source, GGUF filename, port, GPU layers, context length, chat format, start/stop/test buttons, live local-model status, real download progress bar (updates via `download_progress` from `/api/local-model/status`), and an **Install Local Runtime** button (hidden until runtime is missing). The Start button performs a preflight check via `/api/local-model/start` before downloading; on a `runtime_missing` (HTTP 412) response it surfaces the install button and a human-readable hint instead of a raw traceback. After install completes (`runtime_status == "install_ok"`), the start flow resumes automatically if a source was configured. `LOCAL_MODEL_FILENAME` now accepts subfolder paths (`quant/model.gguf`) and split GGUF patterns (`quant/model-00001-of-00003.gguf`); all shards are downloaded automatically and the server is started with the first shard. If the user omits the subfolder prefix (types just the bare filename), `_resolve_hf_path` auto-resolves the full path by querying `list_repo_files` on the HF repo (fail-open on network errors).
 - **Telegram**: Bot Token and primary chat id. If no primary chat id is pinned, the bridge binds to the first active Telegram chat and keeps replies attached there.
 - **GitHub**: Token + Repo (for remote sync).
-- **Save Settings** button → POST `/api/settings`. Applies to env immediately.
-  Budget and tool-timeout changes take effect immediately; provider/runtime changes may still require restart.
+- **Save Settings** button → POST `/api/settings`. Hot-reload contract:
+  - **Budget (`TOTAL_BUDGET`), timeouts (`OUROBOROS_SOFT_TIMEOUT_SEC`, `OUROBOROS_HARD_TIMEOUT_SEC`, `OUROBOROS_TOOL_TIMEOUT_SEC`), and integrations (`TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `GITHUB_TOKEN`, `GITHUB_REPO`)**: refresh immediately in the running supervisor (no restart, no task boundary). `/status` reads live timeout values.
+  - **Models, API keys, effort, review settings, `OUROBOROS_PER_TASK_COST_USD`**: applied via `apply_settings_to_env(load_settings())` at the start of the **next task**. Current in-flight task is unaffected.
+  - **Local model server, worker count, base URLs, and some provider runtime parameters**: require a full process restart to take effect.
+  - Save response always includes `status: "saved"`. Optional keys present only when applicable: `no_changes` (bool), `restart_required` (bool) + `restart_keys` (list), `immediate_changed` (bool, true when any key from `_IMMEDIATE_KEYS` changed — budget, timeouts, Telegram, GitHub), `next_task_changed` (bool, true when any other hot-reloadable key changed — models, API keys, effort, review settings, per-task cost), `warnings` (list). UI shows a 5-state message: no changes → restart required → mixed immediate+next-task → immediate only → next-task only; warnings appended to all branches.
 - **Reset All Data** button (Danger Zone) → POST `/api/reset`.
   Deletes: state/, memory/, logs/, archive/, uploads/, settings.json.
   Keeps: repo/ (agent code).

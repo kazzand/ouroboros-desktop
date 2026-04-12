@@ -146,6 +146,50 @@ def _looks_masked_secret(value: Any) -> bool:
     return text == "***" or text.endswith("...")
 
 
+# Keys that refresh immediately in the running supervisor (no restart, no task boundary).
+_IMMEDIATE_KEYS = frozenset({
+    "TOTAL_BUDGET",
+    "OUROBOROS_SOFT_TIMEOUT_SEC",
+    "OUROBOROS_HARD_TIMEOUT_SEC",
+    "OUROBOROS_TOOL_TIMEOUT_SEC",
+    # Integration settings reconfigured inline in api_settings_post
+    "TELEGRAM_BOT_TOKEN",
+    "TELEGRAM_CHAT_ID",
+    "GITHUB_TOKEN",
+    "GITHUB_REPO",
+})
+
+# Keys that require a full process restart when changed.
+# Everything else is hot-reloadable (takes effect on the next task).
+_RESTART_REQUIRED_KEYS = frozenset({
+    "OUROBOROS_MAX_WORKERS",
+    "LOCAL_MODEL_SOURCE",
+    "LOCAL_MODEL_FILENAME",
+    "LOCAL_MODEL_PORT",
+    "LOCAL_MODEL_N_GPU_LAYERS",
+    "LOCAL_MODEL_CONTEXT_LENGTH",
+    "LOCAL_MODEL_CHAT_FORMAT",
+    "OPENAI_BASE_URL",
+    "OPENAI_COMPATIBLE_BASE_URL",
+    "CLOUDRU_FOUNDATION_MODELS_BASE_URL",
+})
+
+
+def _classify_settings_changes(
+    old: Dict[str, Any],
+    new: Dict[str, Any],
+) -> list:
+    """Return list of changed keys that require a process restart.
+
+    Keys that changed but are NOT in ``_RESTART_REQUIRED_KEYS`` are
+    hot-reloadable — they take effect at the start of the next task.
+    """
+    return [
+        k for k in _RESTART_REQUIRED_KEYS
+        if str(new.get(k, "") or "") != str(old.get(k, "") or "")
+    ]
+
+
 def _merge_settings_payload(current: Dict[str, Any], body: Dict[str, Any]) -> Dict[str, Any]:
     merged = {k: v for k, v in current.items()}
     for key in _SETTINGS_DEFAULTS:
@@ -393,8 +437,9 @@ def _process_bridge_updates(bridge, offset: int, ctx: Any) -> int:
                 ctx.send_with_budget(chat_id, f"🧠 Background consciousness: {bg_status}")
         elif lowered.startswith("/status"):
             from supervisor.state import status_text
+            from supervisor.queue import SOFT_TIMEOUT_SEC, HARD_TIMEOUT_SEC
 
-            status = status_text(ctx.WORKERS, ctx.PENDING, ctx.RUNNING, ctx.soft_timeout, ctx.hard_timeout)
+            status = status_text(ctx.WORKERS, ctx.PENDING, ctx.RUNNING, SOFT_TIMEOUT_SEC, HARD_TIMEOUT_SEC)
             ctx.send_with_budget(chat_id, status, force_budget=True)
         else:
             ctx.consciousness.inject_observation(f"Owner message: {log_text}")
@@ -835,16 +880,44 @@ async def api_claude_code_install(request: Request) -> JSONResponse:
 async def api_settings_post(request: Request) -> JSONResponse:
     try:
         body = await request.json()
-        current = _merge_settings_payload(load_settings(), body)
+        old_settings = load_settings()
+        current = _merge_settings_payload(old_settings, body)
         current, provider_defaults_changed, provider_default_keys = apply_runtime_provider_defaults(current)
         if str(current.get("LOCAL_MODEL_SOURCE", "") or "").strip() and not has_supervisor_provider(current):
             return JSONResponse(
                 {"error": "Local-only setups must route at least one model to the local runtime."},
                 status_code=400,
             )
+        # Detect what actually changed before saving.
+        all_changed = [
+            k for k in current
+            if str(current.get(k, "") or "") != str(old_settings.get(k, "") or "")
+        ]
+        restart_keys = _classify_settings_changes(old_settings, current)
+
         save_settings(current)
         _apply_settings_to_env(current)
         _start_supervisor_if_needed(current)
+
+        # Hot-reload supervisor globals that can change without restart.
+        try:
+            from supervisor.state import refresh_budget_from_settings
+            refresh_budget_from_settings(current)
+        except Exception:
+            pass
+        try:
+            from supervisor.queue import refresh_timeouts_from_settings
+            refresh_timeouts_from_settings(current)
+        except Exception:
+            pass
+        try:
+            from supervisor.message_bus import refresh_budget_limit
+            raw_budget = current.get("TOTAL_BUDGET")
+            new_budget = float(raw_budget) if raw_budget is not None else 0.0
+            refresh_budget_limit(new_budget)
+        except Exception:
+            pass
+
         warnings = []
         if provider_defaults_changed:
             warnings.append(
@@ -867,7 +940,21 @@ async def api_settings_post(request: Request) -> JSONResponse:
                 mig_ok, mig_msg = migrate_remote_credentials()
                 if not mig_ok:
                     log.warning("Credential migration failed: %s", mig_msg)
-        resp = {"status": "saved"}
+        immediate_changed = [k for k in all_changed if k in _IMMEDIATE_KEYS]
+        next_task_changed = [
+            k for k in all_changed
+            if k not in _IMMEDIATE_KEYS and k not in _RESTART_REQUIRED_KEYS
+        ]
+        resp: Dict[str, Any] = {"status": "saved"}
+        if not all_changed:
+            resp["no_changes"] = True
+        if restart_keys:
+            resp["restart_required"] = True
+            resp["restart_keys"] = restart_keys
+        if immediate_changed:
+            resp["immediate_changed"] = True
+        if next_task_changed:
+            resp["next_task_changed"] = True
         if warnings:
             resp["warnings"] = warnings
         return JSONResponse(resp)

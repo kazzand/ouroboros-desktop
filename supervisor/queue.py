@@ -42,6 +42,27 @@ def init(drive_root: pathlib.Path, soft_timeout: int, hard_timeout: int) -> None
     HARD_TIMEOUT_SEC = hard_timeout
 
 
+def refresh_timeouts_from_settings(settings: dict) -> None:
+    """Hot-reload soft/hard timeout globals from a settings dict.
+
+    Each key is parsed independently — a bad value for one key does not
+    prevent the other from being updated.  Silently swallows parse errors.
+    """
+    global SOFT_TIMEOUT_SEC, HARD_TIMEOUT_SEC
+    soft_raw = settings.get("OUROBOROS_SOFT_TIMEOUT_SEC")
+    if soft_raw is not None:
+        try:
+            SOFT_TIMEOUT_SEC = int(soft_raw)
+        except (TypeError, ValueError):
+            pass
+    hard_raw = settings.get("OUROBOROS_HARD_TIMEOUT_SEC")
+    if hard_raw is not None:
+        try:
+            HARD_TIMEOUT_SEC = int(hard_raw)
+        except (TypeError, ValueError):
+            pass
+
+
 # ---------------------------------------------------------------------------
 # Queue data structures (references to workers module globals)
 # ---------------------------------------------------------------------------

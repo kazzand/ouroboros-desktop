@@ -255,6 +255,23 @@ def set_budget_limit(limit: float) -> None:
     TOTAL_BUDGET_LIMIT = limit
 
 
+def refresh_budget_from_settings(settings: Dict[str, Any]) -> None:
+    """Hot-reload total budget limit from a settings dict.
+
+    Reads ``TOTAL_BUDGET`` and updates the module-level ``TOTAL_BUDGET_LIMIT``
+    global so the running supervisor sees the new value immediately.
+
+    Silently swallows parse errors so a bad value never crashes the supervisor.
+    Missing key → treated as 0.0 (no limit).
+    """
+    try:
+        raw = settings.get("TOTAL_BUDGET")
+        value = float(raw) if raw is not None else 0.0
+        set_budget_limit(value)
+    except (TypeError, ValueError):
+        pass
+
+
 def budget_remaining(st: Dict[str, Any]) -> float:
     """Calculate remaining budget in USD."""
     spent = float(st.get("spent_usd") or 0.0)

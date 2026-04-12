@@ -315,24 +315,6 @@ export function initSettings({ state }) {
 
     byId('btn-save-settings').addEventListener('click', async () => {
         const body = collectBody();
-        const restartSensitiveKeys = [
-            'OPENROUTER_API_KEY',
-            'OPENAI_API_KEY',
-            'ANTHROPIC_API_KEY',
-            'OPENAI_COMPATIBLE_API_KEY',
-            'CLOUDRU_FOUNDATION_MODELS_API_KEY',
-            'TELEGRAM_BOT_TOKEN',
-            'LOCAL_MODEL_SOURCE',
-            'LOCAL_MODEL_FILENAME',
-            'LOCAL_MODEL_PORT',
-            'OPENAI_BASE_URL',
-            'OPENAI_COMPATIBLE_BASE_URL',
-            'CLOUDRU_FOUNDATION_MODELS_BASE_URL',
-        ];
-        const restartHint = restartSensitiveKeys.some((key) => {
-            if (!Object.prototype.hasOwnProperty.call(body, key)) return false;
-            return String(body[key] ?? '') !== String(currentSettings[key] ?? '');
-        });
 
         try {
             const resp = await fetch('/api/settings', {
@@ -343,13 +325,25 @@ export function initSettings({ state }) {
             const data = await resp.json().catch(() => ({}));
             if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
             await loadSettings();
-            const baseMessage = data.warnings && data.warnings.length
-                ? ('Settings saved with warnings: ' + data.warnings.join(' | '))
-                : 'Settings saved. Budget changes take effect immediately.';
-            setStatus(
-                restartHint ? `${baseMessage} Restart may be required for provider/runtime changes.` : baseMessage,
-                data.warnings && data.warnings.length ? 'warn' : 'ok',
-            );
+            let statusMsg;
+            let statusType = 'ok';
+            if (data.no_changes) {
+                statusMsg = 'No changes detected.';
+            } else if (data.restart_required) {
+                statusMsg = 'Settings saved. Some changes require a restart to take effect.';
+                statusType = 'warn';
+            } else if (data.immediate_changed && data.next_task_changed) {
+                statusMsg = 'Settings saved. Some changes took effect immediately; others apply on the next task.';
+            } else if (data.immediate_changed) {
+                statusMsg = 'Settings saved. Changes took effect immediately.';
+            } else {
+                statusMsg = 'Settings saved. Changes take effect on the next task.';
+            }
+            if (data.warnings && data.warnings.length) {
+                statusMsg += ' ⚠️ ' + data.warnings.join(' | ');
+                statusType = 'warn';
+            }
+            setStatus(statusMsg, statusType);
         } catch (e) {
             alert('Failed to save: ' + e.message);
         }

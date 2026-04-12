@@ -50,6 +50,18 @@ def get_bridge() -> "LocalChatBridge":
     return _BRIDGE
 
 
+def refresh_budget_limit(new_limit: Optional[float]) -> None:
+    """Hot-reload the total budget limit used for status messages.
+
+    Accepts None gracefully (treated as 0.0 / no limit).
+    """
+    global TOTAL_BUDGET_LIMIT
+    try:
+        TOTAL_BUDGET_LIMIT = float(new_limit) if new_limit is not None else 0.0
+    except (TypeError, ValueError):
+        pass
+
+
 # ---------------------------------------------------------------------------
 # LocalChatBridge
 # ---------------------------------------------------------------------------

@@ -253,6 +253,17 @@ class OuroborosAgent:
         return ctx, messages, cap_info
 
     def handle_task(self, task: Dict[str, Any]) -> List[Dict[str, Any]]:
+        # Hot-reload settings at the start of every task so that changes saved
+        # via the UI (models, API keys, budget, effort, review config) take
+        # effect on the next task without requiring a full process restart.
+        # Errors are intentionally swallowed — a settings read failure must
+        # not prevent the task from running.
+        try:
+            from ouroboros.config import load_settings, apply_settings_to_env
+            apply_settings_to_env(load_settings())
+        except Exception:
+            pass
+
         self._busy = True
         start_time = time.time()
         self._task_started_ts = start_time
