@@ -1,4 +1,4 @@
-# Ouroboros v4.28.3 — Architecture & Reference
+# Ouroboros v4.28.4 — Architecture & Reference
 
 This document describes every component, page, button, API endpoint, and data flow.
 It is the single source of truth for how the system works. Keep it updated.
@@ -733,7 +733,7 @@ the constitutional guard is that the file itself must remain non-deletable.
 ### Background consciousness (consciousness.py)
 
 - Daemon thread, sleeps between wakeups (interval controlled by LLM via `set_next_wakeup`)
-- Loads full agent context: BIBLE, identity, scratchpad, knowledge base, drive state,
+- Loads full agent context: BIBLE, **ARCHITECTURE.md** (v4.28.4+), identity, scratchpad, knowledge base, drive state,
   health invariants, recent chat/progress/tools/events (same context as main agent)
 - Owner messages are forwarded to background consciousness in full text (not first-100-char previews).
 - Calls LLM with lightweight introspection prompt
@@ -998,6 +998,11 @@ errors surface via the same observability path.
 #### Triad diff review (enriched)
 
 - Three models review the staged diff against "Repo Commit Checklist" from CHECKLISTS.md.
+- **Core governance artifacts**: reviewers receive BIBLE.md (constitutional preamble),
+  **ARCHITECTURE.md** (full, via `_load_architecture_text` — first-class section, always
+  present regardless of whether ARCHITECTURE.md was touched), and DEVELOPMENT.md (full,
+  via `_load_dev_guide_text`). These are separate from the touched-file pack and are never
+  gated on file-change status.
 - **Full touched-file context**: reviewers see the complete current content of all changed
   files (via `build_touched_file_pack`), not just the patch hunks. Sensitive files (`.env`,
   `.pem`, `.key`, credentials files — case-insensitive) are omitted before reading. Binary

@@ -455,12 +455,26 @@ class BackgroundConsciousness:
         if bible_md:
             parts.append("## BIBLE.md\n\n" + bible_md)
 
+        # Section size warning threshold — defined early so all sections can use it.
+        _BG_SECTION_WARN_CHARS = 200_000  # warn if a single section exceeds ~50K tokens
+
+        # ARCHITECTURE.md — full (core cognitive artifact; must not be omitted)
+        architecture_md = safe_read(env.repo_path("docs/ARCHITECTURE.md"))
+        if architecture_md:
+            if len(architecture_md) > _BG_SECTION_WARN_CHARS:
+                import logging as _logging
+                _logging.getLogger(__name__).warning(
+                    "consciousness: ARCHITECTURE.md is large (%d chars) — "
+                    "consider restructuring if this consistently causes context overflow",
+                    len(architecture_md),
+                )
+            parts.append("## ARCHITECTURE.md\n\n" + architecture_md)
+
         # Memory sections: scratchpad, identity, dialogue summary (full size)
         parts.extend(build_memory_sections(memory))
 
         # Knowledge base index — full content, no clip_text.
         # If content grows very large, emit a warning rather than silently truncating.
-        _BG_SECTION_WARN_CHARS = 200_000  # warn if a single section exceeds ~50K tokens
         kb_index_path = env.drive_path("memory/knowledge/index-full.md")
         if kb_index_path.exists():
             kb_index = kb_index_path.read_text(encoding="utf-8")

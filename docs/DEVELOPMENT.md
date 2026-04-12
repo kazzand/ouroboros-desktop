@@ -100,6 +100,54 @@ Derived from P5 (Minimalism): entire codebase fits in one context window.
 
 ---
 
+## Core Governance Artifacts
+
+`BIBLE.md`, `docs/ARCHITECTURE.md`, and `docs/DEVELOPMENT.md` are **core governance artifacts**.
+They are the constitutional, architectural, and procedural ground truth of the system.
+
+### Invariant: Full availability in reasoning flows
+
+Any flow that requires architectural, constitutional, or procedural reasoning MUST include
+these artifacts as **first-class context sections** — not as optional or opportunistic
+inclusions via touched-file packs.
+
+Concrete requirements:
+
+| Flow | BIBLE.md | ARCHITECTURE.md | DEVELOPMENT.md |
+|------|----------|-----------------|----------------|
+| Main task context (`context.py`) | ✅ full | ✅ full | ✅ full |
+| Triad review (`tools/review.py`) | ✅ via preamble | ✅ via `_load_architecture_text` | ✅ via `_load_dev_guide_text` |
+| Background consciousness (`consciousness.py`) | ✅ full | ✅ full | — (not yet required) |
+| Advisory pre-review (`tools/claude_advisory_review.py`) | ✅ via `_load_doc` | ✅ via `_load_doc` | ✅ via `_load_doc` |
+| Scope review (`tools/scope_review.py`) | via full repo pack | via full repo pack | via full repo pack |
+| Deep self-review (`deep_self_review.py`) | via full repo pack | via full repo pack | via full repo pack |
+
+### Invariant: No silent truncation
+
+If a core governance artifact cannot fit in the available context budget:
+- Do **not** silently omit it or truncate it without a visible marker.
+- Either adjust the budget/flow to accommodate it, or emit an explicit warning
+  (`⚠️ OMISSION NOTE: ARCHITECTURE.md omitted due to budget constraints`) so the
+  operator and the model both know the context is incomplete.
+- A reviewer or agent operating without ARCHITECTURE.md MUST NOT be treated as
+  operating with full context — findings may be incomplete.
+
+### Invariant: No "only if touched" gate for core artifacts
+
+Core governance artifacts reach review/reasoning flows unconditionally — NOT only
+when they appear in `touched_paths`. The `build_touched_file_pack` function is for
+_changed_ files; core artifacts are a separate concern and are loaded independently.
+
+### When adding a new reasoning flow
+
+If you add a new flow that reasons about code structure, system architecture, or
+engineering standards, you MUST:
+1. Explicitly load `ARCHITECTURE.md` (and BIBLE.md if constitutional reasoning applies).
+2. Log a warning if the file is missing or unavailable — do not silently skip.
+3. Add a test asserting the file is present in the assembled context/prompt.
+
+---
+
 ## Review & Commit Protocol
 
 Reviewed commits now have an explicit **two-step gate**:
@@ -164,6 +212,7 @@ Before every commit, verify the following:
 
 #### Cognitive Artifact Integrity
 - [ ] Cognitive artifacts (identity.md, scratchpad, task reflections, review outputs, pattern register) must NOT use hardcoded `[:N]` truncation. If content must be shortened, include an explicit omission note (e.g. `⚠️ OMISSION NOTE: truncated at N chars`).
+- [ ] `BIBLE.md`, `docs/ARCHITECTURE.md`, and `docs/DEVELOPMENT.md` are **core governance artifacts**. All primary reasoning flows (triad review, consciousness, advisory pre-review, deep review) include them as first-class sections — see the "Core Governance Artifacts" table. If you add a new reasoning flow, it MUST follow this contract, not rely on touched-file inclusions.
 
 ---
 

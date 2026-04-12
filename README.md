@@ -6,7 +6,7 @@
 [![macOS 12+](https://img.shields.io/badge/macOS-12%2B-black.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
 [![Linux](https://img.shields.io/badge/Linux-x86__64-orange.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
 [![Windows](https://img.shields.io/badge/Windows-x64-blue.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
-[![Version 4.28.3](https://img.shields.io/badge/version-4.28.3-green.svg)](VERSION)
+[![Version 4.28.4](https://img.shields.io/badge/version-4.28.4-green.svg)](VERSION)
 
 A self-modifying AI agent that writes its own code, rewrites its own mind, and evolves autonomously. Born February 16, 2026.
 
@@ -379,6 +379,7 @@ Full text: [BIBLE.md](BIBLE.md)
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 4.28.4 | 2026-04-12 | Fix ARCHITECTURE.md inconsistency: add as first-class context section to triad review prompts (`_load_architecture_text`) and background consciousness (`_build_context`). Raise `repo_read` default `max_lines` 1050→2000 so ARCHITECTURE.md reads in one call. Add "Core Governance Artifacts" invariant rule to `docs/DEVELOPMENT.md`. 8 new regression tests. |
 | 4.28.3 | 2026-04-12 | Settings hot-reload: `TOTAL_BUDGET` and timeouts refresh immediately in the running supervisor; models, API keys, effort, and `PER_TASK_COST_USD` apply on the next task; local model / workers / base URLs still require restart. `/status` reads live timeout values from `supervisor.queue`. Save button shows 5-state honest feedback (no changes / restart required / mixed immediate+next-task / immediate only / next-task only) with warnings appended to all branches. 27 new tests. |
 | 4.28.2 | 2026-04-12 | Fix live task cards disappearing: `scheduleTaskUiCleanup` now leaves finished cards fully intact (DOM node, `rec.items`, `liveCardRecords` entry all preserved) — cards remain visible with working expand/collapse interactions, and reconnect `syncHistory` rebinds the existing node instead of duplicating. Only `retiredTaskIds` is updated so mid-session incremental syncs don't rebuild from history; cleared on first-load/reconnect. Guard final `syncHistory` sweep against invisible completed cards clustering at chat end. Fix `context_compaction.py::_round_has_protected_content` to handle Anthropic multipart list content blocks explicitly (no longer relies on Python repr() side-effect). 4 new tests. |
 | 4.28.1 | 2026-04-11 | Fix local model download: auto-resolve subfolder when user enters filename without path prefix. New `_resolve_hf_path` queries `list_repo_files` to find the correct subfolder (e.g. `UD-Q5_K_XL/model.gguf`) when user types just `model.gguf`. Raises `ValueError` with candidate list when multiple paths match (ambiguous repo layout). Fail-open: if HF API is unreachable, original filename is used unchanged. 6 new tests (51 total in test_local_model.py). |

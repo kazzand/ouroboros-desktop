@@ -37,7 +37,7 @@ def _list_dir(root: pathlib.Path, rel: str, max_entries: int = 500) -> List[str]
     return items
 
 
-def _repo_read(ctx: ToolContext, path: str, max_lines: int = 1050, start_line: int = 1) -> str:
+def _repo_read(ctx: ToolContext, path: str, max_lines: int = 2000, start_line: int = 1) -> str:
     """Read a file from the repo, optionally slicing to a line range."""
     content = read_text(ctx.repo_path(path))
     lines = content.splitlines(keepends=True)
@@ -495,13 +495,13 @@ def get_tools() -> List[ToolEntry]:
             "name": "repo_read",
             "description": (
                 "Read a UTF-8 text file from the local repo (relative path). "
-                "Use max_lines (default 1050) and start_line (default 1) to read large files in chunks. "
+                "Use max_lines (default 2000) and start_line (default 1) to read large files in chunks. "
                 "The result header shows 'lines X\u2013Y of Z' so you know whether you saw the full file."
             ),
             "parameters": {"type": "object", "properties": {
                 "path": {"type": "string"},
-                "max_lines": {"type": "integer", "default": 1050,
-                              "description": "Maximum number of lines to return (default 1050)."},
+                "max_lines": {"type": "integer", "default": 2000,
+                              "description": "Maximum number of lines to return (default 2000)."},
                 "start_line": {"type": "integer", "default": 1,
                                "description": "1-indexed line to start reading from (default 1 = beginning)."},
             }, "required": ["path"]},

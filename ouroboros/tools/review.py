@@ -363,6 +363,10 @@ You must produce a JSON array. Each element has:
 
 {dev_guide_text}
 
+## ARCHITECTURE.md
+
+{architecture_section}
+
 ## Current touched files (full content)
 
 {current_files_section}
@@ -740,6 +744,18 @@ def _load_dev_guide_text(repo_dir: pathlib.Path) -> str:
     return ""
 
 
+def _load_architecture_text(repo_dir: pathlib.Path) -> str:
+    """Load ARCHITECTURE.md in full — core cognitive artifact, must not be omitted."""
+    arch_path = repo_dir / "docs" / "ARCHITECTURE.md"
+    try:
+        if arch_path.exists():
+            return arch_path.read_text(encoding="utf-8")
+    except Exception:
+        pass
+    log.warning("docs/ARCHITECTURE.md not found for triad review context")
+    return ""
+
+
 def _collect_review_findings(ctx: ToolContext, model_results: list) -> tuple[list[str], list[str], list[str]]:
     critical_fails: List[str] = []
     advisory_warns: List[str] = []
@@ -987,6 +1003,7 @@ def _run_unified_review(ctx: ToolContext, commit_message: str,
         )
 
     dev_guide_text = _load_dev_guide_text(pathlib.Path(ctx.repo_dir))
+    architecture_text = _load_architecture_text(pathlib.Path(ctx.repo_dir))
 
     review_history_section = _build_review_history_section(ctx._review_history)
 
@@ -1015,6 +1032,7 @@ def _run_unified_review(ctx: ToolContext, commit_message: str,
         checklist_section=checklist_section,
         goal_section=goal_section,
         dev_guide_text=dev_guide_text or "(DEVELOPMENT.md not found)",
+        architecture_section=architecture_text or "(ARCHITECTURE.md not found)",
         current_files_section=current_files_section,
         rebuttal_section=rebuttal_section,
         review_history_section=review_history_section,
