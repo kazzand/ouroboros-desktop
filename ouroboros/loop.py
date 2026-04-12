@@ -176,11 +176,14 @@ def _maybe_inject_self_check(
     task_id: str = "",
     drive_logs: Optional[pathlib.Path] = None,
 ) -> bool:
-    """Inject a freeform self-check reminder every REMINDER_INTERVAL rounds.
+    """Inject a structured self-audit reminder every REMINDER_INTERVAL rounds.
 
-    Asks the LLM to pause and write a brief reflection in free text, then
-    continue with a tool call. No parsing required — the reflection stays
-    in the transcript as natural assistant content (P3 LLM-First, P5 Minimalism).
+    Asks the LLM to write a CHECKPOINT_REFLECTION block (tools=None on this
+    round — structural constraint, not a prompt instruction).  The calling loop
+    in run_llm_loop checks for the CHECKPOINT_REFLECTION marker in the response:
+      • Marker present → assistant message + user acknowledgment are appended;
+        loop continues with full tools on the next round.
+      • No marker → response treated as a final answer; task terminates normally.
 
     Emits a task_checkpoint event for observability.
     Returns True if a checkpoint was injected.
@@ -208,7 +211,7 @@ def _maybe_inject_self_check(
     if tool_trace:
         reminder += f"{tool_trace}\n\n"
     reminder += (
-        "⏸️ PAUSE AND REFLECT before continuing. Write a `CHECKPOINT_REFLECTION:` block "
+        "⏸️ PAUSE AND REFLECT. Write a `CHECKPOINT_REFLECTION:` block "
         "in plain text with exactly these four lines:\n"
         "- **Known:** What I have verified as true about the current state (not assumptions)\n"
         "- **Blocker:** The concrete obstacle right now, or 'none'\n"
@@ -218,8 +221,10 @@ def _maybe_inject_self_check(
         "Avoid vague language like 'continue working'. "
         "Keep total length under 100 words. "
         "Start the block with `CHECKPOINT_REFLECTION:` on its own line. "
-        "Then immediately continue with your next tool call in the same response. "
-        "If the task is genuinely complete, give the final answer instead."
+        "Your response on this turn must be ONLY the reflection block — tools are not "
+        "available on this turn. After your reflection is recorded, you will be able to "
+        "continue with tools on the next turn. "
+        "If the task is genuinely complete, give the final answer instead (no marker needed)."
     )
 
     messages.append({"role": "system", "content": reminder})
@@ -450,6 +455,59 @@ def _drain_incoming_messages(
                     pass
 
 
+_CHECKPOINT_CONTINUE = object()  # Sentinel: checkpoint recorded, loop should continue.
+
+
+def _handle_checkpoint_response(
+    msg: Dict[str, Any],
+    round_idx: int,
+    task_id: str,
+    event_queue: Optional[queue.Queue],
+    drive_logs: Optional[pathlib.Path],
+    emit_progress: Callable[[str], None],
+    llm_trace: Dict[str, Any],
+    accumulated_usage: Dict[str, Any],
+) -> Any:
+    """Process the LLM response on a checkpoint round (tools=None was passed).
+
+    Returns _CHECKPOINT_CONTINUE when the loop should continue with full tools,
+    or a (text, usage, trace) tuple when the task should terminate (the caller
+    must return that tuple directly).
+
+    The LLM always returns text-only on checkpoint rounds because tools=None is
+    passed structurally.  Two cases:
+      (A) Response starts with the CHECKPOINT_REFLECTION: marker → add to transcript,
+          inject user acknowledgment, return _CHECKPOINT_CONTINUE.
+      (B) No marker → treat as a final answer and return the terminal tuple.
+    """
+    raw_content = msg.get("content") or ""
+    reflection_text = _extract_plain_text_from_content(raw_content).strip()
+
+    # Anchored match: the reflection must START with the marker header (after optional
+    # leading whitespace).  A plain `in` check would misclassify a final answer that
+    # merely mentions the marker text (e.g. 'no CHECKPOINT_REFLECTION needed here').
+    if reflection_text.lstrip().startswith("CHECKPOINT_REFLECTION:"):
+        # Emit reflection event and progress ONLY when the marker is actually present.
+        # A final answer (no marker) must not be mislabelled as a reflection event.
+        if reflection_text:
+            _emit_checkpoint_reflection_event(
+                reflection_text, round_idx, task_id, event_queue, drive_logs,
+            )
+            checkpoint_num = round_idx // 15
+            emit_progress(
+                f"🔍 Checkpoint {checkpoint_num} reflection (round {round_idx}):\n{reflection_text}"
+            )
+        # Append reasoning_notes ONLY on the continuation path so that
+        # _handle_text_response on the termination path does not create a duplicate.
+        llm_trace["reasoning_notes"].append(reflection_text)
+        return _CHECKPOINT_CONTINUE
+
+    # No valid marker → LLM gave a final answer (or empty response).
+    # Pass reflection_text (already normalised from possible multipart list) to avoid
+    # AttributeError on _handle_text_response's .strip() call.
+    return _handle_text_response(reflection_text, llm_trace, accumulated_usage)
+
+
 def run_llm_loop(
     messages: List[Dict[str, Any]],
     tools: ToolRegistry,
@@ -541,7 +599,13 @@ def run_llm_loop(
 
             _compaction_usage = None
             pending_compaction = getattr(tools._ctx, '_pending_compaction', None)
-            if pending_compaction is not None:
+            if _checkpoint_injected:
+                # Skip ALL compaction on checkpoint rounds — including pending compaction
+                # requests — so the full recent context is available for the reflection
+                # (P1 Continuity).  A pending request is left in _pending_compaction so
+                # it will be honoured on the next non-checkpoint round.
+                pass
+            elif pending_compaction is not None:
                 messages, _compaction_usage = compact_tool_history_llm(messages, keep_recent=pending_compaction)
                 tools._ctx._pending_compaction = None
             elif round_idx > 12:
@@ -564,8 +628,14 @@ def run_llm_loop(
             # non-Anthropic providers strip cache_control in llm.py).
             seal_task_transcript(messages)
 
+            # On checkpoint rounds: pass tools=None so the LLM is forced to write
+            # a text reflection rather than immediately making a tool call.
+            # This is a structural constraint, not a prompt instruction (the LLM
+            # always chooses tools when they are present, per reported behaviour).
+            _checkpoint_tool_schemas = None if _checkpoint_injected else tool_schemas
+
             msg, cost = call_llm_with_retry(
-                llm, messages, active_model, tool_schemas, active_effort,
+                llm, messages, active_model, _checkpoint_tool_schemas, active_effort,
                 max_retries, drive_logs, task_id, round_idx, event_queue, accumulated_usage, task_type,
                 use_local=active_use_local,
             )
@@ -590,7 +660,7 @@ def run_llm_loop(
                 fallback_tag = " (local)" if fallback_use_local else ""
                 emit_progress(f"⚡ Fallback: {active_model}{primary_tag} → {fallback_model}{fallback_tag} after empty response")
                 msg, fallback_cost = call_llm_with_retry(
-                    llm, messages, fallback_model, tool_schemas, active_effort,
+                    llm, messages, fallback_model, _checkpoint_tool_schemas, active_effort,
                     max_retries, drive_logs, task_id, round_idx, event_queue, accumulated_usage, task_type,
                     use_local=fallback_use_local,
                 )
@@ -602,33 +672,24 @@ def run_llm_loop(
                         f"Background consciousness will attempt recovery when the provider is back."
                     ), accumulated_usage, llm_trace
 
-            # On checkpoint rounds: emit the reflection event (full content, no parsing).
-            # Also emit a visible progress message so the reflection appears in the chat
-            # live card timeline AND survives history reconstruction from progress.jsonl.
-            # If the LLM returned only text (no tool calls), treat it as a final answer
-            # so the task can terminate normally on a checkpoint round. The checkpoint
-            # prompt explicitly says "give the final answer instead" if genuinely complete.
             if _checkpoint_injected:
-                raw_content = msg.get("content") or ""
-                tool_calls_cp = msg.get("tool_calls") or []
-                if raw_content:
-                    # Normalize content — may be a string or a list of content blocks.
-                    reflection_text = _extract_plain_text_from_content(raw_content).strip()
-                    _emit_checkpoint_reflection_event(
-                        reflection_text, round_idx, task_id, event_queue, drive_logs,
-                    )
-                    # Emit a progress message carrying the full reflection text so it:
-                    # (a) appears in the chat live card via is_progress events, and
-                    # (b) survives page reload/reconnect via progress.jsonl replay.
-                    # No truncation — this is a cognitive artifact (P1 Continuity, DEVELOPMENT.md).
-                    checkpoint_num_cp = round_idx // 15
-                    emit_progress(
-                        f"🔍 Checkpoint {checkpoint_num_cp} reflection (round {round_idx}):\n{reflection_text}"
-                    )
-                if not tool_calls_cp:
-                    # Text-only on a checkpoint round = task complete (or reflection without
-                    # more work to do). Terminate normally — do not force an extra round.
-                    return _handle_text_response(raw_content, llm_trace, accumulated_usage)
+                cp_result = _handle_checkpoint_response(
+                    msg, round_idx, task_id, event_queue, drive_logs,
+                    emit_progress, llm_trace, accumulated_usage,
+                )
+                if cp_result is _CHECKPOINT_CONTINUE:
+                    # Reflection recorded — append transcript and continue with tools.
+                    reflection_text = _extract_plain_text_from_content(
+                        msg.get("content") or ""
+                    ).strip()
+                    messages.append({"role": "assistant", "content": reflection_text})
+                    messages.append({
+                        "role": "user",
+                        "content": "Reflection recorded. Continue with the task using your tools.",
+                    })
+                    continue
+                else:
+                    return cp_result  # (text, usage, trace) terminal tuple
 
             tool_calls = msg.get("tool_calls") or []
             content = msg.get("content")

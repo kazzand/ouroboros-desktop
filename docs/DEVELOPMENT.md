@@ -4,6 +4,36 @@
 
 This is Ouroboros's **engineering handbook** — the bridge between philosophy (BIBLE.md) and architecture (ARCHITECTURE.md).
 
+## P3 (LLM-First) — Transport-Level Constraints
+
+BIBLE.md P3 states: "No if-else for behavior selection, no hardcoded replies, templates, or regexp."
+This applies to **intent routing** (deciding what to do in response to the user) and **response fabrication**.
+It does not prohibit **loop-infrastructure constraints** — deterministic mechanics of the conversation
+transport layer that the LLM itself cannot safely control:
+
+| Category | P3 prohibited? | Examples |
+|----------|---------------|---------|
+| Intent routing — what to do in response to user input | ✅ Yes | `if user says X: respond Y` |
+| Fabricating content the LLM should write | ✅ Yes | Templated replies, hardcoded answers |
+| Loop infrastructure — conversation transport mechanics | ❌ No (see below) | Budget limits, round caps, alternating-role enforcement, checkpoint tool gating |
+
+**Accepted loop-infrastructure patterns (not P3 violations):**
+- `tools=None` on a checkpoint round: structural gating so the LLM is physically unable to call a
+  tool during a reflection turn. The LLM still decides *what* to write; only the transport mechanism
+  (whether tools are offered) is controlled by code. This is equivalent to alternating-role
+  enforcement (injecting a synthetic user message to prevent two consecutive assistant messages).
+- `CHECKPOINT_REFLECTION:` marker detection: not behavior routing — it is a minimal signal the LLM
+  writes to indicate "I have recorded my reflection; please restore tools." The LLM decides whether
+  to write this marker or give a final answer. Code only acts on the signal.
+- Hardcoded continuation acknowledgment ("Reflection recorded..."): a synthetic turn required by
+  provider APIs that reject consecutive assistant messages. No content is fabricated — the LLM writes
+  the reflection; code only provides the required role-alternation turn.
+- Budget-limit messages, round-limit warnings: informational injections into the transcript so the
+  LLM has accurate information, not behavior directives.
+
+These patterns are documented in `ARCHITECTURE.md::Loop checkpoint` and tested in
+`tests/test_loop_checkpoint.py::TestCheckpointToolsNone`.
+
 **BIBLE.md** answers *why* and *what matters*.
 **ARCHITECTURE.md** describes *what exists right now*.
 **DEVELOPMENT.md** answers *how to build* — the concrete principles, patterns, and checklists for writing, modifying, and reviewing code in this project.

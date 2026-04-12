@@ -1,4 +1,4 @@
-# Ouroboros v4.28.5 — Architecture & Reference
+# Ouroboros v4.28.6 — Architecture & Reference
 
 This document describes every component, page, button, API endpoint, and data flow.
 It is the single source of truth for how the system works. Keep it updated.
@@ -554,8 +554,20 @@ backward compatibility but is not the runtime authority.
   asks the LLM to write a `CHECKPOINT_REFLECTION:` block with four structured fields:
   **Known** (verified facts), **Blocker** (concrete obstacle or 'none'), **Decision** (approach
   and rationale), **Next** (most important next action). The prompt explicitly asks for specific
-  file/function names and prohibits vague language like "continue working". **No parsing** —
-  the reflection stays in the transcript as natural assistant content (P3 LLM-First, P5 Minimalism).
+  file/function names and prohibits vague language like "continue working".
+  **Structural tool suppression** (v4.28.6): `tools=None` is passed to `call_llm_with_retry` on
+  checkpoint rounds (both primary and fallback paths). This is a structural constraint — the LLM
+  cannot make a tool call even if instructed to, so the reflection is guaranteed to be text. The
+  prompt explains that tools are unavailable on this turn but will be restored on the next turn.
+  Context compaction is also skipped on checkpoint rounds so the reflection can analyse the full
+  recent context (P1 Continuity).
+  **Continuation logic**: if the response starts with the `CHECKPOINT_REFLECTION:` header (anchored
+  `startswith` check — a `in` substring check would misclassify a final answer that merely mentions
+  the marker), the assistant message and a user acknowledgment ("Reflection recorded. Continue with
+  the task using your tools.") are appended to the transcript and the loop continues with full tools
+  on the next round. If the response does not begin with the marker, it is treated as a final answer
+  and the task terminates normally. This lets the LLM complete the task on a checkpoint round when
+  genuinely done.
   **Compaction protection**: `context_compaction.py::_round_has_protected_content` detects
   assistant messages containing `"CHECKPOINT_REFLECTION"` and marks the entire span as protected,
   so reflection rounds survive `compact_tool_history_llm` and remain visible to all subsequent
@@ -564,10 +576,7 @@ backward compatibility but is not the runtime authority.
   full assistant content (no truncation, P1 Continuity); (2) a progress message
   `"🔍 Checkpoint N reflection (round R):\n{full_content}"` is emitted via `emit_progress` —
   **no truncation** — so the full reflection text appears in the chat live card timeline (as a
-  standard progress step) AND survives page reload/reconnect via `progress.jsonl` replay. If the
-  LLM returns text-only (no tool calls) on a checkpoint round, the task terminates normally —
-  the text-only response is treated as a final answer, matching the checkpoint prompt instruction
-  "give the final answer instead."
+  standard progress step) AND survives page reload/reconnect via `progress.jsonl` replay.
   `task_checkpoint` and `task_checkpoint_reflection` events are handled in
   `web/modules/log_events.js::summarizeLogEvent` (Logs tab timeline with metadata) and also by
   `summarizeChatLiveEvent` (returns `visible: false` for both — the chat live card shows the
