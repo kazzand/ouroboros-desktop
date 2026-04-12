@@ -459,6 +459,8 @@ class BackgroundConsciousness:
         _BG_SECTION_WARN_CHARS = 200_000  # warn if a single section exceeds ~50K tokens
 
         # ARCHITECTURE.md — full (core cognitive artifact; must not be omitted)
+        # Per docs/DEVELOPMENT.md Core Governance Artifacts invariant: log a warning
+        # if the file is missing so the operator knows context is incomplete.
         architecture_md = safe_read(env.repo_path("docs/ARCHITECTURE.md"))
         if architecture_md:
             if len(architecture_md) > _BG_SECTION_WARN_CHARS:
@@ -469,6 +471,12 @@ class BackgroundConsciousness:
                     len(architecture_md),
                 )
             parts.append("## ARCHITECTURE.md\n\n" + architecture_md)
+        else:
+            import logging as _logging
+            _logging.getLogger(__name__).warning(
+                "consciousness: docs/ARCHITECTURE.md not found or empty — "
+                "background consciousness is operating without architectural context"
+            )
 
         # Memory sections: scratchpad, identity, dialogue summary (full size)
         parts.extend(build_memory_sections(memory))

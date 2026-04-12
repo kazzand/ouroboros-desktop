@@ -272,6 +272,70 @@ def test_load_architecture_text_returns_empty_on_missing(tmp_path):
     assert result == "", "Missing ARCHITECTURE.md should return empty string, not raise"
 
 
+def test_consciousness_logs_warning_when_architecture_md_missing(tmp_path):
+    """BackgroundConsciousness._build_context must log a warning when ARCHITECTURE.md is absent.
+
+    Per the Core Governance Artifacts invariant in docs/DEVELOPMENT.md:
+    'Log a warning if the file is missing or unavailable — do not silently skip.'
+
+    Uses a fresh MagicMock() per getLogger call to avoid mutating real logger singletons.
+    """
+    import queue
+    from unittest.mock import patch, MagicMock
+
+    repo_dir = tmp_path / "repo"
+    (repo_dir / "docs").mkdir(parents=True)
+    (repo_dir / "BIBLE.md").write_text("# BIBLE", encoding="utf-8")
+    # Deliberately do NOT create docs/ARCHITECTURE.md
+
+    drive_root = tmp_path / "data"
+    (drive_root / "logs").mkdir(parents=True)
+    (drive_root / "state").mkdir(parents=True)
+    (drive_root / "state" / "state.json").write_text("{}", encoding="utf-8")
+    (drive_root / "memory").mkdir(parents=True)
+
+    eq = queue.Queue()
+    from ouroboros.consciousness import BackgroundConsciousness
+
+    # A single shared mock logger so all getLogger(name) calls return the same object.
+    # This avoids mutating any real logger singleton.
+    mock_logger = MagicMock()
+
+    with patch.object(BackgroundConsciousness, "_build_registry", return_value=MagicMock()), \
+         patch("ouroboros.consciousness.build_memory_sections", return_value=[]), \
+         patch("ouroboros.consciousness.build_health_invariants", return_value=""), \
+         patch("ouroboros.consciousness.build_runtime_section", return_value="## Runtime\n\nok"), \
+         patch("ouroboros.consciousness.build_recent_sections", return_value=[]), \
+         patch("logging.getLogger", return_value=mock_logger):
+        bc = BackgroundConsciousness(
+            drive_root=drive_root,
+            repo_dir=repo_dir,
+            event_queue=eq,
+            owner_chat_id_fn=lambda: 1,
+        )
+        context = bc._build_context()
+
+    # 1. ARCHITECTURE.md section must be absent from context (file doesn't exist)
+    assert "## ARCHITECTURE.md" not in context, (
+        "ARCHITECTURE.md section should not appear when file is missing"
+    )
+
+    # 2. mock_logger.warning must have been called at least once with ARCHITECTURE.md in the message
+    warning_messages = [
+        str(call_args)
+        for call_args in mock_logger.warning.call_args_list
+    ]
+    arch_warnings = [w for w in warning_messages if "ARCHITECTURE.md" in w]
+    assert arch_warnings, (
+        "BackgroundConsciousness._build_context() must call logger.warning with 'ARCHITECTURE.md' "
+        "when the file is missing. Core Governance Artifacts invariant in DEVELOPMENT.md. "
+        f"All warning calls: {warning_messages}"
+    )
+    assert any("not found" in w or "empty" in w for w in arch_warnings), (
+        f"Warning message must indicate the file is missing/empty, got: {arch_warnings}"
+    )
+
+
 def test_development_md_contains_core_governance_invariant():
     """docs/DEVELOPMENT.md must contain the core governance artifact invariant rule."""
     import pathlib
