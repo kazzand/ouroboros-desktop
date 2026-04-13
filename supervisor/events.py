@@ -609,7 +609,7 @@ def _handle_log_event(evt: Dict[str, Any], ctx: Any) -> None:
     except Exception:
         log.debug("Failed to forward live log event", exc_info=True)
     # Persist durable checkpoint events to the event log
-    if data.get("type") in ("task_checkpoint", "task_checkpoint_reflection"):
+    if data.get("type") in ("task_checkpoint", "task_checkpoint_reflection", "task_checkpoint_anomaly"):
         try:
             ctx.append_jsonl(ctx.DRIVE_ROOT / "logs" / "events.jsonl", payload)
         except Exception:

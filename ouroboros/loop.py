@@ -36,6 +36,13 @@ _call_llm_with_retry = call_llm_with_retry
 
 log = logging.getLogger(__name__)
 
+CHECKPOINT_REFLECTION_HEADER = "CHECKPOINT_REFLECTION:"
+CHECKPOINT_ANOMALY_HEADER = "CHECKPOINT_ANOMALY:"
+CHECKPOINT_CONTINUE_PROMPT = (
+    "[CHECKPOINT COMPLETE] Continue working on the task. "
+    "The checkpoint round was audit-only."
+)
+
 
 def _provider_failure_hint(accumulated_usage: Dict[str, Any]) -> str:
     detail = " ".join(str(accumulated_usage.get("_last_llm_error") or "").split()).strip()
@@ -176,17 +183,18 @@ def _maybe_inject_self_check(
     task_id: str = "",
     drive_logs: Optional[pathlib.Path] = None,
 ) -> bool:
-    """Inject a freeform self-check reminder every REMINDER_INTERVAL rounds.
+    """Inject an audit-only checkpoint reminder every REMINDER_INTERVAL rounds.
 
-    Asks the LLM to pause and write a brief reflection in free text, then
-    continue with a tool call. No parsing required — the reflection stays
-    in the transcript as natural assistant content (P3 LLM-First, P5 Minimalism).
+    On checkpoint rounds the next LLM call runs with tools disabled. The output is
+    later classified as either a durable reflection artifact or a durable anomaly,
+    and the loop always continues into a normal round. A checkpoint round never
+    finalizes the task.
 
     Emits a task_checkpoint event for observability.
     Returns True if a checkpoint was injected.
     """
     REMINDER_INTERVAL = 15
-    if round_idx <= 1 or round_idx % REMINDER_INTERVAL != 0:
+    if round_idx <= 1 or round_idx % REMINDER_INTERVAL != 0 or round_idx >= max_rounds:
         return False
 
     ctx_tokens = sum(
@@ -208,8 +216,8 @@ def _maybe_inject_self_check(
     if tool_trace:
         reminder += f"{tool_trace}\n\n"
     reminder += (
-        "⏸️ PAUSE AND REFLECT before continuing. Write a `CHECKPOINT_REFLECTION:` block "
-        "in plain text with exactly these four lines:\n"
+        "⏸️ PAUSE AND REFLECT. This round is audit-only: tools are unavailable on this turn. "
+        "Write a `CHECKPOINT_REFLECTION:` block in plain text with exactly these four lines:\n"
         "- **Known:** What I have verified as true about the current state (not assumptions)\n"
         "- **Blocker:** The concrete obstacle right now, or 'none'\n"
         "- **Decision:** What approach I am choosing and why (not just what I will do)\n"
@@ -218,8 +226,7 @@ def _maybe_inject_self_check(
         "Avoid vague language like 'continue working'. "
         "Keep total length under 100 words. "
         "Start the block with `CHECKPOINT_REFLECTION:` on its own line. "
-        "Then immediately continue with your next tool call in the same response. "
-        "If the task is genuinely complete, give the final answer instead."
+        "If the output is malformed or incomplete, it will be recorded as a checkpoint anomaly and the task will continue on the next round."
     )
 
     messages.append({"role": "system", "content": reminder})
@@ -279,6 +286,158 @@ def _extract_plain_text_from_content(content: Any) -> str:
                 parts.append(block.get("text", ""))
         return "".join(parts)
     return str(content) if content is not None else ""
+
+
+def _emit_checkpoint_anomaly_event(
+    anomaly_type: str,
+    content: str,
+    round_idx: int,
+    task_id: str,
+    event_queue: Optional[queue.Queue],
+    drive_logs: Optional[pathlib.Path],
+) -> None:
+    """Emit a durable checkpoint anomaly event with full content."""
+    payload = {
+        "type": "task_checkpoint_anomaly",
+        "task_id": task_id,
+        "round": round_idx,
+        "anomaly_type": anomaly_type,
+        "content": content,
+    }
+    if event_queue is not None:
+        from ouroboros.loop_llm_call import _emit_live_log
+        _emit_live_log(event_queue, payload)
+    elif drive_logs:
+        try:
+            from ouroboros.utils import append_jsonl, utc_now_iso
+            append_jsonl(drive_logs / "events.jsonl", {"ts": utc_now_iso(), **payload})
+        except Exception:
+            pass
+
+
+def _is_valid_checkpoint_reflection(text: str) -> bool:
+    """Return True when checkpoint text contains the four exact audit fields."""
+    if not text:
+        return False
+    normalized = text.lstrip()
+    if not normalized.startswith(CHECKPOINT_REFLECTION_HEADER):
+        return False
+
+    body = normalized[len(CHECKPOINT_REFLECTION_HEADER):]
+    expected = ["Known", "Blocker", "Decision", "Next"]
+    seen: List[str] = []
+
+    for raw_line in body.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if line.startswith("-"):
+            line = line[1:].strip()
+        line = line.replace("**", "")
+        for field in expected:
+            prefix = f"{field}:"
+            if line.startswith(prefix):
+                seen.append(field)
+                break
+
+    return seen == expected
+
+
+def _record_checkpoint_artifact(
+    artifact_text: str,
+    round_idx: int,
+    task_id: str,
+    event_queue: Optional[queue.Queue],
+    drive_logs: pathlib.Path,
+    emit_progress: Callable[[str], None],
+    llm_trace: Dict[str, Any],
+    messages: List[Dict[str, Any]],
+    *,
+    anomaly_type: str = "",
+) -> None:
+    """Persist a checkpoint reflection or anomaly and continue the loop."""
+    if anomaly_type:
+        _emit_checkpoint_anomaly_event(anomaly_type, artifact_text, round_idx, task_id, event_queue, drive_logs)
+        progress_prefix = f"⚠️ Checkpoint anomaly at round {round_idx} ({anomaly_type}):\n"
+    else:
+        _emit_checkpoint_reflection_event(artifact_text, round_idx, task_id, event_queue, drive_logs)
+        progress_prefix = f"🔍 Checkpoint {round_idx // 15} reflection (round {round_idx}):\n"
+
+    llm_trace["reasoning_notes"].append(artifact_text)
+    messages.append({"role": "assistant", "content": artifact_text})
+    messages.append({"role": "user", "content": CHECKPOINT_CONTINUE_PROMPT})
+    emit_progress(progress_prefix + artifact_text)
+
+
+def _handle_checkpoint_response(
+    msg: Dict[str, Any],
+    round_idx: int,
+    task_id: str,
+    event_queue: Optional[queue.Queue],
+    drive_logs: pathlib.Path,
+    emit_progress: Callable[[str], None],
+    llm_trace: Dict[str, Any],
+    messages: List[Dict[str, Any]],
+) -> None:
+    """Persist checkpoint reflection/anomaly and continue the loop.
+
+    Contract: a checkpoint round is audit-only and can never finalize the task.
+    Any output becomes either a durable reflection artifact or a durable anomaly.
+    """
+    raw_content = msg.get("content") or ""
+    text = _extract_plain_text_from_content(raw_content).strip()
+    tool_calls = msg.get("tool_calls") or []
+
+    if tool_calls:
+        artifact_text = CHECKPOINT_ANOMALY_HEADER + "\n" + (
+            text or "(unexpected tool calls on checkpoint round)"
+        )
+        _record_checkpoint_artifact(
+            artifact_text,
+            round_idx,
+            task_id,
+            event_queue,
+            drive_logs,
+            emit_progress,
+            llm_trace,
+            messages,
+            anomaly_type="unexpected_tool_calls",
+        )
+    elif not text:
+        _record_checkpoint_artifact(
+            CHECKPOINT_ANOMALY_HEADER + "\n(empty checkpoint output)",
+            round_idx,
+            task_id,
+            event_queue,
+            drive_logs,
+            emit_progress,
+            llm_trace,
+            messages,
+            anomaly_type="empty_checkpoint",
+        )
+    elif _is_valid_checkpoint_reflection(text):
+        _record_checkpoint_artifact(
+            text,
+            round_idx,
+            task_id,
+            event_queue,
+            drive_logs,
+            emit_progress,
+            llm_trace,
+            messages,
+        )
+    else:
+        _record_checkpoint_artifact(
+            CHECKPOINT_ANOMALY_HEADER + "\n" + text,
+            round_idx,
+            task_id,
+            event_queue,
+            drive_logs,
+            emit_progress,
+            llm_trace,
+            messages,
+            anomaly_type="malformed_checkpoint",
+        )
 
 
 def seal_task_transcript(
@@ -533,22 +692,25 @@ def run_llm_loop(
                 ctx.active_effort_override = None
 
             _pre_checkpoint_effort = None
+            _checkpoint_tool_schemas = tool_schemas
             if _checkpoint_injected:
                 _pre_checkpoint_effort = active_effort
                 active_effort = "xhigh"
+                _checkpoint_tool_schemas = None
 
             _drain_incoming_messages(messages, incoming_messages, drive_root, task_id, event_queue, _owner_msg_seen)
 
             _compaction_usage = None
             pending_compaction = getattr(tools._ctx, '_pending_compaction', None)
-            if pending_compaction is not None:
-                messages, _compaction_usage = compact_tool_history_llm(messages, keep_recent=pending_compaction)
-                tools._ctx._pending_compaction = None
-            elif round_idx > 12:
-                messages, _compaction_usage = compact_tool_history_llm(messages, keep_recent=50)
-            elif round_idx > 6:
-                if len(messages) > 80:
+            if not _checkpoint_injected:
+                if pending_compaction is not None:
+                    messages, _compaction_usage = compact_tool_history_llm(messages, keep_recent=pending_compaction)
+                    tools._ctx._pending_compaction = None
+                elif round_idx > 12:
                     messages, _compaction_usage = compact_tool_history_llm(messages, keep_recent=50)
+                elif round_idx > 6:
+                    if len(messages) > 80:
+                        messages, _compaction_usage = compact_tool_history_llm(messages, keep_recent=50)
             if tools._ctx.messages is not messages:
                 tools._ctx.messages = messages
             if _compaction_usage:
@@ -565,7 +727,7 @@ def run_llm_loop(
             seal_task_transcript(messages)
 
             msg, cost = call_llm_with_retry(
-                llm, messages, active_model, tool_schemas, active_effort,
+                llm, messages, active_model, _checkpoint_tool_schemas, active_effort,
                 max_retries, drive_logs, task_id, round_idx, event_queue, accumulated_usage, task_type,
                 use_local=active_use_local,
             )
@@ -578,6 +740,19 @@ def run_llm_loop(
             if msg is None:
                 fallback_model = os.environ.get("OUROBOROS_MODEL_FALLBACK", "").strip()
                 if not fallback_model or fallback_model == active_model:
+                    if _checkpoint_injected:
+                        _record_checkpoint_artifact(
+                            CHECKPOINT_ANOMALY_HEADER + "\n(missing checkpoint response from primary model)",
+                            round_idx,
+                            task_id,
+                            event_queue,
+                            drive_logs,
+                            emit_progress,
+                            llm_trace,
+                            messages,
+                            anomaly_type="missing_checkpoint_response",
+                        )
+                        continue
                     local_tag = " (local)" if active_use_local else ""
                     return (
                         f"⚠️ Failed to get a response from model {active_model}{local_tag} after {max_retries} attempts. "
@@ -590,45 +765,47 @@ def run_llm_loop(
                 fallback_tag = " (local)" if fallback_use_local else ""
                 emit_progress(f"⚡ Fallback: {active_model}{primary_tag} → {fallback_model}{fallback_tag} after empty response")
                 msg, fallback_cost = call_llm_with_retry(
-                    llm, messages, fallback_model, tool_schemas, active_effort,
+                    llm, messages, fallback_model, _checkpoint_tool_schemas, active_effort,
                     max_retries, drive_logs, task_id, round_idx, event_queue, accumulated_usage, task_type,
                     use_local=fallback_use_local,
                 )
 
                 if msg is None:
+                    if _checkpoint_injected:
+                        _record_checkpoint_artifact(
+                            CHECKPOINT_ANOMALY_HEADER + "\n(missing checkpoint response from all models)",
+                            round_idx,
+                            task_id,
+                            event_queue,
+                            drive_logs,
+                            emit_progress,
+                            llm_trace,
+                            messages,
+                            anomaly_type="missing_checkpoint_response",
+                        )
+                        continue
                     return (
                         f"⚠️ All models are down. Primary ({active_model}{primary_tag}) and fallback ({fallback_model}{fallback_tag}) "
                         f"both returned no response. Stopping.{_provider_failure_hint(accumulated_usage)} "
                         f"Background consciousness will attempt recovery when the provider is back."
                     ), accumulated_usage, llm_trace
 
-            # On checkpoint rounds: emit the reflection event (full content, no parsing).
-            # Also emit a visible progress message so the reflection appears in the chat
-            # live card timeline AND survives history reconstruction from progress.jsonl.
-            # If the LLM returned only text (no tool calls), treat it as a final answer
-            # so the task can terminate normally on a checkpoint round. The checkpoint
-            # prompt explicitly says "give the final answer instead" if genuinely complete.
+            # Checkpoint rounds are audit-only: they can never finalize the task.
+            # Persist either a valid reflection or a durable anomaly, append a
+            # synthetic continuation user message, and continue into the next
+            # normal round with tools restored.
             if _checkpoint_injected:
-                raw_content = msg.get("content") or ""
-                tool_calls_cp = msg.get("tool_calls") or []
-                if raw_content:
-                    # Normalize content — may be a string or a list of content blocks.
-                    reflection_text = _extract_plain_text_from_content(raw_content).strip()
-                    _emit_checkpoint_reflection_event(
-                        reflection_text, round_idx, task_id, event_queue, drive_logs,
-                    )
-                    # Emit a progress message carrying the full reflection text so it:
-                    # (a) appears in the chat live card via is_progress events, and
-                    # (b) survives page reload/reconnect via progress.jsonl replay.
-                    # No truncation — this is a cognitive artifact (P1 Continuity, DEVELOPMENT.md).
-                    checkpoint_num_cp = round_idx // 15
-                    emit_progress(
-                        f"🔍 Checkpoint {checkpoint_num_cp} reflection (round {round_idx}):\n{reflection_text}"
-                    )
-                if not tool_calls_cp:
-                    # Text-only on a checkpoint round = task complete (or reflection without
-                    # more work to do). Terminate normally — do not force an extra round.
-                    return _handle_text_response(raw_content, llm_trace, accumulated_usage)
+                _handle_checkpoint_response(
+                    msg,
+                    round_idx,
+                    task_id,
+                    event_queue,
+                    drive_logs,
+                    emit_progress,
+                    llm_trace,
+                    messages,
+                )
+                continue
 
             tool_calls = msg.get("tool_calls") or []
             content = msg.get("content")

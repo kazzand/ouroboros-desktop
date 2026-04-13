@@ -65,6 +65,8 @@ def test_live_card_recovery_keeps_step_failures_non_terminal():
     assert "phase: 'warn'" in log_source
     assert "A command returned" in log_source
     assert "commandText.full || errorResult.full" in log_source
+    assert "task_checkpoint_anomaly" in log_source
+    assert "Checkpoint anomaly" in log_source
 
 
 def test_logs_use_shared_log_event_helpers_and_group_task_cards():

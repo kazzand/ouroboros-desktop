@@ -410,6 +410,21 @@ export function summarizeLogEvent(evt) {
         };
     }
 
+    if (t === 'task_checkpoint_anomaly') {
+        const cpRound = evt.round || 0;
+        const anomalyText = describeText(String(evt.content || '').replace(/^CHECKPOINT_ANOMALY:\s*/i, ''), 260);
+        return {
+            ...base,
+            phase: 'warn',
+            headline: `Checkpoint anomaly (${evt.anomaly_type || 'unknown'})`,
+            body: anomalyText.preview,
+            meta: [
+                evt.task_id ? `task=${evt.task_id}` : '',
+                evt.round ? `r${cpRound}` : '',
+            ].filter(Boolean),
+        };
+    }
+
     if (t.includes('error') || t.includes('crash') || t.includes('fail')) {
         return {
             ...base,
@@ -557,6 +572,21 @@ export function summarizeChatLiveEvent(evt) {
             promote: false,
             human: false,
             dedupeKey: `${t}:${getLogTaskGroupId(evt)}:${cpRound}`,
+        };
+    }
+
+    if (t === 'task_checkpoint_anomaly') {
+        const cpRound = evt.round || 0;
+        const anomalyText = describeText(String(evt.content || '').replace(/^CHECKPOINT_ANOMALY:\s*/i, ''), 300);
+        return {
+            phase: 'warn',
+            headline: `Checkpoint anomaly`,
+            body: anomalyText.preview,
+            fullBody: anomalyText.full,
+            visible: false,
+            promote: false,
+            human: false,
+            dedupeKey: `${t}:${getLogTaskGroupId(evt)}:${cpRound}:${evt.anomaly_type || 'unknown'}`,
         };
     }
 

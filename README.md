@@ -6,7 +6,7 @@
 [![macOS 12+](https://img.shields.io/badge/macOS-12%2B-black.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
 [![Linux](https://img.shields.io/badge/Linux-x86__64-orange.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
 [![Windows](https://img.shields.io/badge/Windows-x64-blue.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
-[![Version 4.28.5](https://img.shields.io/badge/version-4.28.5-green.svg)](VERSION)
+[![Version 4.28.6](https://img.shields.io/badge/version-4.28.6-green.svg)](VERSION)
 
 A self-modifying AI agent that writes its own code, rewrites its own mind, and evolves autonomously. Born February 16, 2026.
 
@@ -379,6 +379,7 @@ Full text: [BIBLE.md](BIBLE.md)
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 4.28.6 | 2026-04-12 | Checkpoint hardening: checkpoint rounds are now audit-only (`tools=None` in both primary and fallback LLM calls), can never implicitly finalize a task, missing/malformed output becomes durable `task_checkpoint_anomaly`, and reflection/anomaly artifacts persist in logs/UI and survive compaction. 109 targeted tests passed. |
 | 4.28.5 | 2026-04-12 | Follow-up to v4.28.4: add explicit warning log in `BackgroundConsciousness._build_context` when `docs/ARCHITECTURE.md` is missing (Core Governance Artifacts invariant). Strengthen regression test to assert warning emission. |
 | 4.28.4 | 2026-04-12 | Fix ARCHITECTURE.md inconsistency: add as first-class context section to triad review prompts (`_load_architecture_text`) and background consciousness (`_build_context`). Raise `repo_read` default `max_lines` 1050→2000 so ARCHITECTURE.md reads in one call. Add "Core Governance Artifacts" invariant rule to `docs/DEVELOPMENT.md`. 8 new regression tests. |
 | 4.28.3 | 2026-04-12 | Settings hot-reload: `TOTAL_BUDGET` and timeouts refresh immediately in the running supervisor; models, API keys, effort, and `PER_TASK_COST_USD` apply on the next task; local model / workers / base URLs still require restart. `/status` reads live timeout values from `supervisor.queue`. Save button shows 5-state honest feedback (no changes / restart required / mixed immediate+next-task / immediate only / next-task only) with warnings appended to all branches. 27 new tests. |

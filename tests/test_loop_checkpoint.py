@@ -1,14 +1,14 @@
-"""Tests for the simplified LLM loop checkpoint self-audit mechanism.
+"""Tests for the checkpoint self-audit mechanism.
 
-The checkpoint fires every 15 rounds, asks the LLM to write a free-form
-reflection and continue with a tool call.  No parsing is involved —
-the reflection lives in the transcript as natural assistant content.
+Checkpoint rounds are audit-only: tools are disabled, the round can never
+silently finalize the task, and any malformed output becomes a durable anomaly.
 """
 
 import json
 import pathlib
 import queue
 import tempfile
+from types import SimpleNamespace
 
 import pytest
 
@@ -16,6 +16,10 @@ from ouroboros.loop import (
     _maybe_inject_self_check,
     _build_recent_tool_trace,
     _emit_checkpoint_reflection_event,
+    _emit_checkpoint_anomaly_event,
+    _handle_checkpoint_response,
+    run_llm_loop,
+    CHECKPOINT_CONTINUE_PROMPT,
 )
 
 
@@ -84,24 +88,25 @@ class TestMaybeInjectSelfCheck:
             assert result is False, f"Should not inject at round {r}"
             assert len(messages) == 0
 
-    def test_prompt_asks_for_reflection_and_tool_call(self):
+    def test_no_injection_when_no_spare_round_left(self):
+        messages = []
+        result = _maybe_inject_self_check(15, 15, messages, {"cost": 0}, lambda x: None)
+        assert result is False
+        assert messages == []
+
+    def test_prompt_asks_for_reflection_and_audit(self):
         messages = [{"role": "user", "content": "test"}]
         _maybe_inject_self_check(15, 200, messages, {"cost": 1.0}, lambda x: None)
         content = messages[-1]["content"]
         assert "CHECKPOINT_REFLECTION:" in content
-        assert "tool call" in content.lower()
+        assert "audit" in content.lower() or "reflect" in content.lower()
 
-    def test_prompt_allows_final_answer(self):
-        """Prompt must explicitly allow finishing instead of forcing a tool call.
-
-        The runtime treats text-only checkpoint responses as task completion, so
-        the prompt must tell the model this is valid — otherwise the model would be
-        confused about why its final answer was accepted on a checkpoint round.
-        """
+    def test_prompt_says_tools_unavailable(self):
+        """Prompt must tell the model tools are unavailable on this round."""
         messages = [{"role": "user", "content": "test"}]
         _maybe_inject_self_check(15, 200, messages, {"cost": 1.0}, lambda x: None)
         content = messages[-1]["content"]
-        assert "genuinely complete" in content or "final answer" in content
+        assert "tools" in content.lower() and "unavailable" in content.lower()
 
     def test_prompt_contains_cost_and_round(self):
         messages = [{"role": "user", "content": "test"}]
@@ -177,6 +182,115 @@ class TestEmitCheckpointReflectionEvent:
         assert event["data"]["reflection"] == ""
 
 
+class TestEmitCheckpointAnomalyEvent:
+    """Checkpoint anomalies must be durable and untruncated."""
+
+    def test_emits_to_queue(self):
+        eq = queue.Queue()
+        _emit_checkpoint_anomaly_event("malformed_checkpoint", "CHECKPOINT_ANOMALY:\nbad output", 15, "t5", eq, None)
+        event = eq.get_nowait()
+        assert event["data"]["type"] == "task_checkpoint_anomaly"
+        assert event["data"]["anomaly_type"] == "malformed_checkpoint"
+        assert "CHECKPOINT_ANOMALY" in event["data"]["content"]
+
+    def test_fallback_to_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            drive_logs = pathlib.Path(tmp)
+            _emit_checkpoint_anomaly_event("empty_checkpoint", "CHECKPOINT_ANOMALY:\n(empty checkpoint output)", 15, "t6", None, drive_logs)
+            entry = json.loads((drive_logs / "events.jsonl").read_text().strip())
+            assert entry["type"] == "task_checkpoint_anomaly"
+            assert entry["anomaly_type"] == "empty_checkpoint"
+
+
+class TestHandleCheckpointResponse:
+    def test_valid_reflection_appends_continuation(self):
+        msg = {"content": "CHECKPOINT_REFLECTION:\n- Known: x\n- Blocker: none\n- Decision: proceed\n- Next: read file", "tool_calls": []}
+        llm_trace = {"reasoning_notes": []}
+        messages = []
+        progress = []
+        eq = queue.Queue()
+        _handle_checkpoint_response(msg, 15, "task-1", eq, pathlib.Path(tempfile.gettempdir()), progress.append, llm_trace, messages)
+        assert llm_trace["reasoning_notes"][-1].startswith("CHECKPOINT_REFLECTION:")
+        assert messages[-2]["role"] == "assistant"
+        assert messages[-1] == {"role": "user", "content": CHECKPOINT_CONTINUE_PROMPT}
+        assert any("Checkpoint 1 reflection" in p for p in progress)
+
+    def test_missing_marker_becomes_malformed_anomaly(self):
+        msg = {"content": "I think the task is probably fine", "tool_calls": []}
+        llm_trace = {"reasoning_notes": []}
+        messages = []
+        progress = []
+        eq = queue.Queue()
+        _handle_checkpoint_response(msg, 15, "task-2", eq, pathlib.Path(tempfile.gettempdir()), progress.append, llm_trace, messages)
+        assert llm_trace["reasoning_notes"][-1].startswith("CHECKPOINT_ANOMALY:")
+        assert "malformed_checkpoint" in progress[-1]
+        events = []
+        while not eq.empty():
+            events.append(eq.get_nowait())
+        assert any(e["data"].get("type") == "task_checkpoint_anomaly" for e in events)
+
+    def test_empty_output_becomes_empty_anomaly(self):
+        msg = {"content": "", "tool_calls": []}
+        llm_trace = {"reasoning_notes": []}
+        messages = []
+        progress = []
+        eq = queue.Queue()
+        _handle_checkpoint_response(msg, 15, "task-3", eq, pathlib.Path(tempfile.gettempdir()), progress.append, llm_trace, messages)
+        assert "empty_checkpoint" in progress[-1]
+        assert "(empty checkpoint output)" in llm_trace["reasoning_notes"][-1]
+
+    def test_unexpected_tool_calls_become_anomaly(self):
+        msg = {"content": "", "tool_calls": [{"id": "x", "function": {"name": "repo_read", "arguments": "{}"}}]}
+        llm_trace = {"reasoning_notes": []}
+        messages = []
+        progress = []
+        eq = queue.Queue()
+        _handle_checkpoint_response(msg, 15, "task-4", eq, pathlib.Path(tempfile.gettempdir()), progress.append, llm_trace, messages)
+        assert "unexpected_tool_calls" in progress[-1]
+
+    def test_header_without_required_fields_becomes_malformed_anomaly(self):
+        msg = {"content": "CHECKPOINT_REFLECTION:\nhello", "tool_calls": []}
+        llm_trace = {"reasoning_notes": []}
+        messages = []
+        progress = []
+        eq = queue.Queue()
+        _handle_checkpoint_response(msg, 15, "task-5", eq, pathlib.Path(tempfile.gettempdir()), progress.append, llm_trace, messages)
+        assert "malformed_checkpoint" in progress[-1]
+        assert llm_trace["reasoning_notes"][-1].startswith("CHECKPOINT_ANOMALY:")
+
+    def test_header_with_tool_calls_becomes_unexpected_tool_calls_anomaly(self):
+        msg = {
+            "content": (
+                "CHECKPOINT_REFLECTION:\n"
+                "- Known: x\n- Blocker: none\n- Decision: proceed\n- Next: read file"
+            ),
+            "tool_calls": [{"id": "x", "function": {"name": "repo_read", "arguments": "{}"}}],
+        }
+        llm_trace = {"reasoning_notes": []}
+        messages = []
+        progress = []
+        eq = queue.Queue()
+        _handle_checkpoint_response(msg, 15, "task-6", eq, pathlib.Path(tempfile.gettempdir()), progress.append, llm_trace, messages)
+        assert "unexpected_tool_calls" in progress[-1]
+        assert llm_trace["reasoning_notes"][-1].startswith("CHECKPOINT_ANOMALY:")
+
+    def test_mislabelled_unknown_field_becomes_malformed_anomaly(self):
+        msg = {
+            "content": (
+                "CHECKPOINT_REFLECTION:\n"
+                "- Unknown: x\n- Blocker: none\n- Decision: proceed\n- Next: read file"
+            ),
+            "tool_calls": [],
+        }
+        llm_trace = {"reasoning_notes": []}
+        messages = []
+        progress = []
+        eq = queue.Queue()
+        _handle_checkpoint_response(msg, 15, "task-7", eq, pathlib.Path(tempfile.gettempdir()), progress.append, llm_trace, messages)
+        assert "malformed_checkpoint" in progress[-1]
+        assert llm_trace["reasoning_notes"][-1].startswith("CHECKPOINT_ANOMALY:")
+
+
 class TestCheckpointPromptStructure:
     """Verify that the checkpoint prompt requests structured, specific reflection."""
 
@@ -210,6 +324,74 @@ class TestCheckpointPromptStructure:
         """Prompt must use the CHECKPOINT_REFLECTION: marker for compaction detection."""
         content = self._get_checkpoint_content()
         assert "CHECKPOINT_REFLECTION:" in content
+
+
+class TestCheckpointRoundMissingResponse:
+    def test_missing_checkpoint_response_becomes_durable_anomaly(self, monkeypatch):
+        class DummyRegistry:
+            def __init__(self):
+                self._ctx = SimpleNamespace(
+                    active_model_override=None,
+                    active_use_local_override=None,
+                    active_effort_override=None,
+                    messages=None,
+                    event_queue=None,
+                    task_id="",
+                )
+
+            def override_handler(self, name, handler):
+                return None
+
+        llm = SimpleNamespace(default_model=lambda: "anthropic/claude-sonnet-4.6")
+        calls = []
+
+        def fake_call(*args, **kwargs):
+            round_idx = args[8]
+            calls.append((round_idx, kwargs.get("use_local"), args[3]))
+            if round_idx < 15:
+                return {
+                    "content": "",
+                    "tool_calls": [{"id": f"tc-{round_idx}", "function": {"name": "repo_read", "arguments": "{}"}}],
+                }, 0.0
+            return None, 0.0
+
+        monkeypatch.setattr("ouroboros.loop.call_llm_with_retry", fake_call)
+        monkeypatch.setattr("ouroboros.loop._call_llm_with_retry", fake_call)
+        monkeypatch.setattr("ouroboros.loop.initial_tool_schemas", lambda tools: [{"function": {"name": "repo_read"}}])
+        monkeypatch.setattr("ouroboros.loop.list_non_core_tools", lambda tools: [])
+        monkeypatch.setattr("ouroboros.loop.handle_tool_calls", lambda *a, **k: 0)
+
+        progress = []
+        eq = queue.Queue()
+        result, _usage, trace = run_llm_loop(
+            messages=[{"role": "user", "content": "hello"}],
+            tools=DummyRegistry(),
+            llm=llm,
+            drive_logs=pathlib.Path(tempfile.gettempdir()),
+            emit_progress=progress.append,
+            incoming_messages=queue.Queue(),
+            task_type="task",
+            task_id="cp-missing",
+            budget_remaining_usd=None,
+            event_queue=eq,
+            initial_effort="medium",
+            drive_root=None,
+        )
+
+        assert result.startswith("⚠️ Failed to get a response")
+        checkpoint_events = []
+        while not eq.empty():
+            evt = eq.get_nowait()
+            data = evt.get("data") if isinstance(evt, dict) else None
+            if isinstance(data, dict) and data.get("type") == "task_checkpoint_anomaly":
+                checkpoint_events.append(data)
+            elif isinstance(data, dict) and data.get("type") == "task_checkpoint":
+                continue
+        assert checkpoint_events, "missing checkpoint response must emit task_checkpoint_anomaly"
+        assert checkpoint_events[-1]["anomaly_type"] == "missing_checkpoint_response"
+        assert any("missing_checkpoint_response" in p for p in progress)
+        assert any("CHECKPOINT_ANOMALY:" in note for note in trace["reasoning_notes"])
+        assert any(round_idx == 15 and tools is None for round_idx, _use_local, tools in calls)
 
 
 class TestCheckpointReflectionProgressEmission:

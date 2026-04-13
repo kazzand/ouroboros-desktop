@@ -114,6 +114,18 @@ FAIL items that all require the same change. Do NOT hold an obligation open by
 reformulating a fixed concrete issue into a broader future-risk variant — if the
 named artifact is fixed, mark PASS; raise a new advisory if a broader concern remains.
 
+### Loop / state-machine changes
+
+When the diff changes `ouroboros/loop.py`, task finalization semantics, checkpoint/audit rounds,
+or other state-machine behavior, reviewers MUST verify adversarial paths — not only the happy path.
+At minimum, check for:
+- malformed or empty model output
+- false task completion / premature finalization
+- replay durability in logs/history
+- visible anomaly path when structured output is missing or broken
+
+A state-machine change that only passes the success-path test is incomplete.
+
 ---
 
 ## Plan Review Checklist

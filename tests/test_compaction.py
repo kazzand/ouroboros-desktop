@@ -88,18 +88,24 @@ def test_old_assistant_tool_payloads_are_compacted():
 # ── Checkpoint reflection protection ─────────────────────────────────────────
 
 
-def _make_messages_with_checkpoint(num_rounds: int = 8, checkpoint_round: int = 2):
-    """Build a message list where one assistant message contains CHECKPOINT_REFLECTION."""
+def _make_messages_with_checkpoint(num_rounds: int = 8, checkpoint_round: int = 2, *, anomaly: bool = False):
+    """Build a message list where one assistant message contains checkpoint text."""
     messages = [{"role": "system", "content": "system"}]
     for i in range(num_rounds):
         tc_id = f"call_{i}"
-        content = (
-            "CHECKPOINT_REFLECTION:\n"
-            "- Known: the file exists\n"
-            "- Blocker: none\n"
-            "- Decision: proceed\n"
-            "- Next: repo_read the target file"
-        ) if i == checkpoint_round else f"Round {i} reasoning"
+        if i == checkpoint_round:
+            content = (
+                "CHECKPOINT_ANOMALY:\n"
+                "malformed checkpoint output"
+            ) if anomaly else (
+                "CHECKPOINT_REFLECTION:\n"
+                "- Known: the file exists\n"
+                "- Blocker: none\n"
+                "- Decision: proceed\n"
+                "- Next: repo_read the target file"
+            )
+        else:
+            content = f"Round {i} reasoning"
         messages.append({
             "role": "assistant",
             "content": content,
@@ -223,3 +229,24 @@ def test_round_has_protected_content_list_without_marker():
         },
     ]
     assert _round_has_protected_content(messages, 0, 1) is False
+
+
+def test_checkpoint_anomaly_round_survives_compaction():
+    """Rounds whose assistant content contains CHECKPOINT_ANOMALY must also be protected."""
+    from ouroboros.context_compaction import compact_tool_history_llm
+    import unittest.mock as mock
+
+    msgs = _make_messages_with_checkpoint(num_rounds=10, checkpoint_round=2, anomaly=True)
+    fake_summary = {i: f"[summary of round {i}]" for i in range(len(msgs))}
+
+    with mock.patch(
+        "ouroboros.context_compaction._summarize_round_batch",
+        return_value=(fake_summary, {}),
+    ):
+        compacted, _ = compact_tool_history_llm(msgs, keep_recent=3)
+
+    anomaly_texts = [
+        m["content"] for m in compacted
+        if m.get("role") == "assistant" and "CHECKPOINT_ANOMALY" in str(m.get("content", ""))
+    ]
+    assert len(anomaly_texts) >= 1
