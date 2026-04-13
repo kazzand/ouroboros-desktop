@@ -153,18 +153,6 @@ def compute_complexity_metrics(sections: List[Tuple[str, str]]) -> Dict[str, Any
     }
 
 
-def format_metrics(metrics: Dict[str, Any]) -> str:
-    """Format metrics as a readable string."""
-    return (
-        f"Complexity metrics:\n"
-        f"  Files: {metrics['total_files']} (Python: {metrics['py_files']})\n"
-        f"  Lines of code: {metrics['total_lines']}\n"
-        f"  Functions/methods: {metrics['total_functions']}\n"
-        f"  Avg function length: {metrics['avg_function_length']} lines\n"
-        f"  Max function length: {metrics['max_function_length']} lines"
-    )
-
-
 # ---------------------------------------------------------------------------
 # File collection
 # ---------------------------------------------------------------------------
@@ -290,27 +278,3 @@ def collect_full_codebase(
     token_estimate = estimate_tokens(full_text)
     stats = {"files": file_count, "tokens": token_estimate}
     return full_text, stats
-
-
-def chunk_sections(sections: List[Tuple[str, str]], chunk_token_cap: int = 70_000) -> List[str]:
-    """Split sections into chunks that fit within token budget."""
-    cap = max(20_000, min(chunk_token_cap, 120_000))
-    chunks: List[str] = []
-    current_parts: List[str] = []
-    current_tokens = 0
-
-    for path, content in sections:
-        if not content:
-            continue
-        part = f"\n## FILE: {path}\n{content}\n"
-        part_tokens = estimate_tokens(part)
-        if current_parts and (current_tokens + part_tokens) > cap:
-            chunks.append("\n".join(current_parts))
-            current_parts = []
-            current_tokens = 0
-        current_parts.append(part)
-        current_tokens += part_tokens
-
-    if current_parts:
-        chunks.append("\n".join(current_parts))
-    return chunks or ["(No reviewable content found.)"]

@@ -724,6 +724,25 @@ def rollback_to_version(tag_or_sha: str, reason: str = "manual_rollback") -> Tup
     st["current_sha"] = target_sha.strip()
     save_state(st)
 
+    warning = ""
+    branch = repo_state.get("current_branch") or BRANCH_DEV
+    if _has_remote() and branch and branch not in {"HEAD", "unknown"}:
+        should_sync = True
+        rc_div, div_out, _ = git_capture(["git", "rev-list", "--left-right", "--count", f"HEAD...origin/{branch}"])
+        if rc_div == 0:
+            try:
+                ahead, behind = (int(part) for part in div_out.split())
+                should_sync = (ahead > 0) or (behind > 0)
+            except Exception:
+                should_sync = True
+        if should_sync:
+            rc_push, _, err_push = git_capture([
+                "git", "push", "--force-with-lease", "origin", branch,
+            ])
+            if rc_push != 0:
+                warning = f" ⚠️ Remote not synced: {err_push}"
+                log.warning("Rollback remote sync failed for %s: %s", branch, err_push)
+
     append_jsonl(
         DRIVE_ROOT / "logs" / "supervisor.jsonl",
         {
@@ -732,9 +751,11 @@ def rollback_to_version(tag_or_sha: str, reason: str = "manual_rollback") -> Tup
             "target": tag_or_sha,
             "reason": reason,
             "new_sha": st["current_sha"],
+            "remote_synced": not bool(warning),
+            "branch": branch,
         },
     )
-    return True, f"Rolled back to {tag_or_sha} ({st['current_sha'][:8]})"
+    return True, f"Rolled back to {tag_or_sha} ({st['current_sha'][:8]}){warning}"
 
 
 # ---------------------------------------------------------------------------

@@ -1,4 +1,4 @@
-# Ouroboros v4.28.6 — Architecture & Reference
+# Ouroboros v4.28.7 — Architecture & Reference
 
 This document describes every component, page, button, API endpoint, and data flow.
 It is the single source of truth for how the system works. Keep it updated.
@@ -637,7 +637,10 @@ backward compatibility but is not the runtime authority.
 - **`rollback_to_target`**: reset current branch to any tag or commit SHA. Creates
   a rescue snapshot of uncommitted work first. Wraps `supervisor/git_ops.rollback_to_version()`.
   Equivalent to the UI "Restore" button in Evolution → Versions. Review-exempt: restores to
-  an already-reviewed state. Useful for syncing with remote after `pull_from_remote` fails
+  an already-reviewed state. After the local `git reset --hard`, rollback now also does a
+  best-effort `git push --force-with-lease origin <branch>` when `origin` exists and the
+  branch diverges; if that remote sync fails, the rollback still succeeds locally but returns
+  a `⚠️ Remote not synced` warning. Useful for syncing with remote after `pull_from_remote` fails
   due to unrelated histories: `pull_from_remote` (fetches), then
   `rollback_to_target(target="origin/ouroboros", confirm=true)`.
 - **`restore_to_head`**: discard uncommitted changes (review-exempt)
@@ -1177,8 +1180,8 @@ Tag pushes (`v*`) always fire regardless of paths.
 | Script | Platform | Output |
 |--------|----------|--------|
 | `build.sh` | macOS | `dist/Ouroboros-{VERSION}.dmg` (optional signing + notarization) |
-| `build_linux.sh` | Linux | `dist/Ouroboros-linux-x86_64.tar.gz` |
-| `build_windows.ps1` | Windows | `dist/Ouroboros-windows-x64.zip` |
+| `build_linux.sh` | Linux | `dist/Ouroboros-<VERSION>-linux-<arch>.tar.gz` |
+| `build_windows.ps1` | Windows | `dist/Ouroboros-<VERSION>-windows-x64.zip` |
 
 All three use PyInstaller with `server.py` as entry point. Hidden imports cover
 starlette, uvicorn, websockets, dulwich, huggingface_hub. Data bundles include
