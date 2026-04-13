@@ -1,4 +1,4 @@
-# Ouroboros v4.28.7 — Architecture & Reference
+# Ouroboros v4.29.0 — Architecture & Reference
 
 This document describes every component, page, button, API endpoint, and data flow.
 It is the single source of truth for how the system works. Keep it updated.
@@ -497,7 +497,7 @@ immediately on a crash signal (SIGSEGV) with a diagnostic message suggesting
 1. Message arrives → `handle_chat_direct(chat_id, text, image_data)`
 2. Creates task dict `{id, type, chat_id, text}`
 3. `OuroborosAgent.handle_task(task)` →
-   a. Build context (`context.py`): system prompt + bible + identity + scratchpad + runtime info + Memory Registry digest
+   a. Build context (`context.py`): system prompt + bible + architecture + development guide + README + checklists, plus a **3-block system-memory layout**: (1) static governance/docs block (`cache_control: ttl=1h`), (2) semi-stable memory block for low-churn artifacts such as identity, knowledge base, patterns, and deep review (`cache_control: ephemeral`), and (3) dynamic working-memory/runtime block for scratchpad, dialogue history/summary, registry digest, drive/runtime state, review continuity, and recent sections
    b. `run_llm_loop()`: LLM call → tool execution → repeat until final text response
    c. Emit final `send_message`, `task_metrics`, and `task_done`; any restart request is latched until after those final events are queued
    d. Store task result synchronously; task summary and reflection run off the user-reply critical path
@@ -523,6 +523,10 @@ backward compatibility but is not the runtime authority.
 ### Tool execution (loop.py)
 
 - Pricing/cost estimation logic extracted to `pricing.py` (model pricing table, cost estimation, API key inference, usage event emission)
+- `build_llm_messages()` keeps the **3-block system prompt layout** stable for caching: (1) static governance/docs, (2) semi-stable identity + knowledge + patterns + deep review, (3) dynamic scratchpad/dialogue/registry/runtime sections.
+- `call_llm_with_retry()` now records `cache_hit_rate` in each `llm_round` event (`cached_tokens / prompt_tokens`, clamped to 0 when prompt tokens are zero) so cache behaviour is observable in logs and health checks.
+- `_sanitize_chat_completion_tools()` sorts tool schemas by function name before dispatch, stabilising cache keys across rounds while preserving deduplication of duplicate tool names.
+- Direct `anthropic::...` routing preserves multipart system text blocks (including `cache_control`) instead of flattening them into one string, so the same cache boundaries survive both OpenRouter-Anthropic and direct Anthropic paths.
 - **Per-task soft threshold**: Each task has a soft threshold (default $20, env `OUROBOROS_PER_TASK_COST_USD`). When a task exceeds this, the LLM is asked to wrap up soon. This is a reminder, not a hard stop.
 - **Budget tracking coverage**: All LLM spend reaches the budget via two patterns: (1) **Tool path** — tools emit `llm_usage` events to `ctx.pending_events` (falling back from `ctx.event_queue`); (2) **Daemon thread path** — background threads (consolidation, reflection, supervisor dedup) call `supervisor.state.update_budget_from_usage` directly. Covered paths: main agent loop, safety LLM, web search, triad review, scope review (with pending_events fallback added v4.27.0), plan_task per-reviewer (added v4.27.0), advisory_pre_review SDK + fallback LLM costs (added v4.27.0), claude_code_edit (conditional on cost_usd > 0), consciousness loop, consolidation daemon threads (added v4.27.0), reflection LLM calls (added v4.27.0), supervisor _find_duplicate_task (added v4.27.0).
 - **`memory_tools.py`**: Provides `memory_map` (read the metacognitive registry of all data sources) and `memory_update_registry` (add/update entries). Part of the Memory Registry system (v3.16.0).

@@ -266,6 +266,8 @@ class TestAdvisoryReviewStatusInContext:
         assert "### Open review continuations" in dynamic_text
         assert "critical_finding=tests_affected: Fix the failing test before commit" in dynamic_text
         assert "### Historical review ledger" in dynamic_text
+        assert "## Scratchpad" in dynamic_text
+        assert dynamic_text.index("## Scratchpad") < dynamic_text.index("## Drive state")
         assert dynamic_text.index("## Runtime context") < dynamic_text.index("## Review Continuity")
 
     def test_review_continuity_context_ignores_foreign_repo_obligations(self, tmp_path):

@@ -185,17 +185,28 @@ def _append_file_size_budget_checks(env: Any, checks: List[str]) -> None:
         log.debug("Failed to append file size budget checks", exc_info=True)
 
 
-def build_memory_sections(memory: Memory) -> List[str]:
-    """Build scratchpad, identity, dialogue blocks, and registry sections."""
+def build_memory_sections(memory: Memory, partition: str = "all") -> List[str]:
+    """Build memory sections, optionally partitioned by volatility.
+
+    partition:
+      - "all": scratchpad, identity, dialogue, registry (legacy/default)
+      - "stable": identity only
+      - "volatile": scratchpad and dialogue only (registry digest is injected separately)
+    """
     sections = []
 
-    scratchpad_raw = memory.load_scratchpad()
-    _warn_if_over_budget("scratchpad", scratchpad_raw)
-    sections.append("## Scratchpad\n\n" + scratchpad_raw)
+    include_stable = partition in {"all", "stable"}
+    include_volatile = partition in {"all", "volatile"}
 
-    identity_raw = memory.load_identity()
-    _warn_if_over_budget("identity", identity_raw)
-    sections.append("## Identity\n\n" + identity_raw)
+    if include_volatile:
+        scratchpad_raw = memory.load_scratchpad()
+        _warn_if_over_budget("scratchpad", scratchpad_raw)
+        sections.append("## Scratchpad\n\n" + scratchpad_raw)
+
+    if include_stable:
+        identity_raw = memory.load_identity()
+        _warn_if_over_budget("identity", identity_raw)
+        sections.append("## Identity\n\n" + identity_raw)
 
     try:
         from ouroboros.consolidator import migrate_dialogue_summary_to_blocks
@@ -206,24 +217,26 @@ def build_memory_sections(memory: Memory) -> List[str]:
     except Exception:
         pass
 
-    dialogue_blocks = memory.load_dialogue_blocks()
-    if dialogue_blocks:
-        blocks_md = memory.format_blocks_as_markdown(dialogue_blocks)
-        if blocks_md.strip():
-            sections.append("## Dialogue History\n\n" + blocks_md)
-    else:
-        summary_path = memory.drive_root / "memory" / "dialogue_summary.md"
-        if summary_path.exists():
-            summary_text = read_text(summary_path)
-            if summary_text.strip():
-                sections.append("## Dialogue Summary\n\n" + summary_text)
+    if include_volatile:
+        dialogue_blocks = memory.load_dialogue_blocks()
+        if dialogue_blocks:
+            blocks_md = memory.format_blocks_as_markdown(dialogue_blocks)
+            if blocks_md.strip():
+                sections.append("## Dialogue History\n\n" + blocks_md)
+        else:
+            summary_path = memory.drive_root / "memory" / "dialogue_summary.md"
+            if summary_path.exists():
+                summary_text = read_text(summary_path)
+                if summary_text.strip():
+                    sections.append("## Dialogue Summary\n\n" + summary_text)
 
-    registry_path = memory.drive_root / "memory" / "registry.md"
-    if registry_path.exists():
-        registry_text = read_text(registry_path)
-        if registry_text.strip():
-            _warn_if_over_budget("registry", registry_text)
-            sections.append("## Memory Registry\n\n" + registry_text)
+    if partition == "all":
+        registry_path = memory.drive_root / "memory" / "registry.md"
+        if registry_path.exists():
+            registry_text = read_text(registry_path)
+            if registry_text.strip():
+                _warn_if_over_budget("registry", registry_text)
+                sections.append("## Memory Registry\n\n" + registry_text)
 
     return sections
 
@@ -763,7 +776,7 @@ def build_llm_messages(
         static_text += "\n\n## CHECKLISTS.md\n\n" + checklists_md
 
     semi_stable_parts = []
-    semi_stable_parts.extend(build_memory_sections(memory))
+    semi_stable_parts.extend(build_memory_sections(memory, partition="stable"))
 
     kb_index_path = env.drive_path("memory/knowledge/index-full.md")
     if kb_index_path.exists():
@@ -797,16 +810,17 @@ def build_llm_messages(
     except Exception:
         pass
 
-    registry_digest = _build_registry_digest(env)
-    if registry_digest:
-        semi_stable_parts.append(registry_digest)
-
     semi_stable_text = "\n\n".join(semi_stable_parts)
 
     health_section = build_health_invariants(env)
     dynamic_parts = []
     if health_section:
         dynamic_parts.append(health_section)
+    dynamic_parts.extend(build_memory_sections(memory, partition="volatile"))
+
+    registry_digest = _build_registry_digest(env)
+    if registry_digest:
+        dynamic_parts.append(registry_digest)
     dynamic_parts.extend([
         "## Drive state\n\n" + state_json,
         build_runtime_section(env, task),

@@ -57,7 +57,7 @@ class TestScratchpadBlocks:
 
     def test_legacy_migration(self, memory):
         memory.scratchpad_path().write_text("Legacy scratchpad content here", encoding="utf-8")
-        block = memory.append_scratchpad_block("new block")
+        memory.append_scratchpad_block("new block")
         blocks = memory.load_scratchpad_blocks()
         assert len(blocks) == 2
         assert blocks[0]["source"] == "migration"
@@ -114,6 +114,7 @@ class TestCacheHitRate:
                 "type": "llm_round",
                 "prompt_tokens": 1000,
                 "cached_tokens": 600,
+                "cache_hit_rate": 0.6,
             }))
         events_path.write_text("\n".join(entries), encoding="utf-8")
 

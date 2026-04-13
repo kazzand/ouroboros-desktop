@@ -183,6 +183,28 @@ def test_normalize_anthropic_response_maps_tool_use(monkeypatch):
     assert usage["cache_write_tokens"] == 2
 
 
+def test_build_anthropic_messages_preserves_system_blocks_and_cache_control(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-key")
+
+    client = LLMClient()
+    system_blocks, anthropic_messages = client._build_anthropic_messages([
+        {
+            "role": "system",
+            "content": [
+                {"type": "text", "text": "stable", "cache_control": {"type": "ephemeral", "ttl": "1h"}},
+                {"type": "text", "text": "dynamic"},
+            ],
+        },
+        {"role": "user", "content": "hi"},
+    ])
+
+    assert system_blocks == [
+        {"type": "text", "text": "stable", "cache_control": {"type": "ephemeral", "ttl": "1h"}},
+        {"type": "text", "text": "dynamic"},
+    ]
+    assert anthropic_messages == [{"role": "user", "content": [{"type": "text", "text": "hi"}]}]
+
+
 def test_resolve_openai_compatible_target_prefers_dedicated_credentials(monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "legacy-key")
     monkeypatch.setenv("OPENAI_BASE_URL", "https://legacy.example/v1")

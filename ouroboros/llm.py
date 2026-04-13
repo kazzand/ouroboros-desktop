@@ -100,16 +100,24 @@ def _compact_local_static_text(text: str) -> str:
 def _compact_local_semi_stable_text(text: str) -> str:
     return _compact_markdown_sections(
         text,
-        preserve_titles={"Scratchpad", "Identity"},
-        reason="Scratchpad and Identity were preserved; non-core memory sections were compacted for local execution.",
+        preserve_titles={"Identity"},
+        reason="Identity was preserved; non-core stable memory sections were compacted for local execution.",
     )
 
 
 def _compact_local_dynamic_text(text: str) -> str:
     return _compact_markdown_sections(
         text,
-        preserve_titles={"Drive state", "Runtime context", "Health Invariants"},
-        reason="Recent/history-heavy sections were compacted for local execution.",
+        preserve_titles={
+            "Scratchpad",
+            "Dialogue History",
+            "Dialogue Summary",
+            "Memory Registry (what I know / don't know)",
+            "Drive state",
+            "Runtime context",
+            "Health Invariants",
+        },
+        reason="Working-memory and runtime sections were preserved; non-core recent/history sections were compacted for local execution.",
     )
 
 
@@ -991,7 +999,10 @@ class LLMClient:
             if block_type in {"text", "input_text", "output_text"}:
                 text = str(block.get("text") or "")
                 if text:
-                    blocks.append({"type": "text", "text": text})
+                    normalized = {"type": "text", "text": text}
+                    if isinstance(block.get("cache_control"), dict):
+                        normalized["cache_control"] = dict(block.get("cache_control") or {})
+                    blocks.append(normalized)
                 continue
             if block_type == "image_url":
                 image_url = str((block.get("image_url") or {}).get("url") or "")
@@ -1000,22 +1011,23 @@ class LLMClient:
                     blocks.append(image_block)
                 continue
             if block.get("text"):
-                blocks.append({"type": "text", "text": str(block.get("text") or "")})
+                normalized = {"type": "text", "text": str(block.get("text") or "")}
+                if isinstance(block.get("cache_control"), dict):
+                    normalized["cache_control"] = dict(block.get("cache_control") or {})
+                blocks.append(normalized)
         return blocks
 
     def _build_anthropic_messages(
         self,
         messages: List[Dict[str, Any]],
-    ) -> Tuple[str, List[Dict[str, Any]]]:
-        system_parts: List[str] = []
+    ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+        system_blocks: List[Dict[str, Any]] = []
         anthropic_messages: List[Dict[str, Any]] = []
 
         for msg in messages:
             role = str(msg.get("role") or "").strip().lower()
             if role == "system":
-                for block in self._anthropic_blocks_from_content(msg.get("content")):
-                    if block.get("type") == "text" and block.get("text"):
-                        system_parts.append(str(block.get("text") or ""))
+                system_blocks.extend(self._anthropic_blocks_from_content(msg.get("content")))
                 continue
 
             if role == "user":
@@ -1073,7 +1085,7 @@ class LLMClient:
                     }],
                 )
 
-        return "\n\n".join(part for part in system_parts if part).strip(), anthropic_messages
+        return system_blocks, anthropic_messages
 
     @staticmethod
     def _build_anthropic_tools(tools: Optional[List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
@@ -1120,6 +1132,7 @@ class LLMClient:
             else:
                 continue
             sanitized_tools.append(tool_copy)
+        sanitized_tools.sort(key=lambda tool: str((tool.get("function") or {}).get("name") or ""))
         return sanitized_tools
 
     @staticmethod

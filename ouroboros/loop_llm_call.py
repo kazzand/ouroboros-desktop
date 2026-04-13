@@ -158,6 +158,11 @@ def call_llm_with_retry(
 
             accumulated_usage["rounds"] = accumulated_usage.get("rounds", 0) + 1
 
+            prompt_tokens = int(usage.get("prompt_tokens") or 0)
+            completion_tokens = int(usage.get("completion_tokens") or 0)
+            cached_tokens = int(usage.get("cached_tokens") or 0)
+            cache_write_tokens = int(usage.get("cache_write_tokens") or 0)
+            cache_hit_rate = (cached_tokens / prompt_tokens) if prompt_tokens > 0 else 0.0
             _round_event = {
                 "ts": utc_now_iso(), "type": "llm_round",
                 "task_id": task_id,
@@ -166,10 +171,11 @@ def call_llm_with_retry(
                 "provider": provider,
                 "source": "loop",
                 "model_category": infer_model_category(display_model),
-                "prompt_tokens": int(usage.get("prompt_tokens") or 0),
-                "completion_tokens": int(usage.get("completion_tokens") or 0),
-                "cached_tokens": int(usage.get("cached_tokens") or 0),
-                "cache_write_tokens": int(usage.get("cache_write_tokens") or 0),
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "cached_tokens": cached_tokens,
+                "cache_write_tokens": cache_write_tokens,
+                "cache_hit_rate": cache_hit_rate,
                 "cost_usd": cost,
             }
             _emit_live_log(event_queue, {
