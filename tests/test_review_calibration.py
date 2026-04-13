@@ -483,6 +483,17 @@ class TestObligationGrouping:
 # Advisory worktree version-sync check (_check_worktree_version_sync)
 # ---------------------------------------------------------------------------
 
+def test_shared_calibration_marks_narrative_mismatch_as_advisory():
+    """README/test-count style narrative drift should be calibrated as advisory, not critical."""
+    from ouroboros.tools.review_helpers import CRITICAL_FINDING_CALIBRATION
+
+    text = CRITICAL_FINDING_CALIBRATION.lower()
+    assert "narrative" in text
+    assert "advisory" in text
+    assert "readme test counts" in text
+    assert "release/version metadata" in text or "release" in text
+
+
 class TestAdvisoryWorktreeVersionSync:
     """Worktree version-sync preflight in the advisory path."""
 

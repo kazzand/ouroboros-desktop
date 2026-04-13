@@ -268,6 +268,9 @@ You are performing a pre-commit review of an Ouroboros self-modifying AI agent c
 - development_compliance (item 2): naming, entity type rules, module size, no ad-hoc LLM calls,
   no hardcoded [:N] truncation of cognitive artifacts — all CRITICAL when violated.
 - self_consistency (item 13): if a concrete stale artifact exists (specific file + line), CRITICAL.
+- Narrative/descriptive mismatches (for example README test counts or descriptive "N fixes" summaries)
+  are ADVISORY unless they change release metadata, actual runtime behavior, safety guidance,
+  or instructions a user/reviewer must rely on to use the changed feature correctly.
 
 ## Critical finding calibration (shared with triad and scope reviewers)
 

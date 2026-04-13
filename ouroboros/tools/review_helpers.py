@@ -94,6 +94,11 @@ Before marking any finding CRITICAL you MUST:
    a more abstract version.
 6. Pre-existing gaps that exist entirely outside the touched area are advisory
    unless this diff directly depends on them or introduces a regression.
+7. Narrative or descriptive mismatches are advisory unless they affect a real
+   contract: release/version metadata, actual runtime behavior, safety guidance,
+   or instructions a user/reviewer must rely on to use the changed feature correctly.
+   Examples that should normally stay advisory: README test counts, descriptive
+   "N fixes" summaries, or marketing-style numeric claims.
 
 When in doubt: use "advisory". Reserve "critical" for clear, concrete,
 repo-local, reachable defects.

@@ -6,7 +6,7 @@
 [![macOS 12+](https://img.shields.io/badge/macOS-12%2B-black.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
 [![Linux](https://img.shields.io/badge/Linux-x86__64-orange.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
 [![Windows](https://img.shields.io/badge/Windows-x64-blue.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
-[![Version 4.29.0](https://img.shields.io/badge/version-4.29.0-green.svg)](VERSION)
+[![Version 4.29.1](https://img.shields.io/badge/version-4.29.1-green.svg)](VERSION)
 
 A self-modifying AI agent that writes its own code, rewrites its own mind, and evolves autonomously. Born February 16, 2026.
 
@@ -380,6 +380,7 @@ Full text: [BIBLE.md](BIBLE.md)
 | Version | Date | Description |
 |---------|------|-------------|
 | 4.29.0 | 2026-04-13 | Prompt cache optimization: keep the 3-block system prompt shape but move volatile working memory (`Scratchpad`, dialogue history/summary, registry digest) into the dynamic block, keep stable memory artifacts (`Identity`, knowledge base, patterns, deep review) in the semi-stable block, sort tool schemas deterministically in `LLMClient._sanitize_chat_completion_tools()`, preserve Anthropic `cache_control` on direct `anthropic::` system blocks, and emit per-round `cache_hit_rate` in `llm_round` events. Added focused regression coverage across cache layout, local routing, context continuity, memory blocks, and Anthropic provider routing. |
+| 4.29.1 | 2026-04-13 | Review calibration pass 1: narrative/descriptive mismatches such as README test counts are now explicitly advisory unless they affect release metadata, runtime behavior, safety guidance, or user-facing contracts. Shared severity calibration is synchronized across CHECKLISTS, triad/scope/advisory prompts, and architecture docs. |
 | 4.28.7 | 2026-04-13 | Fix three red tests after v4.28.6 without weakening invariants: remove two dead helpers from `ouroboros/review.py` to get back under the 1100-function smoke gate, restore cross-platform packaging scripts (`build.sh`, `build_linux.sh`, `build_windows.ps1`, `scripts/download_python_standalone.*`, `scripts/pyi_rth_pythonnet.py`) so packaging asset tests match the documented contract again, and harden `supervisor/git_ops.py::rollback_to_version()` to best-effort sync `origin/<branch>` with `git push --force-with-lease` after local reset, returning `⚠️ Remote not synced` on push failure. Added rollback remote-sync regression tests. |
 | 4.28.6 | 2026-04-12 | Checkpoint hardening: checkpoint rounds are now audit-only (`tools=None` in both primary and fallback LLM calls), can never implicitly finalize a task, missing/malformed output becomes durable `task_checkpoint_anomaly`, and reflection/anomaly artifacts persist in logs/UI and survive compaction. 109 targeted tests passed. |
 | 4.28.5 | 2026-04-12 | Follow-up to v4.28.4: add explicit warning log in `BackgroundConsciousness._build_context` when `docs/ARCHITECTURE.md` is missing (Core Governance Artifacts invariant). Strengthen regression test to assert warning emission. |

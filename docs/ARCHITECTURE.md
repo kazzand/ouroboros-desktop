@@ -1,4 +1,4 @@
-# Ouroboros v4.29.0 — Architecture & Reference
+# Ouroboros v4.29.1 — Architecture & Reference
 
 This document describes every component, page, button, API endpoint, and data flow.
 It is the single source of truth for how the system works. Keep it updated.
@@ -1017,6 +1017,10 @@ errors surface via the same observability path.
   and oversized (>1MB) files also produce explicit omission notes.
 - **Goal section**: `build_goal_section` provides intended transformation context with
   precedence: goal > scope > commit_message > fallback. No raw task/chat text.
+- **Shared reviewer calibration**: triad, scope, and advisory prompts all inject the same
+  `CRITICAL_FINDING_CALIBRATION` text from `review_helpers.py`, so severity tuning (for example,
+  keeping narrative README/count mismatches advisory while preserving release/safety invariants as
+  critical) stays consistent across all three review surfaces.
 - Enforcement configurable: `blocking` or `advisory`.
 
 #### Blocking scope review

@@ -84,7 +84,7 @@ Ouroboros repository.
 | 10 | tool_registration | New tool function added but not exported in get_tools()? (PASS if no new tool.) | critical |
 | 11 | context_building | New data/memory files that should appear in LLM context (context.py) but don't? | advisory |
 | 12 | knowledge_index | Knowledge base topics changed but memory/knowledge/index-full.md not updated? | advisory |
-| 13 | self_consistency | Does this change affect behavior described in `BIBLE.md`, `prompts/`, `docs/`, or this checklist itself? Check explicitly: (a) version in `ARCHITECTURE.md` header matches `VERSION` file; (b) tool names/descriptions in `prompts/SYSTEM.md` match tools actually exported by `get_tools()`; (c) JSONL log/memory file formats described in `ARCHITECTURE.md` match all readers/writers; (d) any behavioral change reflected in `prompts/CONSCIOUSNESS.md` if it affects background loop behavior; (e) DEVELOPMENT.md rules still accurate after the change. | critical |
+| 13 | self_consistency | Does this change affect behavior described in `BIBLE.md`, `prompts/`, `docs/`, or this checklist itself? Check explicitly: (a) version in `ARCHITECTURE.md` header matches `VERSION` file; (b) tool names/descriptions in `prompts/SYSTEM.md` match tools actually exported by `get_tools()`; (c) JSONL log/memory file formats described in `ARCHITECTURE.md` match all readers/writers; (d) any behavioral change reflected in `prompts/CONSCIOUSNESS.md` if it affects background loop behavior; (e) DEVELOPMENT.md rules still accurate after the change. Narrative/descriptive mismatches (for example README test counts or descriptive "N fixes" summaries) are advisory unless they change release metadata, behavioral contracts, safety guidance, or instructions a user/reviewer relies on to use the changed feature correctly. | critical |
 | 14 | cross_platform | Does the diff use platform-specific APIs (`os.kill`, `os.setsid`, `os.killpg`, `os.getpgid`, `fcntl`, `msvcrt`, `signal.SIGKILL`, `signal.SIGTERM`, `subprocess` with `start_new_session`/`creationflags`, hardcoded `/` or `\\` in filesystem paths) outside of `ouroboros/platform_layer.py`? Does it import Unix-only or Windows-only modules (`fcntl`, `msvcrt`, `winreg`, `resource`) at any level without a platform guard (`sys.platform`/`IS_WINDOWS` check)? | critical |
 
 ### Severity rules
@@ -108,6 +108,15 @@ Before marking any item CRITICAL you MUST be able to answer YES to ALL of:
 3. The fix requires a **change to this diff** — not a follow-up task or speculative guard.
 
 If you cannot satisfy all three, use **advisory**, not critical.
+
+Narrative or descriptive mismatches are advisory, not critical, when they do not affect
+system behavior, release/version invariants, safety guidance, or the user's ability to
+understand and use the changed feature correctly. Examples: README test counts, descriptive
+"N fixes" summaries, or marketing-style numeric claims that are not part of a real contract.
+
+These remain critical when they bear real operational or release meaning: VERSION / badge /
+changelog invariants, architecture or prompt docs that lie about actual behavior or contracts,
+security or safety guidance, or any documentation/test artifact required to validate the changed behavior.
 
 One root cause = one FAIL entry. Do NOT split one underlying problem into multiple
 FAIL items that all require the same change. Do NOT hold an obligation open by
@@ -182,3 +191,5 @@ regressions that diff-only reviewers cannot see.
 - Any critical FAIL must cite a concrete file, symbol, prompt, doc, test, config, or sibling flow.
 - If the reviewer cannot point to an exact touchpoint, the FAIL must be advisory, not critical.
 - Scope affects only unchanged code outside the diff. The diff itself remains fully reviewable.
+- Narrative or descriptive mismatches outside the changed contract surface are advisory, not critical. Examples: README test counts, descriptive "N fixes" summaries, or non-contractual numeric claims.
+- They become critical only when they misstate actual behavior, release/version invariants, safety guidance, or instructions needed to use the changed feature correctly.

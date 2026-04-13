@@ -908,6 +908,9 @@ def test_self_consistency_listed_as_critical_in_severity_rules():
             )
     # Must say item 13 is conditionally critical
     assert "item 13" in content.lower() and "critical" in content.lower()
+    # Narrative mismatches such as README test counts should be explicitly advisory
+    assert "README test counts" in content
+    assert "narrative" in content.lower()
 
 
 def test_development_compliance_checklist_expanded():
