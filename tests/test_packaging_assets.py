@@ -105,21 +105,24 @@ def test_build_sh_supports_unsigned_macos_release():
 
 
 def test_build_scripts_use_uv():
-    """Build scripts must use uv instead of pip and check for uv presence."""
+    """Build scripts must use uv instead of pip, check for uv presence, and pass --system."""
     build_sh = _read("build.sh")
     assert "uv pip install" in build_sh
     assert "command -v uv" in build_sh
     assert "pip install" not in build_sh.replace("uv pip install", "")
+    assert "--system" in build_sh, "build.sh must pass --system to uv pip install"
 
     build_linux = _read("build_linux.sh")
     assert "uv pip install" in build_linux
     assert "command -v uv" in build_linux
     assert "pip install" not in build_linux.replace("uv pip install", "")
+    assert "--system" in build_linux, "build_linux.sh must pass --system to uv pip install"
 
     build_win = _read("build_windows.ps1")
     assert "uv pip install" in build_win
     assert "Get-Command uv" in build_win
     assert "pip install" not in build_win.replace("uv pip install", "")
+    assert "--system" in build_win, "build_windows.ps1 must pass --system to uv pip install"
 
 
 def test_ci_uses_uv():

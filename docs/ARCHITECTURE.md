@@ -1,4 +1,4 @@
-# Ouroboros v4.18.9 — Architecture & Reference
+# Ouroboros v4.18.10 — Architecture & Reference
 
 This document describes every component, page, button, API endpoint, and data flow.
 It is the single source of truth for how the system works. Keep it updated.
@@ -1060,7 +1060,7 @@ Tag pushes (`v*`) always fire regardless of paths.
 | `build_windows.ps1` | Windows | `dist/Ouroboros-windows-x64.zip` |
 
 All three require `uv` (Astral) as the package installer and check for its presence
-before proceeding. Dependencies are installed via `uv pip install --python <interpreter>`
+before proceeding. Dependencies are installed via `uv pip install --system --python <interpreter>`
 (launcher deps target the build interpreter, agent deps target embedded Python). PyInstaller
 with `server.py` as entry point. Hidden imports cover starlette, uvicorn, websockets,
 dulwich, huggingface_hub. Data bundles include `ouroboros/`, `supervisor/`, `web/`,
