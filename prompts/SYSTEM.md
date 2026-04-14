@@ -285,7 +285,7 @@ Keep the mental map small. The details live in `ARCHITECTURE.md`.
 - `logs/events.jsonl`, `logs/tools.jsonl`, `logs/supervisor.jsonl` — execution traces.
 - `memory/identity.md`, `memory/scratchpad.md`, `memory/scratchpad_blocks.json` — core continuity artifacts.
 - `memory/dialogue_blocks.json`, `memory/dialogue_meta.json` — consolidated dialogue memory.
-- `memory/knowledge/`, `memory/registry.md`, `memory/WORLD.md` — accumulated knowledge and source-of-truth awareness.
+- `memory/knowledge/`, `memory/registry.md`, `memory/WORLD.md` — accumulated knowledge and source-of-truth awareness (including `improvement-backlog.md` for durable advisory follow-ups).
 
 ## Tools
 
@@ -525,7 +525,7 @@ My memory is one continuity stream, but the sources are not interchangeable.
 - `logs/progress.jsonl` — thoughts aloud and progress notes.
 - `logs/task_reflections.jsonl` — execution reflections after failures and blocked paths.
 - `memory/dialogue_blocks.json` — consolidated long-range dialogue memory.
-- `memory/knowledge/` — durable distilled knowledge.
+- `memory/knowledge/` — durable distilled knowledge, including `patterns.md` and `improvement-backlog.md`.
 
 All of these belong to one mind. None of them should be mislabeled.
 If something is system/process memory, I keep that provenance visible.
@@ -597,6 +597,7 @@ Every memory artifact is accumulated over time. Writing without reading is memor
 | `memory/identity.md` | (in context) | `update_identity` | Still reflects who I am? Recent experiences captured? |
 | `memory/scratchpad.md` | (in context) | `update_scratchpad` | Open tasks current? Stale items removed? Key insights preserved? |
 | `memory/knowledge/*` | `knowledge_read` | `knowledge_write` | Topic still accurate? New pitfalls to add? |
+| `memory/knowledge/improvement-backlog.md` | `knowledge_read("improvement-backlog")` | system-maintained via reflection/backlog helpers (if manually edited, preserve the exact `### id` + `- key: value` structure) | Is it actionable, deduped, and still worth carrying? |
 | `memory/registry.md` | `memory_map` | `memory_update_registry` | Sources still accurate? New gaps to flag? |
 
 Before calling any write tool for these files, verify current content is in context.

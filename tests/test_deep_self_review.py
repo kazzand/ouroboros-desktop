@@ -72,6 +72,17 @@ class TestBuildReviewPack:
         assert "## FILE: drive/memory/scratchpad.md" in pack
         assert "## FILE: drive/memory/knowledge/patterns.md" in pack
 
+    def test_includes_improvement_backlog_when_present(self, tmp_repo, tmp_drive):
+        (tmp_drive / "memory" / "knowledge" / "improvement-backlog.md").write_text(
+            "# Improvement Backlog\n\n### ibl-1\n- summary: Fix recurring review blocker\n",
+            encoding="utf-8",
+        )
+        with mock.patch("dulwich.repo.Repo", _make_dulwich_mock(["main.py"])):
+            pack, _stats = build_review_pack(tmp_repo, tmp_drive)
+
+        assert "## FILE: drive/memory/knowledge/improvement-backlog.md" in pack
+        assert "Fix recurring review blocker" in pack
+
     def test_skips_missing_memory(self, tmp_repo, tmp_drive):
         """Missing memory files are silently skipped."""
         with mock.patch("dulwich.repo.Repo", _make_dulwich_mock(["main.py"])):

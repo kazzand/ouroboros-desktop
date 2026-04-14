@@ -141,6 +141,23 @@ def build_trace_summary(llm_trace: dict) -> str:
     return summary
 
 
+def _update_improvement_backlog(
+    env: Any,
+    reflection_entry: Dict[str, Any] | None,
+) -> int:
+    """Persist LLM-nominated follow-up improvements into the durable backlog."""
+    try:
+        from ouroboros.improvement_backlog import append_backlog_items
+
+        candidates = list((reflection_entry or {}).get("backlog_candidates") or [])
+        if not candidates:
+            return 0
+        return append_backlog_items(env.drive_root, candidates)
+    except Exception:
+        log.debug("Improvement backlog update failed", exc_info=True)
+        return 0
+
+
 def _run_post_task_processing_async(
     env: Any,
     task: Dict[str, Any],
@@ -169,13 +186,17 @@ def _run_post_task_processing_async(
                 drive_logs,
                 review_evidence=review_evidence_snapshot,
             )
-            _run_reflection(
+            reflection_entry = _run_reflection(
                 env,
                 llm_client,
                 task_snapshot,
                 usage_snapshot,
                 trace_snapshot,
                 review_evidence_snapshot,
+            )
+            _update_improvement_backlog(
+                env,
+                reflection_entry,
             )
         except Exception:
             log.warning("Async post-task processing failed", exc_info=True)
@@ -462,7 +483,7 @@ def _run_scratchpad_consolidation(env: Any, memory: Any, llm: Any) -> None:
 
 def _run_reflection(env: Any, llm: Any, task: Dict[str, Any],
                     usage: Dict[str, Any], llm_trace: Dict[str, Any],
-                    review_evidence: Dict[str, Any]) -> None:
+                    review_evidence: Dict[str, Any]) -> Dict[str, Any] | None:
     """Run execution reflection synchronously (process memory, Bible P1)."""
     try:
         from ouroboros.reflection import (
@@ -477,10 +498,12 @@ def _run_reflection(env: Any, llm: Any, task: Dict[str, Any],
                     review_evidence=review_evidence,
                 )
                 append_reflection(env.drive_root, entry)
+                return entry
             except Exception:
                 log.warning("Execution reflection failed (non-critical)", exc_info=True)
     except Exception:
         log.debug("Execution reflection setup failed", exc_info=True)
+    return None
 
 
 def build_review_context(env: Any) -> str:

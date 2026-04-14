@@ -43,6 +43,7 @@ _MEMORY_WHITELIST = [
     "memory/WORLD.md",
     "memory/knowledge/index-full.md",
     "memory/knowledge/patterns.md",
+    "memory/knowledge/improvement-backlog.md",
 ]
 
 _SYSTEM_PROMPT = """\

@@ -323,6 +323,57 @@ class TestAdvisoryReviewStatusInContext:
         assert "repo b blocked" not in dynamic_text
 
 
+def test_runtime_section_includes_improvement_backlog_digest(tmp_path):
+    from ouroboros.context import build_llm_messages
+    from ouroboros.memory import Memory
+
+    class FakeEnv:
+        def drive_path(self, p):
+            return tmp_path / p
+
+        def repo_path(self, p):
+            return tmp_path / "repo" / p
+
+        @property
+        def repo_dir(self):
+            return tmp_path / "repo"
+
+        @property
+        def drive_root(self):
+            return tmp_path
+
+    (tmp_path / "repo" / "prompts").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "repo" / "docs").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "memory" / "knowledge").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "logs").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "state").mkdir(parents=True, exist_ok=True)
+
+    (tmp_path / "repo" / "prompts" / "SYSTEM.md").write_text("System prompt", encoding="utf-8")
+    (tmp_path / "repo" / "BIBLE.md").write_text("Bible", encoding="utf-8")
+    (tmp_path / "repo" / "README.md").write_text("README", encoding="utf-8")
+    (tmp_path / "repo" / "docs" / "ARCHITECTURE.md").write_text('# Ouroboros v1.2.3', encoding="utf-8")
+    (tmp_path / "repo" / "docs" / "DEVELOPMENT.md").write_text('# Dev', encoding="utf-8")
+    (tmp_path / "repo" / "docs" / "CHECKLISTS.md").write_text('Checklist', encoding="utf-8")
+    (tmp_path / "repo" / "VERSION").write_text("1.2.3", encoding="utf-8")
+    (tmp_path / "repo" / "pyproject.toml").write_text('version = "1.2.3"', encoding="utf-8")
+    (tmp_path / "state" / "state.json").write_text('{"spent_usd": 0}', encoding="utf-8")
+    (tmp_path / "memory" / "identity.md").write_text("I am Ouroboros", encoding="utf-8")
+    (tmp_path / "memory" / "scratchpad.md").write_text("scratchpad", encoding="utf-8")
+    (tmp_path / "memory" / "knowledge" / "improvement-backlog.md").write_text(
+        "# Improvement Backlog\n\n### ibl-1\n- status: open\n- created_at: 2026-04-14T09:00:00+00:00\n- source: execution_reflection\n- category: process\n- task_id: task-1\n- requires_plan_review: yes\n- fingerprint: fp-1\n- summary: Reduce recurring task friction around REVIEW_BLOCKED\n",
+        encoding="utf-8",
+    )
+
+    messages, _ = build_llm_messages(
+        env=FakeEnv(),
+        memory=Memory(drive_root=tmp_path),
+        task={"id": "task-a", "type": "task", "text": "hello"},
+    )
+    dynamic_text = messages[0]["content"][2]["text"]
+    assert "## Improvement Backlog" in dynamic_text
+    assert "Reduce recurring task friction around REVIEW_BLOCKED" in dynamic_text
+
+
 class TestRuntimeEnvSection:
     """build_runtime_section includes runtime_env with platform and is_desktop."""
 

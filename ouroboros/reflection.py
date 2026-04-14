@@ -52,6 +52,24 @@ If structured review evidence exists, incorporate the critical/advisory findings
 open obligations into the root-cause analysis. Mention them individually with their
 severity and item/tag identity rather than collapsing them into a generic "review failed".
 
+Then, if there is at least one concrete deferred improvement worth tracking, append a final line:
+BACKLOG_CANDIDATES_JSON: [...]
+Use a JSON array of 0-3 objects. Each object must have:
+- summary
+- category
+- source
+- evidence
+Optional fields:
+- context
+- proposed_next_step
+- task_id
+- requires_plan_review
+Rules for candidates:
+- Only include concrete, evidence-backed follow-ups that are OUT OF SCOPE for the current task.
+- Prefer recurring process/tool/review friction over one-off noise.
+- Do not propose autonomous execution or workflow states.
+- If nothing deserves backlog tracking, output BACKLOG_CANDIDATES_JSON: []
+
 ## Task goal
 
 {goal}
@@ -68,7 +86,7 @@ severity and item/tag identity rather than collapsing them into a generic "revie
 
 {review_evidence}
 
-Write the reflection now. Plain text, no markdown headers.
+Write the reflection now. Plain text, no markdown headers except the exact final BACKLOG_CANDIDATES_JSON line.
 """
 
 
@@ -147,6 +165,47 @@ def _detect_markers(llm_trace: Dict[str, Any]) -> List[str]:
     return sorted(found)
 
 
+def _extract_backlog_candidates(reflection_text: str, task_id: str) -> tuple[str, List[Dict[str, Any]]]:
+    marker = "BACKLOG_CANDIDATES_JSON:"
+    if marker not in reflection_text:
+        return reflection_text.strip(), []
+
+    body, marker_tail = reflection_text.rsplit(marker, 1)
+    payload = marker_tail.strip()
+    cleaned_text = body.rstrip()
+    if not payload:
+        return cleaned_text, []
+    try:
+        raw_candidates = json.loads(payload)
+    except Exception:
+        log.warning("Reflection backlog candidates JSON parse failed", exc_info=True)
+        return cleaned_text, []
+    if not isinstance(raw_candidates, list):
+        return cleaned_text, []
+
+    candidates: List[Dict[str, Any]] = []
+    for raw in raw_candidates[:3]:
+        if not isinstance(raw, dict):
+            continue
+        summary = _truncate_with_notice(raw.get("summary", ""), 260).strip()
+        category = _truncate_with_notice(raw.get("category", "process"), 80).strip() or "process"
+        source = _truncate_with_notice(raw.get("source", "execution_reflection"), 80).strip() or "execution_reflection"
+        evidence = _truncate_with_notice(raw.get("evidence", ""), 220).strip()
+        if not summary or not evidence:
+            continue
+        candidates.append({
+            "summary": summary,
+            "category": category,
+            "source": source,
+            "evidence": evidence,
+            "context": _truncate_with_notice(raw.get("context", ""), 400).strip(),
+            "proposed_next_step": _truncate_with_notice(raw.get("proposed_next_step", ""), 260).strip(),
+            "task_id": _truncate_with_notice(raw.get("task_id", task_id), 80).strip() or task_id,
+            "requires_plan_review": bool(raw.get("requires_plan_review", True)),
+        })
+    return cleaned_text, candidates
+
+
 def generate_reflection(
     task: Dict[str, Any],
     llm_trace: Dict[str, Any],
@@ -189,7 +248,11 @@ def generate_reflection(
             reasoning_effort="low",
             max_tokens=4096,
         )
-        reflection_text = (resp_msg.get("content") or "").strip()
+        raw_reflection_text = (resp_msg.get("content") or "").strip()
+        reflection_text, backlog_candidates = _extract_backlog_candidates(
+            raw_reflection_text,
+            str(task.get("id", "") or ""),
+        )
         # Track cost — reflection runs in daemon thread path, so update directly.
         if refl_usage:
             try:
@@ -200,6 +263,7 @@ def generate_reflection(
     except Exception as e:
         log.warning("Reflection LLM call failed: %s", e)
         reflection_text = f"(reflection generation failed: {e})"
+        backlog_candidates = []
 
     return {
         "ts": utc_now_iso(),
@@ -212,6 +276,7 @@ def generate_reflection(
         "key_markers": markers,
         "review_evidence": review_evidence or {},
         "reflection": reflection_text,
+        "backlog_candidates": backlog_candidates,
     }
 
 

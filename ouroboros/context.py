@@ -826,6 +826,15 @@ def build_llm_messages(
         build_runtime_section(env, task),
     ])
 
+    try:
+        from ouroboros.improvement_backlog import format_backlog_digest
+
+        backlog_digest = format_backlog_digest(env.drive_root)
+        if backlog_digest:
+            dynamic_parts.append(backlog_digest)
+    except Exception:
+        log.debug("Failed to build improvement backlog digest", exc_info=True)
+
     review_section = ""
     if review_context_builder is not None:
         try:

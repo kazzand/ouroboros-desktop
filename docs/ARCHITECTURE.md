@@ -1,4 +1,4 @@
-# Ouroboros v4.29.3 — Architecture & Reference
+# Ouroboros v4.29.4 — Architecture & Reference
 
 This document describes every component, page, button, API endpoint, and data flow.
 It is the single source of truth for how the system works. Keep it updated.
@@ -33,6 +33,7 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on localhost:8765
       ├── chat_upload_api.py   ← Chat file attachment upload/delete endpoints
       ├── agent_startup_checks.py ← Startup verification and health checks
       ├── agent_task_pipeline.py  ← Task execution pipeline orchestration
+      ├── improvement_backlog.py ← Minimal durable advisory backlog helpers + digest formatting
       ├── loop.py              ← High-level LLM tool loop
       ├── loop_llm_call.py     ← Single-round LLM call + usage accounting
       ├── loop_tool_execution.py ← Tool dispatch and tool-result handling
@@ -146,6 +147,7 @@ Dockerfile                    ← Docker image (web UI runtime)
 │   │   ├── knowledge_journal.jsonl   ← Knowledge write journal
 │   │   ├── deep_review.md            ← Last deep self-review report (written by deep_self_review task)
 │   │   ├── registry.md              ← Source-of-truth awareness map (what data the agent has vs doesn't have)
+│   │   ├── knowledge/improvement-backlog.md ← Durable advisory backlog of concrete post-task improvements
 │   │   └── owner_mailbox/           ← Per-task user message files (compat path name)
 │   ├── logs/
 │   │   ├── chat.jsonl      ← Chat message log
@@ -754,7 +756,8 @@ the constitutional guard is that the file itself must remain non-deletable.
 - **Progress emission**: emits 💬 progress messages to UI via event queue + persists to `progress.jsonl`
 - Pauses when regular task is running; deferred events queued and flushed on resume
 - Budget-capped (default 10% of total)
-- As of v3.16.1, CONSCIOUSNESS.md includes a concrete 7-item rotating maintenance checklist (dialogue consolidation, identity freshness, scratchpad freshness, knowledge gaps, process-memory freshness, tech radar, registry sync). One item is addressed per wakeup cycle.
+- As of v4.29.4, background consciousness also reads the compact `Improvement Backlog` digest so it can groom, dedupe, or nominate existing backlog items without auto-starting implementation work.
+- As of v4.29.4, CONSCIOUSNESS.md includes an 8-item rotating maintenance checklist (dialogue consolidation, identity freshness, scratchpad freshness, knowledge gaps, process-memory freshness, improvement backlog, tech radar, registry sync). One item is addressed per wakeup cycle.
 
 ### Block-wise dialogue consolidation (consolidator.py)
 
@@ -814,6 +817,7 @@ the constitutional guard is that the file itself must remain non-deletable.
 
 - As of v3.16.0, the Memory Registry digest (from `memory/registry.md`) is injected into every LLM context to enable source-of-truth awareness.
 - As of v3.20.0, `patterns.md` (Pattern Register) is injected into semi-stable context, and execution reflections from `task_reflections.jsonl` are injected into dynamic context.
+- As of v4.29.4, `memory/knowledge/improvement-backlog.md` is maintained as a small durable advisory backlog. `agent_task_pipeline.py` nominates concrete follow-up items from execution reflections and structured review evidence after task completion, `context.py` injects only a compact digest into the dynamic block, and `consciousness.py` sees the same digest for grooming/nomination without auto-starting implementation.
 - As of v3.22.0, all docs are always in static context: BIBLE.md (180k), ARCHITECTURE.md (60k), DEVELOPMENT.md (30k), README.md (10k), CHECKLISTS.md (5k).
 - `Health Invariants` are placed at the start of the dynamic context block, before drive state/runtime/recent sections, so warnings influence planning before the model reads the noisier tail sections.
 - Main task context now injects a dedicated `Review Continuity` section between runtime and recent-history sections:
@@ -1075,7 +1079,7 @@ errors surface via the same observability path.
 - Replaces the legacy `type="review"` task path with a dedicated deep review system.
 - **Separate task type** (`deep_self_review`): bypasses the tool loop entirely — one direct LLM call.
 - **Model**: `openai/gpt-5.4-pro` via OpenRouter (primary), or `openai::gpt-5.4-pro` via direct OpenAI (fallback). If neither key is configured, the review tool returns an availability error.
-- **Review pack**: all git-tracked files (read from the git index via `dulwich` — pure Python, no subprocess) + a whitelist of core memory files (`identity.md`, `scratchpad.md`, `registry.md`, `WORLD.md`, `knowledge/index-full.md`, `knowledge/patterns.md`). Does NOT include dialogue history, task reflections, or other operational logs — these would consume too much context without adding architectural insight.
+- **Review pack**: all git-tracked files (read from the git index via `dulwich` — pure Python, no subprocess) + a whitelist of core memory files (`identity.md`, `scratchpad.md`, `registry.md`, `WORLD.md`, `knowledge/index-full.md`, `knowledge/patterns.md`, `knowledge/improvement-backlog.md`). Does NOT include dialogue history, task reflections, or other operational logs — these would consume too much context without adding architectural insight.
 - **macOS fork-safety**: when the Ouroboros app bundle uses `fork()` to spawn the inner `server.py` process, worker children inherit a multithreaded parent state. The first httpx HTTP request in a forked child triggers `SCDynamicStoreCopyProxiesWithOptions()` / `CFPreferences`, which is not fork-safe and causes a SIGSEGV (exit code -11, confirmed via `"crashed on child side of fork pre-exec"` in macOS crash reports). Fix: all worker-side LLM async calls (in `plan_review.py`, `review.py`, `scope_review.py`) pass `no_proxy=True` to `llm_client.chat_async()`. In `LLMClient.chat_async()`, when `no_proxy=True`, a one-shot `httpx.AsyncClient(trust_env=False, mounts={})` wrapped in an `AsyncOpenAI` client is created (closed in `finally`) for non-Anthropic providers; for Anthropic, `no_proxy=True` flows through to `_chat_anthropic()` which uses `requests.Session(trust_env=False)` instead of bare `requests.post()`. `_normalize_remote_response` is called with `skip_cost_fetch=True` when `no_proxy=True` to also suppress the `_fetch_generation_cost()` `requests.get()` call (which would re-introduce `SCDynamicStore` access on the OpenRouter path). The `deep_self_review` path uses `llm.chat(..., no_proxy=True)` via the synchronous `_chat_remote()` path. Regular task LLM calls use the shared cached client as before.
 - **Excluded from pack**: sensitive files (`.env`, `.pem`, `.key`, etc.); vendored/minified third-party assets (`.min.js`, `.min.css`, bundled libraries such as `chart.umd.min.js`); binary and media files by extension (`_BINARY_EXTENSIONS`: `.png`, `.jpg`, `.ico`, `.svg`, `.gif`, `.webp`, fonts, compiled blobs) plus a content-based sniffer (`_is_probably_binary()`: NUL-byte presence OR >30% ASCII control-char ratio OR UTF-8 incremental decode failure — safe for Cyrillic/CJK, catches unlisted extensions like `.wasm`, `.bin`, extensionless blobs); excluded directory prefixes (`_SKIP_DIR_PREFIXES`: `assets/` — README screenshots and app icons; `webview/` — legacy PyWebView JS helpers); and files > 1MB. All exclusions appear in the `## OMITTED FILES` section of the review pack. The rule: deep review is for agent logic and its own prompts/docs — not for libraries, images, or operational runtime logs.
 - **No chunking, no silent truncation**. All excluded files are listed in an `## OMITTED FILES` section appended to the review pack — visible to the model and the operator. If the total pack exceeds ~900K tokens, an explicit error is returned.

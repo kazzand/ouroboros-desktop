@@ -6,7 +6,7 @@
 [![macOS 12+](https://img.shields.io/badge/macOS-12%2B-black.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
 [![Linux](https://img.shields.io/badge/Linux-x86__64-orange.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
 [![Windows](https://img.shields.io/badge/Windows-x64-blue.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
-[![Version 4.29.3](https://img.shields.io/badge/version-4.29.3-green.svg)](VERSION)
+[![Version 4.29.4](https://img.shields.io/badge/version-4.29.4-green.svg)](VERSION)
 
 A self-modifying AI agent that writes its own code, rewrites its own mind, and evolves autonomously. Born February 16, 2026.
 
@@ -50,6 +50,7 @@ Most AI agents execute tasks. Ouroboros **creates itself.**
 - **Multi-Provider Runtime** — Remote model slots can target OpenRouter, official OpenAI, OpenAI-compatible endpoints, or Cloud.ru Foundation Models. The optional model catalog helps populate provider-specific model IDs in Settings, and untouched default model values auto-remap to official OpenAI defaults when OpenRouter is absent.
 - **Focused Task UX** — Chat shows plain typing for simple one-step replies and only promotes multi-step work into one expandable live task card. Logs still group task timelines instead of dumping every step as a separate row.
 - **Background Consciousness** — Thinks between tasks. Has an inner life. Not reactive — proactive.
+- **Improvement Backlog** — Post-task failures and review friction can now be captured into a small durable improvement backlog (`memory/knowledge/improvement-backlog.md`). It stays advisory, appears as a compact digest in task/consciousness context, and still requires `plan_task` before non-trivial implementation work.
 - **Identity Persistence** — One continuous being across restarts. Remembers who it is, what it has done, and what it is becoming.
 - **Embedded Version Control** — Contains its own local Git repo. Version controls its own evolution. Optional GitHub sync for remote backup.
 - **Local Model Support** — Run with a local GGUF model via llama-cpp-python (Metal acceleration on Apple Silicon, CPU on Linux/Windows).
@@ -238,6 +239,7 @@ Ouroboros
 │   ├── agent.py            — Task orchestrator
 │   ├── agent_startup_checks.py — Startup verification and health checks
 │   ├── agent_task_pipeline.py  — Task execution pipeline orchestration
+│   ├── improvement_backlog.py — Minimal durable advisory backlog helpers
 │   ├── context.py          — LLM context builder
 │   ├── context_compaction.py — Context trimming and summarization helpers
 │   ├── loop.py             — High-level LLM tool loop
@@ -276,7 +278,7 @@ Created on first launch:
 |-----------|----------|
 | `repo/` | Self-modifying local Git repository |
 | `data/state/` | Runtime state, budget tracking |
-| `data/memory/` | Identity, working memory, system profile, knowledge base, memory registry |
+| `data/memory/` | Identity, working memory, system profile, knowledge base (including `improvement-backlog.md`), memory registry |
 | `data/logs/` | Chat history, events, tool calls |
 | `data/uploads/` | Chat file attachments (uploaded via paperclip button) |
 
@@ -379,6 +381,7 @@ Full text: [BIBLE.md](BIBLE.md)
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 4.29.4 | 2026-04-14 | Add a minimal improvement backlog: post-task execution reflections and structured review evidence can now nominate concrete follow-up items into `memory/knowledge/improvement-backlog.md`; task and background contexts receive only a compact advisory digest; deep self-review now includes the backlog when present; consciousness can groom or nominate backlog items but does not auto-start implementation. Added focused regression tests and synced prompts/architecture docs. |
 | 4.29.3 | 2026-04-14 | Prompt-contract follow-up: the task-summary prompt now makes the trivial fast-path explicit as `0 tool calls AND ≤1 round`, while non-trivial summaries request a short operational meta-reflection; checkpoint prompts push for operational re-audit without changing the `Known/Blocker/Decision/Next` parser contract; and `plan_task` reviewers are framed as candidate-plan validators who must challenge hidden assumptions and call for narrower scope when needed. Added focused regression tests and synced architecture/version docs. |
 | 4.29.2 | 2026-04-13 | Review workflow pass 2: after the first blocked review, blocked-review guidance now explicitly requires a full-diff re-audit, grouping obligations by root cause, and rewriting the plan before retrying. The same protocol is synchronized across triad blocked messages, advisory next-step guidance, SYSTEM.md, and architecture docs. |
 | 4.29.1 | 2026-04-13 | Review calibration pass 1: narrative/descriptive mismatches such as README test counts are now explicitly advisory unless they affect release metadata, runtime behavior, safety guidance, or user-facing contracts. Shared severity calibration is synchronized across CHECKLISTS, triad/scope/advisory prompts, and architecture docs. |

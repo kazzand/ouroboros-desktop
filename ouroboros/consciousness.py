@@ -509,6 +509,15 @@ class BackgroundConsciousness:
                     )
                 parts.append("## Pattern Register\n\n" + patterns_text)
 
+        try:
+            from ouroboros.improvement_backlog import format_backlog_digest
+
+            backlog_digest = format_backlog_digest(self._drive_root, limit=8, max_chars=4000)
+            if backlog_digest:
+                parts.append(backlog_digest)
+        except Exception:
+            log.debug("Failed to include improvement backlog in consciousness context", exc_info=True)
+
         # Health invariants
         health_section = build_health_invariants(env)
         if health_section:

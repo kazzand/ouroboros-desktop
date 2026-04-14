@@ -280,6 +280,67 @@ def test_collect_review_evidence_keeps_recent_attempts_task_scoped(tmp_path):
     assert evidence["recent_attempts"] == []
 
 
+def test_update_improvement_backlog_appends_candidates(tmp_path):
+    env = SimpleNamespace(drive_root=tmp_path)
+
+    added = pipeline._update_improvement_backlog(
+        env,
+        {
+            "backlog_candidates": [{
+                "summary": "Reduce recurring task friction around REVIEW_BLOCKED",
+                "category": "process",
+                "source": "execution_reflection",
+                "task_id": "task-backlog",
+                "evidence": "REVIEW_BLOCKED",
+                "context": "The task retried blocked review loops without narrowing scope.",
+                "proposed_next_step": "Run plan_task before touching review prompts again.",
+            }],
+        },
+    )
+
+    assert added == 1
+    backlog_path = tmp_path / "memory" / "knowledge" / "improvement-backlog.md"
+    assert backlog_path.exists()
+    text = backlog_path.read_text(encoding="utf-8")
+    assert "Reduce recurring task friction around REVIEW_BLOCKED" in text
+
+
+def test_run_reflection_returns_entry_when_generated(tmp_path):
+    captured = {}
+
+    class FakeLlm:
+        def chat(self, *, messages, model, reasoning_effort, max_tokens):
+            captured["prompt"] = messages[0]["content"]
+            return {
+                "content": (
+                    "Reflection text.\n"
+                    "BACKLOG_CANDIDATES_JSON: "
+                    "[{\"summary\":\"Reduce recurring task friction around REVIEW_BLOCKED\"," 
+                    "\"category\":\"process\"," 
+                    "\"source\":\"execution_reflection\"," 
+                    "\"evidence\":\"REVIEW_BLOCKED\"}]"
+                )
+            }, {"cost": 0}
+
+    env = SimpleNamespace(drive_root=tmp_path)
+    (tmp_path / "logs").mkdir(parents=True)
+
+    entry = pipeline._run_reflection(
+        env,
+        FakeLlm(),
+        {"id": "task-reflect", "type": "task", "text": "Fix it"},
+        {"rounds": 2, "cost": 0.01},
+        {"tool_calls": [{"tool": "repo_commit", "is_error": False, "result": "⚠️ REVIEW_BLOCKED"}]},
+        {"recent_attempts": [], "open_obligations": [{"item": "tests_affected", "reason": "Fix the failing test before commit"}]},
+    )
+
+    assert entry is not None
+    assert entry["task_id"] == "task-reflect"
+    assert entry["reflection"] == "Reflection text."
+    assert len(entry["backlog_candidates"]) == 1
+    assert entry["backlog_candidates"][0]["summary"] == "Reduce recurring task friction around REVIEW_BLOCKED"
+
+
 def test_collect_review_evidence_scopes_open_obligations_to_repo(tmp_path):
     from ouroboros.review_evidence import collect_review_evidence
     from ouroboros.review_state import (
