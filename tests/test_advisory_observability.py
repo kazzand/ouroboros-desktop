@@ -271,6 +271,41 @@ def test_next_step_guidance_for_skipped_advisory():
     assert "repo_commit" in msg, "message should still indicate commit can proceed"
 
 
+def test_next_step_guidance_requires_reaudit_when_obligations_remain():
+    """Open obligations after a blocked review should trigger explicit re-audit guidance."""
+    adv_mod = _get_advisory_module()
+    from ouroboros.review_state import AdvisoryRunRecord, AdvisoryReviewState, ObligationItem
+
+    fresh_run = AdvisoryRunRecord(
+        snapshot_hash="abc123",
+        commit_message="test",
+        status="fresh",
+        ts="2026-01-01T00:00:00",
+    )
+    state = AdvisoryReviewState(advisory_runs=[fresh_run])
+    open_obs = [ObligationItem(
+        obligation_id="ob-1",
+        item="code_quality",
+        severity="critical",
+        reason="Need broader fix",
+        source_attempt_ts="2026-01-01T00:00:01",
+        source_attempt_msg="blocked",
+        repo_key="repo",
+    )]
+    msg = adv_mod._next_step_guidance(
+        latest=fresh_run,
+        state=state,
+        stale_from_edit=False,
+        stale_from_edit_ts=None,
+        open_obs=open_obs,
+        effective_is_fresh=True,
+    )
+    lowered = msg.lower()
+    assert "re-read the full diff" in lowered
+    assert "group obligations by root cause" in lowered
+    assert "rewrite the plan" in lowered
+
+
 def test_skipped_run_hash_mismatch_reported_as_stale(monkeypatch, tmp_path):
     """A skipped run with a different snapshot hash must be reported as stale (hash_mismatch path)."""
     adv_mod = _get_advisory_module()

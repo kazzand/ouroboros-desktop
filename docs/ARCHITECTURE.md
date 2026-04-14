@@ -1,4 +1,4 @@
-# Ouroboros v4.29.1 — Architecture & Reference
+# Ouroboros v4.29.2 — Architecture & Reference
 
 This document describes every component, page, button, API endpoint, and data flow.
 It is the single source of truth for how the system works. Keep it updated.
@@ -724,7 +724,10 @@ staging and is the authoritative gate.
 
 From attempt ≥ 2, blocked commit messages include a structured self-verification
 table requiring the agent to map each open finding to a status, evidence, and note
-before calling `repo_commit` again. Suppresses the "blind retry" pattern.
+before calling `repo_commit` again. The same blocked message also adds explicit
+re-audit guidance: after the first blocked review, re-read the full diff, group
+obligations by root cause, rewrite the plan, then continue instead of patching one
+finding at a time. Suppresses the "blind retry" pattern.
 
 ### Safety system (safety.py + registry.py)
 
@@ -915,6 +918,9 @@ errors surface via the same observability path.
   staleness-from-edit, last commit attempt state, and a concrete next-step recommendation.
   Returns structured JSON with: `latest_advisory_status`, `latest_advisory_hash`, `stale_from_edit`,
   `open_obligations_count`, `next_step`, plus `last_commit_attempt` details when blocked/failed.
+  When open obligations exist after a blocked review, the next-step guidance now explicitly
+  instructs the agent to re-read the full diff, group obligations by root cause, rewrite the plan,
+  and only then continue instead of patching one finding at a time.
 - **`review_state.py`**: durable state. State file: `data/state/advisory_review.json`.
   Stores advisory runs plus a typed reviewed-attempt ledger, bounded blocking-attempt history,
   open obligations, stale markers, repo/tool/task identities, and reviewed-diff fingerprints.
@@ -954,6 +960,9 @@ errors surface via the same observability path.
   These fields are present on any terminal attempt record (`blocked`, `succeeded`, `failed`) where the
   review actually started. The initial `status="reviewing"` record written before the LLM calls begin
   may not carry these fields if the process terminates during review startup.
+  From attempt >= 2, the blocked triad message built by `review.py::_build_critical_block_message`
+  also includes a self-verification table plus explicit re-audit guidance: re-read the full diff,
+  group obligations by root cause, rewrite the plan, then continue instead of patching one finding at a time.
 - **`task_continuation.py`**: durable `data/state/review_continuations/<task_id>.json` payloads for blocked or interrupted review work.
   Built from durable review state, isolated per task, cleared only for the
   current task on successful reviewed commits, and surfaced on startup plus in

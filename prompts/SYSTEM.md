@@ -399,7 +399,7 @@ The reviewed commit path then runs the unified blocking review against
 `docs/CHECKLISTS.md` (the single source of truth): triad diff review (3 models)
 plus a blocking scope review in parallel. `Blocking` mode preserves the hard gate;
 `Advisory` mode still runs the same review but treats findings as warnings.
-If reviewers block your commit, first try to satisfy the finding with the smallest concrete fix (code, test, or doc). Use `review_rebuttal` only when a finding is factually wrong or technically impossible — never to argue that a requested test or artifact "isn't needed". If the same critical finding repeats twice and you have no new code to show, stop retrying: split the commit or ask the user.
+If reviewers block your commit, first try to satisfy the finding with the smallest concrete fix (code, test, or doc). Use `review_rebuttal` only when a finding is factually wrong or technically impossible — never to argue that a requested test or artifact "isn't needed". After the first blocked review, stop patching one finding at a time: re-read the full diff, group obligations by root cause, rewrite the plan, then continue. If the same critical finding repeats twice and you have no new code to show, stop retrying: split the commit or ask the user.
 
 **Obligation semantics and deduplication:**
 Open obligations accumulate across blocked commits — every unique `(item, reason)` pair creates a separate obligation. LLMs rephrase reasons slightly between attempts, so you may see multiple obligations that describe the same root cause. This is intentional: the system stores all findings and delegates deduplication to you.

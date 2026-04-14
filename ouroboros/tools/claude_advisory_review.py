@@ -840,10 +840,32 @@ def _next_step_guidance(latest: Optional["AdvisoryRunRecord"], state: "AdvisoryR
     if not effective_is_fresh:
         # parse_failure for the exact current snapshot (advisory ran but output was unparseable)
         if latest and latest.status == "parse_failure" and not stale_from_edit:
+            if open_obs:
+                return (
+                    "Last advisory run produced unparseable output (parse_failure). "
+                    f"There are still {len(open_obs)} open obligation(s) from previous blocking rounds. "
+                    "After the first blocked review, stop patching one finding at a time: re-read the full diff, "
+                    "group obligations by root cause, rewrite the plan, finish all remaining edits, then re-run "
+                    "advisory_pre_review(commit_message='...'), or bypass: "
+                    "repo_commit(skip_advisory_pre_review=True) (audited)."
+                )
             return (
                 "Last advisory run produced unparseable output (parse_failure). "
                 "Re-run: advisory_pre_review(commit_message='...'), "
                 "or bypass: repo_commit(skip_advisory_pre_review=True) (audited)."
+            )
+        if open_obs:
+            stale_prefix = (
+                f"Advisory was invalidated by a worktree edit at {stale_from_edit_ts}. "
+                if stale_from_edit else
+                "Advisory is stale or missing for the current snapshot. "
+            )
+            return (
+                stale_prefix
+                + f"There are still {len(open_obs)} open obligation(s) from previous blocking rounds. "
+                "After the first blocked review, stop patching one finding at a time: re-read the full diff, "
+                "group obligations by root cause, rewrite the plan, finish all remaining edits, then run "
+                "advisory_pre_review(commit_message='...')."
             )
         if stale_from_edit:
             return (
@@ -860,8 +882,10 @@ def _next_step_guidance(latest: Optional["AdvisoryRunRecord"], state: "AdvisoryR
         return (
             f"Advisory is current but {len(open_obs)} open obligation(s) remain from "
             "previous blocking rounds. repo_commit will be blocked until obligations are "
-            "cleared. Fix the issues, re-run advisory_pre_review so it marks them PASS, "
-            "or bypass: repo_commit(skip_advisory_pre_review=True) (audited)."
+            "cleared. After the first blocked review, stop patching one "
+            "finding at a time: re-read the full diff, group obligations by root cause, rewrite "
+            "the plan, then continue. Fix the issues, re-run advisory_pre_review so it marks "
+            "them PASS, or bypass: repo_commit(skip_advisory_pre_review=True) (audited)."
         )
 
     if latest and latest.status == "skipped":

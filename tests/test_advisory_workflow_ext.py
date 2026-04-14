@@ -366,6 +366,84 @@ def test_next_step_guidance_stale_parse_failure_reports_stale_not_parse_failure(
     )
 
 
+def test_next_step_guidance_stale_with_open_obligations_requires_reaudit(tmp_path):
+    """Even when advisory is stale, open obligations should still trigger re-audit guidance."""
+    from ouroboros.tools.claude_advisory_review import _next_step_guidance
+    from ouroboros.review_state import AdvisoryReviewState, AdvisoryRunRecord, ObligationItem, _utc_now
+
+    state = AdvisoryReviewState()
+    old_run = AdvisoryRunRecord(
+        snapshot_hash="olddeadbeef",
+        commit_message="old commit",
+        status="fresh",
+        ts=_utc_now(),
+    )
+    state.runs.append(old_run)
+    open_obs = [ObligationItem(
+        obligation_id="ob-1",
+        item="code_quality",
+        severity="critical",
+        reason="Need broader fix",
+        source_attempt_ts=_utc_now(),
+        source_attempt_msg="blocked",
+        repo_key="repo",
+    )]
+
+    guidance = _next_step_guidance(
+        latest=old_run,
+        state=state,
+        stale_from_edit=True,
+        stale_from_edit_ts="2026-04-05T10:00",
+        open_obs=open_obs,
+        effective_is_fresh=False,
+    )
+
+    lowered = guidance.lower()
+    assert "invalidated" in lowered or "stale" in lowered
+    assert "re-read the full diff" in lowered
+    assert "group obligations by root cause" in lowered
+    assert "rewrite the plan" in lowered
+
+
+def test_next_step_guidance_parse_failure_with_open_obligations_preserves_parse_failure():
+    """Current-snapshot parse_failure plus open obligations must preserve the parse_failure diagnosis."""
+    from ouroboros.tools.claude_advisory_review import _next_step_guidance
+    from ouroboros.review_state import AdvisoryReviewState, AdvisoryRunRecord, ObligationItem, _utc_now
+
+    state = AdvisoryReviewState()
+    parse_run = AdvisoryRunRecord(
+        snapshot_hash="currenthash",
+        commit_message="current commit",
+        status="parse_failure",
+        ts=_utc_now(),
+    )
+    state.runs.append(parse_run)
+    open_obs = [ObligationItem(
+        obligation_id="ob-2",
+        item="code_quality",
+        severity="critical",
+        reason="Need broader fix",
+        source_attempt_ts=_utc_now(),
+        source_attempt_msg="blocked",
+        repo_key="repo",
+    )]
+
+    guidance = _next_step_guidance(
+        latest=parse_run,
+        state=state,
+        stale_from_edit=False,
+        stale_from_edit_ts=None,
+        open_obs=open_obs,
+        effective_is_fresh=False,
+    )
+
+    lowered = guidance.lower()
+    assert "parse_failure" in lowered
+    assert "re-read the full diff" in lowered
+    assert "group obligations by root cause" in lowered
+    assert "rewrite the plan" in lowered
+
+
 # ---------------------------------------------------------------------------
 # 16. obligation_resolves with unrelated critical FAIL
 # ---------------------------------------------------------------------------

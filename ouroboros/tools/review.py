@@ -865,6 +865,8 @@ def _build_critical_block_message(
             "  Status: addressed / rebutted / pending\n"
             "  Evidence: [file:line or symbol or test name]\n"
             "  Note: [one sentence]\n\n"
+            "After the first blocked review, stop patching one finding at a time.\n"
+            "Re-read the full diff, group obligations by root cause, rewrite the plan, then continue.\n\n"
             "Do NOT call repo_commit until this table is filled in your response.\n"
             f"Open findings:\n{finding_lines}"
         )

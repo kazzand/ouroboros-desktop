@@ -890,6 +890,25 @@ def test_review_blocked_5plus_hint_suggests_split():
     assert "report the blockage" in msg.lower() or "report" in msg.lower()
 
 
+def test_review_blocked_message_requires_reaudit_after_first_block():
+    """Blocked-review guidance should explicitly require a full-diff re-audit after the first block."""
+    from ouroboros.tools.review import _build_critical_block_message
+
+    class FakeCtx:
+        _review_iteration_count = 2
+        _review_history = []
+        _last_review_critical_findings = [{"item": "code_quality"}]
+        _last_review_advisory_findings = []
+
+    msg = _build_critical_block_message(
+        FakeCtx(), "test commit", ["code_quality: review mismatch"], [], ""
+    )
+    lowered = msg.lower()
+    assert "re-read the full diff" in lowered
+    assert "group obligations by root cause" in lowered
+    assert "rewrite the plan" in lowered
+
+
 def test_self_consistency_listed_as_critical_in_severity_rules():
     """self_consistency (item 13) must be treated as conditionally critical, not always advisory."""
     import pathlib
