@@ -6,7 +6,7 @@
 [![macOS 12+](https://img.shields.io/badge/macOS-12%2B-black.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
 [![Linux](https://img.shields.io/badge/Linux-x86__64-orange.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
 [![Windows](https://img.shields.io/badge/Windows-x64-blue.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
-[![Version 4.29.2](https://img.shields.io/badge/version-4.29.2-green.svg)](VERSION)
+[![Version 4.29.3](https://img.shields.io/badge/version-4.29.3-green.svg)](VERSION)
 
 A self-modifying AI agent that writes its own code, rewrites its own mind, and evolves autonomously. Born February 16, 2026.
 
@@ -379,6 +379,7 @@ Full text: [BIBLE.md](BIBLE.md)
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 4.29.3 | 2026-04-14 | Prompt-contract follow-up: the task-summary prompt now makes the trivial fast-path explicit as `0 tool calls AND ≤1 round`, while non-trivial summaries request a short operational meta-reflection; checkpoint prompts push for operational re-audit without changing the `Known/Blocker/Decision/Next` parser contract; and `plan_task` reviewers are framed as candidate-plan validators who must challenge hidden assumptions and call for narrower scope when needed. Added focused regression tests and synced architecture/version docs. |
 | 4.29.2 | 2026-04-13 | Review workflow pass 2: after the first blocked review, blocked-review guidance now explicitly requires a full-diff re-audit, grouping obligations by root cause, and rewriting the plan before retrying. The same protocol is synchronized across triad blocked messages, advisory next-step guidance, SYSTEM.md, and architecture docs. |
 | 4.29.1 | 2026-04-13 | Review calibration pass 1: narrative/descriptive mismatches such as README test counts are now explicitly advisory unless they affect release metadata, runtime behavior, safety guidance, or user-facing contracts. Shared severity calibration is synchronized across CHECKLISTS, triad/scope/advisory prompts, and architecture docs. |
 | 4.29.0 | 2026-04-13 | Prompt cache optimization: keep the 3-block system prompt shape but move volatile working memory (`Scratchpad`, dialogue history/summary, registry digest) into the dynamic block, keep stable memory artifacts (`Identity`, knowledge base, patterns, deep review) in the semi-stable block, sort tool schemas deterministically in `LLMClient._sanitize_chat_completion_tools()`, preserve Anthropic `cache_control` on direct `anthropic::` system blocks, and emit per-round `cache_hit_rate` in `llm_round` events. Added focused regression coverage across cache layout, local routing, context continuity, memory blocks, and Anthropic provider routing. |

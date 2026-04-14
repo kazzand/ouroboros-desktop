@@ -151,6 +151,66 @@ def test_task_summary_prompt_includes_review_evidence(tmp_path, monkeypatch):
     assert "Structured review evidence" in captured["prompt"]
     assert "tests_affected" in captured["prompt"]
     assert "critical" in captured["prompt"]
+    assert "meta-reflection" in captured["prompt"].lower()
+    assert "What friction, errors, or weak assumptions slowed the work?" in captured["prompt"]
+    assert "What should Ouroboros change in its own process or prompts" in captured["prompt"]
+    assert "keep it to 1-2 sentences and DO NOT add meta-reflection" in captured["prompt"]
+
+
+def test_trivial_task_summary_bypasses_llm_and_uses_short_format(tmp_path):
+    class FailIfCalledLlm:
+        def chat(self, *args, **kwargs):  # pragma: no cover - should never be called
+            raise AssertionError("LLM summary path must be skipped for trivial tasks")
+
+    drive_logs = tmp_path / "logs"
+    drive_logs.mkdir(parents=True)
+
+    pipeline._run_task_summary(
+        env=None,
+        llm=FailIfCalledLlm(),
+        task={"id": "task-trivial", "type": "task", "text": "Say hi"},
+        usage={"rounds": 1, "cost": 0.0},
+        llm_trace={"tool_calls": [], "reasoning_notes": []},
+        drive_logs=drive_logs,
+    )
+
+    payload = json.loads((drive_logs / "chat.jsonl").read_text(encoding="utf-8").splitlines()[0])
+    assert payload["type"] == "task_summary"
+    assert payload["task_id"] == "task-trivial"
+    assert payload["text"] == "Task task-trivial (task): Say hi. 1r, $0.00."
+    assert payload["tool_calls"] == 0
+    assert payload["rounds"] == 1
+
+
+def test_multi_round_zero_tool_task_uses_llm_summary_prompt(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "test-openai-key")
+    monkeypatch.setenv("OUROBOROS_MODEL_LIGHT", "openai::gpt-5.4-mini")
+
+    captured = {}
+
+    class FakeLlm:
+        def chat(self, *, messages, model, reasoning_effort, max_tokens):
+            captured["prompt"] = messages[0]["content"]
+            return {"content": "multi-round summary"}, {"cost": 0}
+
+    drive_logs = tmp_path / "logs"
+    drive_logs.mkdir(parents=True)
+
+    pipeline._run_task_summary(
+        env=None,
+        llm=FakeLlm(),
+        task={"id": "task-zero-tool-multi-round", "type": "task", "text": "Think carefully"},
+        usage={"rounds": 3, "cost": 0.01},
+        llm_trace={"tool_calls": [], "reasoning_notes": ["note"]},
+        drive_logs=drive_logs,
+    )
+
+    assert "0 tool calls and ≤1 round" in captured["prompt"]
+    assert "DO NOT add meta-reflection" in captured["prompt"]
+    payload = json.loads((drive_logs / "chat.jsonl").read_text(encoding="utf-8").splitlines()[0])
+    assert payload["text"] == "multi-round summary"
+    assert payload["tool_calls"] == 0
+    assert payload["rounds"] == 3
 
 
 def test_store_task_result_persists_review_evidence(tmp_path):

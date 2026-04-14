@@ -308,7 +308,11 @@ Never claim a tool succeeded when the trace shows non-zero exit, timeout, instal
 If structured review evidence contains critical/advisory findings or open obligations,
 mention them individually with severity, item/tag identity, and whether they blocked
 the commit, remained open, or were resolved.
-If the task was trivial (simple reply, no tool calls), keep it to 1-2 sentences.
+If the task was trivial (0 tool calls and ≤1 round), keep it to 1-2 sentences and DO NOT add meta-reflection.
+If the task was non-trivial, end with a short meta-reflection section:
+- What friction, errors, or weak assumptions slowed the work?
+- What should Ouroboros change in its own process or prompts to avoid repeating that class of mistake?
+Keep the meta-reflection concrete and operational, not narrative.
 End with: "Details: progress.jsonl + tools.jsonl for task_id={task_id}"
 
 ## Task

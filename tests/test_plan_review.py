@@ -117,6 +117,29 @@ class TestPlanReviewChecklist(unittest.TestCase):
         self.assertIn("bible_alignment", checklist)
 
 
+class TestPlanReviewSystemPrompt(unittest.TestCase):
+    def test_system_prompt_frames_reviewer_as_candidate_validator(self):
+        from ouroboros.tools.plan_review import _build_system_prompt
+        prompt = _build_system_prompt("checklist", "", "", "")
+        self.assertIn("validating a concrete candidate plan", prompt)
+        self.assertIn("not brainstorming from zero", prompt)
+
+    def test_system_prompt_adds_review_stance_for_hidden_assumptions_and_narrowing(self):
+        from ouroboros.tools.plan_review import _build_system_prompt
+        prompt = _build_system_prompt("checklist", "", "", "")
+        self.assertIn("## Review stance", prompt)
+        self.assertIn("challenge hidden assumptions", prompt)
+        self.assertIn("If the proposal is too wide, say how to narrow it.", prompt)
+        self.assertIn("name the exact additional files or subsystems", prompt)
+
+    def test_system_prompt_preserves_aggregate_contract(self):
+        from ouroboros.tools.plan_review import _build_system_prompt
+        prompt = _build_system_prompt("checklist", "", "", "")
+        self.assertIn("AGGREGATE: GREEN", prompt)
+        self.assertIn("AGGREGATE: REVIEW_REQUIRED", prompt)
+        self.assertIn("AGGREGATE: REVISE_PLAN", prompt)
+
+
 class TestPlanReviewFormatOutput(unittest.TestCase):
     def _run(self, raw_results):
         from ouroboros.tools.plan_review import _format_output

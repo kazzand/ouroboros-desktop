@@ -325,6 +325,29 @@ class TestCheckpointPromptStructure:
         content = self._get_checkpoint_content()
         assert "CHECKPOINT_REFLECTION:" in content
 
+    def test_prompt_frames_reflection_as_operational_not_narrative(self):
+        content = self._get_checkpoint_content()
+        assert "not a narrative diary" in content.lower()
+        assert "operational" in content.lower()
+
+    def test_prompt_explicitly_rechecks_plan_validity_and_scope(self):
+        content = self._get_checkpoint_content()
+        lowered = content.lower()
+        assert "whether the current approach is still valid" in lowered
+        assert "whether the plan should change" in lowered
+        assert "narrower scope" in lowered
+
+    def test_exact_field_sequence_remains_valid_for_parser(self):
+        reflection = (
+            "CHECKPOINT_REFLECTION:\n"
+            "- Known: loop.py checkpoint prompt updated\n"
+            "- Blocker: none\n"
+            "- Decision: keep exact sentinels and tighten wording\n"
+            "- Next: run the focused regression tests"
+        )
+        from ouroboros.loop import _is_valid_checkpoint_reflection
+        assert _is_valid_checkpoint_reflection(reflection) is True
+
 
 class TestCheckpointRoundMissingResponse:
     def test_missing_checkpoint_response_becomes_durable_anomaly(self, monkeypatch):

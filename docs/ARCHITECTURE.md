@@ -1,4 +1,4 @@
-# Ouroboros v4.29.2 — Architecture & Reference
+# Ouroboros v4.29.3 — Architecture & Reference
 
 This document describes every component, page, button, API endpoint, and data flow.
 It is the single source of truth for how the system works. Keep it updated.
@@ -500,7 +500,7 @@ immediately on a crash signal (SIGSEGV) with a diagnostic message suggesting
    a. Build context (`context.py`): system prompt + bible + architecture + development guide + README + checklists, plus a **3-block system-memory layout**: (1) static governance/docs block (`cache_control: ttl=1h`), (2) semi-stable memory block for low-churn artifacts such as identity, knowledge base, patterns, and deep review (`cache_control: ephemeral`), and (3) dynamic working-memory/runtime block for scratchpad, dialogue history/summary, registry digest, drive/runtime state, review continuity, and recent sections
    b. `run_llm_loop()`: LLM call → tool execution → repeat until final text response
    c. Emit final `send_message`, `task_metrics`, and `task_done`; any restart request is latched until after those final events are queued
-   d. Store task result synchronously; task summary and reflection run off the user-reply critical path
+   d. Store task result synchronously; task summary and reflection run off the user-reply critical path. For non-trivial tasks, the task-summary prompt now explicitly requests a short operational meta-reflection about friction, weak assumptions, and what Ouroboros should change in its own process/prompts; if the summary LLM path fails, `_run_task_summary` still falls back to a one-line summary. The trivial fast-path remains exactly `0 tool calls AND ≤1 round`, and only that path bypasses the LLM summary path entirely and keeps the old 1–2 sentence summary with no meta-reflection.
 4. Events flow back to supervisor via event queue
 
 ### Tool capability sets (tool_capabilities.py)
@@ -559,8 +559,10 @@ backward compatibility but is not the runtime authority.
   so the model cannot silently switch into tool use instead of reflection. The checkpoint prompt asks
   the LLM to write a `CHECKPOINT_REFLECTION:` block with four structured fields: **Known** (verified
   facts), **Blocker** (concrete obstacle or 'none'), **Decision** (approach and rationale), **Next**
-  (most important next action). The prompt explicitly asks for specific file/function names and
-  prohibits vague language like "continue working".
+  (most important next action). The wording explicitly frames the reflection as operational rather than
+  narrative, asks the model to reconsider whether the current approach/plan is still valid, and calls
+  out narrower scope or a different line of attack as valid checkpoint outcomes while preserving the
+  exact `Known/Blocker/Decision/Next` parser contract.
   **Audit-only invariant**: a checkpoint round can never finalize the task. `ouroboros/loop.py::_handle_checkpoint_response`
   classifies the output as either a valid reflection or a checkpoint anomaly, persists the artifact,
   appends a synthetic continuation user message, and continues into the next normal round.
@@ -837,7 +839,10 @@ the constitutional guard is that the file itself must remain non-deletable.
 - **Checklist items**: completeness, correctness, minimalism, bible_alignment,
   implicit_contracts, testability, architecture_fit, forgotten_docs (8 items total).
 - **Output format per reviewer**: verdict (PASS/RISK/FAIL) + detailed explanation + concrete fix
-  (exact file/function/symbol) + alternative approaches if applicable.
+  (exact file/function/symbol) + alternative approaches if applicable. The system prompt also frames
+  reviewers as validators of a concrete candidate plan rather than zero-based brainstormers: they are
+  expected to challenge hidden assumptions, name missed boundaries/contracts, and explicitly say when
+  the proposal should be narrowed.
 - **Aggregate signal**: `GREEN` (proceed), `REVIEW_REQUIRED` (risks present), or `REVISE_PLAN` (FAILs found).
 - **Non-blocking**: results are advisory only — the implementer decides what to do.
 - **Budget gate**: if the assembled prompt exceeds `_PLAN_BUDGET_TOKEN_LIMIT` (1M tokens),
