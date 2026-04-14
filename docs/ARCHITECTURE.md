@@ -1,4 +1,4 @@
-# Ouroboros v4.30.0 — Architecture & Reference
+# Ouroboros v4.30.1 — Architecture & Reference
 
 This document describes every component, page, button, API endpoint, and data flow.
 It is the single source of truth for how the system works. Keep it updated.
@@ -293,7 +293,7 @@ The Dashboard tab has been removed. Its functionality is now distributed:
   - OpenAI-compatible model values use `openai-compatible::...`.
   - Cloud.ru model values use `cloudru::...`.
   - Anthropic model values use `anthropic::...` (e.g. `anthropic::claude-opus-4.6`).
-- **Behavior tab**: agent-behavior policy settings — Reasoning Effort, Commit Review, Review Enforcement, and Web Search Model.
+- **Behavior tab**: agent-behavior policy settings — Reasoning Effort and Review Enforcement (the two-button advisory/blocking toggle). Review models and Web Search Model live in the Models tab alongside model routing.
 - **Reasoning Effort**: Five segmented controls for task/chat, evolution, review, scope review, and consciousness.
   Backed by `OUROBOROS_EFFORT_TASK`, `OUROBOROS_EFFORT_EVOLUTION`, `OUROBOROS_EFFORT_REVIEW`,
   `OUROBOROS_EFFORT_SCOPE_REVIEW`, `OUROBOROS_EFFORT_CONSCIOUSNESS`. Loading falls back to legacy
@@ -303,7 +303,7 @@ The Dashboard tab has been removed. Its functionality is now distributed:
 - **Scope Review Model**: Single model for the blocking scope reviewer.
   Backed by `OUROBOROS_SCOPE_REVIEW_MODEL` (default `anthropic/claude-opus-4.6`).
 - **OpenAI-only review fallback**: if official OpenAI is the only configured remote runtime and the review list is invalid/underspecified, review falls back to the main model repeated three times.
-- **Review Enforcement**: `Advisory` or `Blocking` for pre-commit review behavior.
+- **Review Enforcement**: `Advisory` or `Blocking` for pre-commit review behavior. Rendered as a two-button segmented toggle (advisory = amber, blocking = crimson) rather than a dropdown.
   Backed by `OUROBOROS_REVIEW_ENFORCEMENT`. Review always runs in both modes.
 - **Advanced tab**: local model runtime, max workers, total budget, per-task soft threshold, tool timeout, soft/hard timeout, and reset controls.
 - **Local Model Runtime**: source, GGUF filename, port, GPU layers, context length, chat format, start/stop/test buttons, live local-model status, real download progress bar (updates via `download_progress` from `/api/local-model/status`), and an **Install Local Runtime** button (hidden until runtime is missing). The Start button performs a preflight check via `/api/local-model/start` before downloading; on a `runtime_missing` (HTTP 412) response it surfaces the install button and a human-readable hint instead of a raw traceback. After install completes (`runtime_status == "install_ok"`), the start flow resumes automatically if a source was configured. `LOCAL_MODEL_FILENAME` now accepts subfolder paths (`quant/model.gguf`) and split GGUF patterns (`quant/model-00001-of-00003.gguf`); all shards are downloaded automatically and the server is started with the first shard. If the user omits the subfolder prefix (types just the bare filename), `_resolve_hf_path` auto-resolves the full path by querying `list_repo_files` on the HF repo (fail-open on network errors).

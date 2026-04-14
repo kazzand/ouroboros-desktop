@@ -41,7 +41,7 @@ class TestSettingsUiGuards(unittest.TestCase):
     def test_strange_settings_have_inline_explainer_copy(self):
         source = self._read_settings_sources()["settings_ui"]
         self.assertIn("Adds a password wall only for non-localhost app and API access.", source)
-        self.assertIn("keeps review visible but flexible", source)
+        self.assertIn("keeps review visible but non-blocking", source)
         self.assertIn("Backward-compatibility escape hatch for older installs.", source)
 
     def test_settings_expose_websearch_and_task_cap(self):
@@ -59,18 +59,26 @@ class TestSettingsUiGuards(unittest.TestCase):
         self.assertNotIn('data-settings-tab="runtime"', source)
         self.assertIn('data-settings-tab="advanced"', source)
 
-    def test_behavior_tab_exists_and_contains_review_and_effort(self):
+    def test_behavior_tab_exists_and_contains_effort_and_enforcement(self):
         source = self._read_settings_sources()["settings_ui"]
         self.assertIn('data-settings-tab="behavior"', source)
         self.assertIn('data-settings-panel="behavior"', source)
-        # Reasoning Effort and Commit Review live in Behavior, not Models.
-        # effortField() uses template literals so check for the call arg pattern,
-        # not the rendered id="" attribute.
+        # Reasoning Effort and Review Enforcement live in Behavior.
         behavior_section = source.split('data-settings-panel="behavior"')[1].split('data-settings-panel=')[0]
         self.assertIn("id: 's-effort-task'", behavior_section)
-        self.assertIn('id="s-review-models"', behavior_section)
         self.assertIn('id="s-review-enforcement"', behavior_section)
-        self.assertIn('id="s-websearch-model"', behavior_section)
+        # enforcement uses a hidden input + segmented buttons, not a <select>
+        self.assertNotIn('<select id="s-review-enforcement"', behavior_section)
+        self.assertIn('data-enforcement-group', behavior_section)
+        self.assertIn('data-effort-value="advisory"', behavior_section)
+        self.assertIn('data-effort-value="blocking"', behavior_section)
+
+    def test_review_models_are_in_models_tab(self):
+        source = self._read_settings_sources()["settings_ui"]
+        models_section = source.split('data-settings-panel="models"')[1].split('data-settings-panel=')[0]
+        self.assertIn('id="s-review-models"', models_section)
+        self.assertIn('id="s-scope-review-model"', models_section)
+        self.assertIn('id="s-websearch-model"', models_section)
 
     def test_legacy_base_url_is_in_providers_not_advanced(self):
         source = self._read_settings_sources()["settings_ui"]

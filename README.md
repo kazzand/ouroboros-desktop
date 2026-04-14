@@ -6,7 +6,7 @@
 [![macOS 12+](https://img.shields.io/badge/macOS-12%2B-black.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
 [![Linux](https://img.shields.io/badge/Linux-x86__64-orange.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
 [![Windows](https://img.shields.io/badge/Windows-x64-blue.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
-[![Version 4.30.0](https://img.shields.io/badge/version-4.30.0-green.svg)](VERSION)
+[![Version 4.30.1](https://img.shields.io/badge/version-4.30.1-green.svg)](VERSION)
 
 A self-modifying AI agent that writes its own code, rewrites its own mind, and evolves autonomously. Born February 16, 2026.
 
@@ -381,6 +381,7 @@ Full text: [BIBLE.md](BIBLE.md)
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 4.30.1 | 2026-04-14 | Settings UI refinement: move Review Models, Scope Review Model, and Web Search Model from Behavior back to Models tab (alongside model routing); replace Review Enforcement dropdown with a two-button segmented toggle (advisory = amber, blocking = crimson). |
 | 4.30.0 | 2026-04-14 | Settings UI reorganization: add dedicated **Behavior** tab (Reasoning Effort, Commit Review, Review Enforcement, Web Search Model moved out of Models/Advanced); move Legacy OpenAI Base URL from Advanced to Providers; docs and tests updated. |
 | 4.29.4 | 2026-04-14 | Add a minimal improvement backlog: post-task execution reflections and structured review evidence can now nominate concrete follow-up items into `memory/knowledge/improvement-backlog.md`; task and background contexts receive only a compact advisory digest; deep self-review now includes the backlog when present; consciousness can groom or nominate backlog items but does not auto-start implementation. Added focused regression tests and synced prompts/architecture docs. |
 | 4.29.3 | 2026-04-14 | Prompt-contract follow-up: the task-summary prompt now makes the trivial fast-path explicit as `0 tool calls AND ≤1 round`, while non-trivial summaries request a short operational meta-reflection; checkpoint prompts push for operational re-audit without changing the `Known/Blocker/Decision/Next` parser contract; and `plan_task` reviewers are framed as candidate-plan validators who must challenge hidden assumptions and call for narrower scope when needed. Added focused regression tests and synced architecture/version docs. |

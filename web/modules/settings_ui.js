@@ -225,23 +225,10 @@ export function renderSettingsPage() {
                             </div>
                         </div>
                     </div>
-                </section>
-
-                <section class="settings-panel" data-settings-panel="behavior">
-                    <div class="form-section">
-                        <h3>Reasoning Effort</h3>
-                        <div class="settings-section-copy">Controls how deeply the model thinks per task type. Higher effort = slower but more thorough.</div>
-                        <div class="settings-effort-grid">
-                            ${effortField({ id: 's-effort-task', label: 'Task / Chat', defaultValue: 'medium' })}
-                            ${effortField({ id: 's-effort-evolution', label: 'Evolution', defaultValue: 'high' })}
-                            ${effortField({ id: 's-effort-review', label: 'Review', defaultValue: 'medium' })}
-                            ${effortField({ id: 's-effort-consciousness', label: 'Consciousness', defaultValue: 'low' })}
-                        </div>
-                    </div>
 
                     <div class="form-section">
-                        <h3>Commit Review</h3>
-                        <div class="settings-section-copy">Multi-model pre-commit review gate. Runs automatically on every <code>repo_commit</code>.</div>
+                        <h3>Review Models</h3>
+                        <div class="settings-section-copy">Models used by the pre-commit review gate. Runs automatically on every <code>repo_commit</code>.</div>
                         <div class="form-row">
                             <div class="form-field">
                                 <label>Pre-commit Review Models</label>
@@ -256,22 +243,36 @@ export function renderSettingsPage() {
                                 <div class="settings-inline-note">Single model for the blocking scope reviewer. Runs in parallel with the triad diff review.</div>
                             </div>
                             <div class="form-field">
-                                ${effortField({ id: 's-effort-scope-review', label: 'Scope Review Effort', defaultValue: 'high' })}
-                            </div>
-                        </div>
-                        <div class="form-grid two">
-                            <div class="form-field">
-                                <label>Review Enforcement</label>
-                                <select id="s-review-enforcement">
-                                    <option value="advisory">Advisory</option>
-                                    <option value="blocking">Blocking</option>
-                                </select>
-                                <div class="settings-inline-note"><code>Advisory</code> keeps review visible but flexible. <code>Blocking</code> stops commits when critical findings remain unresolved.</div>
-                            </div>
-                            <div class="form-field">
                                 <label>Web Search Model</label>
                                 <input id="s-websearch-model" placeholder="gpt-5.2">
                                 <div class="settings-inline-note">OpenAI model for <code>web_search</code>. Requires <code>OPENAI_API_KEY</code> and an empty Legacy Base URL.</div>
+                            </div>
+                        </div>
+                    </div>
+                </section>
+
+                <section class="settings-panel" data-settings-panel="behavior">
+                    <div class="form-section">
+                        <h3>Reasoning Effort</h3>
+                        <div class="settings-section-copy">Controls how deeply the model thinks per task type. Higher effort = slower but more thorough.</div>
+                        <div class="settings-effort-grid">
+                            ${effortField({ id: 's-effort-task', label: 'Task / Chat', defaultValue: 'medium' })}
+                            ${effortField({ id: 's-effort-evolution', label: 'Evolution', defaultValue: 'high' })}
+                            ${effortField({ id: 's-effort-review', label: 'Review', defaultValue: 'medium' })}
+                            ${effortField({ id: 's-effort-scope-review', label: 'Scope Review', defaultValue: 'high' })}
+                            ${effortField({ id: 's-effort-consciousness', label: 'Consciousness', defaultValue: 'low' })}
+                        </div>
+                    </div>
+
+                    <div class="form-section">
+                        <h3>Review Enforcement</h3>
+                        <div class="settings-section-copy"><code>Advisory</code> keeps review visible but non-blocking. <code>Blocking</code> stops commits when critical findings remain unresolved.</div>
+                        <div class="settings-effort-card">
+                            <label>Enforcement Mode</label>
+                            <input id="s-review-enforcement" type="hidden" value="advisory">
+                            <div class="settings-effort-group" data-effort-group data-enforcement-group data-effort-target="s-review-enforcement">
+                                <button type="button" class="settings-effort-btn" data-effort-value="advisory">Advisory</button>
+                                <button type="button" class="settings-effort-btn" data-effort-value="blocking">Blocking</button>
                             </div>
                         </div>
                     </div>
