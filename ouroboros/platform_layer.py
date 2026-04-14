@@ -50,8 +50,7 @@ def pid_lock_acquire(path: str) -> bool:
     try:
         _lock_fd = open(path, "w")
         if IS_WINDOWS:
-            import msvcrt
-            msvcrt.locking(_lock_fd.fileno(), msvcrt.LK_NBLCK, 1)
+            _win32_lock(_lock_fd.fileno(), exclusive=True, blocking=False)
         else:
             import fcntl
             fcntl.flock(_lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -67,9 +66,8 @@ def pid_lock_release(path: str) -> None:
     global _lock_fd
     if _lock_fd is not None:
         if IS_WINDOWS:
-            import msvcrt
             try:
-                msvcrt.locking(_lock_fd.fileno(), msvcrt.LK_UNLCK, 1)
+                _win32_unlock(_lock_fd.fileno())
             except Exception:
                 pass
         else:
@@ -86,6 +84,151 @@ def pid_lock_release(path: str) -> None:
     try:
         os.unlink(path)
     except Exception:
+        pass
+
+
+# ---------------------------------------------------------------------------
+# File locking (cross-platform)
+# ---------------------------------------------------------------------------
+
+def file_lock_exclusive(fd: int) -> None:
+    """Acquire an exclusive (write) lock on a file descriptor. Blocks."""
+    if IS_WINDOWS:
+        _win32_lock(fd, exclusive=True, blocking=True)
+    else:
+        import fcntl
+        fcntl.flock(fd, fcntl.LOCK_EX)
+
+
+def file_lock_shared(fd: int) -> None:
+    """Acquire a shared (read) lock on a file descriptor. Blocks."""
+    if IS_WINDOWS:
+        _win32_lock(fd, exclusive=False, blocking=True)
+    else:
+        import fcntl
+        fcntl.flock(fd, fcntl.LOCK_SH)
+
+
+def file_lock_exclusive_nb(fd: int) -> None:
+    """Try to acquire an exclusive lock, non-blocking. Raises OSError on failure."""
+    if IS_WINDOWS:
+        _win32_lock(fd, exclusive=True, blocking=False)
+    else:
+        import fcntl
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def file_unlock(fd: int) -> None:
+    """Release a file lock."""
+    if IS_WINDOWS:
+        _win32_unlock(fd)
+    else:
+        import fcntl
+        fcntl.flock(fd, fcntl.LOCK_UN)
+
+
+# ---------------------------------------------------------------------------
+# Windows file locking via LockFileEx / UnlockFileEx (ctypes)
+#
+# msvcrt.locking() is a *byte-range* lock that fails on empty files (0 bytes).
+# LockFileEx locks a range that can extend beyond the current file size,
+# which makes it work identically to fcntl.flock() on Unix.
+# ---------------------------------------------------------------------------
+
+# Per-fd OVERLAPPED storage so unlock can find the right structure.
+_win32_overlapped: dict = {}
+
+
+_OVERLAPPED_CLS = None  # cached once per process
+
+
+def _win32_overlapped_class():
+    """Return the portable OVERLAPPED ctypes Structure (cached).
+
+    ``wintypes.ULONG_PTR`` is absent on some Python/Windows builds, so we use
+    ``ctypes.c_void_p`` which is pointer-width on all architectures (4 bytes on
+    32-bit, 8 bytes on 64-bit) — exactly what ``ULONG_PTR`` is.
+
+    The class is created once and reused so that lock/unlock share the same
+    ``ctypes.POINTER(OVERLAPPED)`` type — ctypes rejects pointer arguments whose
+    underlying Structure class object differs even if the layout is identical.
+    """
+    global _OVERLAPPED_CLS
+    if _OVERLAPPED_CLS is not None:
+        return _OVERLAPPED_CLS
+
+    import ctypes
+    from ctypes import wintypes
+
+    class OVERLAPPED(ctypes.Structure):
+        _fields_ = [
+            ("Internal", ctypes.c_void_p),
+            ("InternalHigh", ctypes.c_void_p),
+            ("Offset", wintypes.DWORD),
+            ("OffsetHigh", wintypes.DWORD),
+            ("hEvent", wintypes.HANDLE),
+        ]
+
+    _OVERLAPPED_CLS = OVERLAPPED
+    return OVERLAPPED
+
+
+def _win32_lock(fd: int, *, exclusive: bool = True, blocking: bool = True) -> None:
+    """Lock a file descriptor using Win32 LockFileEx. Works on empty files."""
+    import ctypes
+    from ctypes import wintypes
+    import msvcrt as _msvcrt
+
+    _LOCKFILE_FAIL_IMMEDIATELY = 0x00000001
+    _LOCKFILE_EXCLUSIVE_LOCK = 0x00000002
+
+    OVERLAPPED = _win32_overlapped_class()
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.LockFileEx.argtypes = [
+        wintypes.HANDLE, wintypes.DWORD, wintypes.DWORD,
+        wintypes.DWORD, wintypes.DWORD, ctypes.POINTER(OVERLAPPED),
+    ]
+    kernel32.LockFileEx.restype = wintypes.BOOL
+
+    hfile = _msvcrt.get_osfhandle(fd)
+    flags = 0
+    if exclusive:
+        flags |= _LOCKFILE_EXCLUSIVE_LOCK
+    if not blocking:
+        flags |= _LOCKFILE_FAIL_IMMEDIATELY
+
+    ov = OVERLAPPED()
+    # Lock a huge range starting at offset 0 — standard Win32 "whole file" pattern.
+    if not kernel32.LockFileEx(hfile, flags, 0, 0xFFFFFFFF, 0xFFFFFFFF, ctypes.byref(ov)):
+        err = ctypes.get_last_error()
+        raise OSError(f"LockFileEx failed (error {err})")
+
+    _win32_overlapped[fd] = (hfile, ov)
+
+
+def _win32_unlock(fd: int) -> None:
+    """Unlock a file descriptor previously locked by _win32_lock."""
+    import ctypes
+    from ctypes import wintypes
+
+    entry = _win32_overlapped.pop(fd, None)
+    if entry is None:
+        return
+
+    OVERLAPPED = _win32_overlapped_class()
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.UnlockFileEx.argtypes = [
+        wintypes.HANDLE, wintypes.DWORD,
+        wintypes.DWORD, wintypes.DWORD, ctypes.POINTER(OVERLAPPED),
+    ]
+    kernel32.UnlockFileEx.restype = wintypes.BOOL
+
+    hfile, ov = entry
+    try:
+        kernel32.UnlockFileEx(hfile, 0, 0xFFFFFFFF, 0xFFFFFFFF, ctypes.byref(ov))
+    except OSError:
         pass
 
 
@@ -491,6 +634,54 @@ def get_cpu_info() -> str:
     except Exception:
         pass
     return platform.processor()
+
+
+# ---------------------------------------------------------------------------
+# Process session isolation
+# ---------------------------------------------------------------------------
+
+def create_new_session() -> None:
+    """Create a new process session (Unix: setsid). No-op on Windows."""
+    if not IS_WINDOWS:
+        os.setsid()
+
+
+def subprocess_new_group_kwargs() -> dict:
+    """Return subprocess kwargs for process-group / session isolation.
+
+    On Windows: CREATE_NEW_PROCESS_GROUP so the subprocess tree can be
+    terminated via GenerateConsoleCtrlEvent or taskkill /T.
+    On Unix: start_new_session=True creates a new session (setsid) so
+    the entire tree can be killed via os.killpg().
+    """
+    if IS_WINDOWS:
+        return {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
+    return {"start_new_session": True}
+
+
+def subprocess_hidden_kwargs() -> dict:
+    """Return subprocess kwargs to suppress console windows on Windows.
+
+    On non-Windows this returns an empty dict (no-op).
+    """
+    if IS_WINDOWS:
+        return {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)}
+    return {}
+
+
+def merge_hidden_kwargs(kwargs: dict) -> dict:
+    """Return a copy of *kwargs* with platform hidden-window flags merged in.
+
+    Merges ``creationflags`` via bitwise OR on Windows so that any flags the
+    caller already set are preserved.  On non-Windows the dict is returned
+    unchanged (a shallow copy is always returned).
+    """
+    hidden = subprocess_hidden_kwargs()
+    if not hidden:
+        return dict(kwargs)
+    result = dict(kwargs)
+    result["creationflags"] = result.get("creationflags", 0) | hidden.get("creationflags", 0)
+    return result
 
 
 # ---------------------------------------------------------------------------

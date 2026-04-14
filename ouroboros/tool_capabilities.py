@@ -37,7 +37,7 @@ CORE_TOOL_NAMES: frozenset[str] = frozenset({
     # Git
     "git_status", "git_diff",
     "restore_to_head", "revert_commit",
-    "pull_from_remote",
+    "pull_from_remote", "rollback_to_target",
     # Task decomposition
     "schedule_task", "wait_for_task", "get_task_result",
     # Memory / identity

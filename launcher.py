@@ -24,12 +24,13 @@ import threading
 import time
 from typing import Optional
 
-from ouroboros.compat import (
+from ouroboros.platform_layer import (
     IS_WINDOWS,
     IS_MACOS,
     embedded_python_candidates,
     kill_process_on_port,
     force_kill_pid,
+    merge_hidden_kwargs,
     git_install_hint,
     create_kill_on_close_job,
     assign_pid_to_job,
@@ -72,24 +73,14 @@ log = logging.getLogger("launcher")
 APP_VERSION = read_version()
 
 
-# Windows: prevent console windows when spawning subprocesses from the GUI app.
-_SUBPROCESS_NO_WINDOW = (
-    getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000) if IS_WINDOWS else 0
-)
-
-
 def _hidden_run(command, **kwargs):
-    if _SUBPROCESS_NO_WINDOW:
-        kwargs = dict(kwargs)
-        kwargs["creationflags"] = kwargs.get("creationflags", 0) | _SUBPROCESS_NO_WINDOW
-    return subprocess.run(command, **kwargs)
+    """subprocess.run() with platform-appropriate hidden-window flags."""
+    return subprocess.run(command, **merge_hidden_kwargs(kwargs))
 
 
 def _hidden_popen(command, **kwargs):
-    if _SUBPROCESS_NO_WINDOW:
-        kwargs = dict(kwargs)
-        kwargs["creationflags"] = kwargs.get("creationflags", 0) | _SUBPROCESS_NO_WINDOW
-    return subprocess.Popen(command, **kwargs)
+    """subprocess.Popen() with platform-appropriate hidden-window flags."""
+    return subprocess.Popen(command, **merge_hidden_kwargs(kwargs))
 
 
 # ---------------------------------------------------------------------------
@@ -567,7 +558,7 @@ def _kill_stale_on_port(port: int) -> None:
             try:
                 pid = int(pid_str)
                 if pid != os.getpid():
-                    os.kill(pid, 9)
+                    force_kill_pid(pid)
                     log.info("Killed stale process %d on port %d", pid, port)
             except (ValueError, ProcessLookupError, PermissionError):
                 pass
@@ -651,13 +642,10 @@ def agent_lifecycle_loop(port: int = AGENT_SERVER_PORT) -> None:
             _kill_stale_on_port(port)
             import multiprocessing as _mp
             for child in _mp.active_children():
-                if IS_WINDOWS:
+                try:
                     force_kill_pid(child.pid)
-                else:
-                    try:
-                        os.kill(child.pid, 9)
-                    except (ProcessLookupError, PermissionError, OSError):
-                        pass
+                except (ProcessLookupError, PermissionError, OSError):
+                    pass
             if _webview_window:
                 try:
                     _webview_window.destroy()
@@ -846,16 +834,11 @@ def main():
         _kill_stale_on_port(port)
         _kill_stale_on_port(8766)
         for child in __import__('multiprocessing').active_children():
-            if IS_WINDOWS:
+            try:
                 force_kill_pid(child.pid)
                 log.info("Killed orphaned child pid=%d", child.pid)
-            else:
-                import signal
-                try:
-                    os.kill(child.pid, signal.SIGKILL)
-                    log.info("Killed orphaned child pid=%d", child.pid)
-                except (ProcessLookupError, PermissionError, OSError):
-                    pass
+            except (ProcessLookupError, PermissionError, OSError):
+                pass
 
     window.events.closing += _on_closing
     _webview_window = window

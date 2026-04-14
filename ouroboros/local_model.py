@@ -15,22 +15,22 @@ import threading
 import time
 from typing import Any, Callable, Dict, Optional
 
-from ouroboros.compat import IS_MACOS, terminate_process_tree, kill_process_tree
+from ouroboros.platform_layer import (
+    IS_MACOS, IS_WINDOWS, terminate_process_tree, kill_process_tree,
+    subprocess_new_group_kwargs, subprocess_hidden_kwargs,
+)
 
 log = logging.getLogger(__name__)
 
 _LOCAL_MODEL_DEFAULT_PORT = 8766
 
-# Windows: prevent console windows when spawning subprocesses from the GUI app.
-_SUBPROCESS_NO_WINDOW = (
-    getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000) if sys.platform == "win32" else 0
-)
-
-
 def _with_hidden_subprocess(kwargs: Dict[str, Any]) -> Dict[str, Any]:
-    if _SUBPROCESS_NO_WINDOW:
+    """Merge platform-appropriate hidden-window flags into subprocess kwargs."""
+    hidden = subprocess_hidden_kwargs()
+    if hidden:
         kwargs = dict(kwargs)
-        kwargs["creationflags"] = kwargs.get("creationflags", 0) | _SUBPROCESS_NO_WINDOW
+        existing = kwargs.get("creationflags", 0)
+        kwargs["creationflags"] = existing | hidden.get("creationflags", 0)
     return kwargs
 
 # Global singleton — one local model server at a time
@@ -225,10 +225,7 @@ class LocalModelManager:
                     stderr=subprocess.PIPE,
                     stdin=subprocess.DEVNULL,
                 )
-                if sys.platform == "win32":
-                    _popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
-                else:
-                    _popen_kwargs["start_new_session"] = True
+                _popen_kwargs.update(subprocess_new_group_kwargs())
                 self._proc = subprocess.Popen(cmd, **_with_hidden_subprocess(_popen_kwargs))
             except FileNotFoundError:
                 self._status = "error"

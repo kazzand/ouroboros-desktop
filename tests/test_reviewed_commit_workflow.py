@@ -117,7 +117,7 @@ def test_commit_attempt_absent_in_old_state(tmp_path):
     state_file.write_text(json.dumps({
         "runs": [],
         "saved_at": "2026-04-02T15:00:00",
-    }))
+    }), encoding="utf-8")
 
     from ouroboros.review_state import load_state
     loaded = load_state(drive_root)
@@ -1121,8 +1121,8 @@ def test_snapshot_hash_path_scoping(tmp_path):
     (repo / ".git").mkdir()
 
     # Create two files
-    (repo / "a.py").write_text("aaa")
-    (repo / "b.py").write_text("bbb")
+    (repo / "a.py").write_text("aaa", encoding="utf-8")
+    (repo / "b.py").write_text("bbb", encoding="utf-8")
 
     hash_a = compute_snapshot_hash(repo, paths=["a.py"])
     hash_b = compute_snapshot_hash(repo, paths=["b.py"])
@@ -1144,7 +1144,7 @@ def test_snapshot_hash_ignores_commit_message(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
     (repo / ".git").mkdir()
-    (repo / "a.py").write_text("content")
+    (repo / "a.py").write_text("content", encoding="utf-8")
 
     h1 = compute_snapshot_hash(repo, commit_message="msg1", paths=["a.py"])
     h2 = compute_snapshot_hash(repo, commit_message="msg2", paths=["a.py"])

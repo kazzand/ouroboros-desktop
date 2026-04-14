@@ -11,37 +11,16 @@ import json
 import logging
 import os
 import pathlib
-import sys
 from collections import Counter
 from typing import Any, Dict, List, Optional
 
 from ouroboros.utils import utc_now_iso, read_text, write_text, append_jsonl, short
 
-if sys.platform == "win32":
-    import msvcrt
-
-    def _lock_ex(fd: int) -> None:
-        msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
-
-    def _lock_sh(fd: int) -> None:
-        msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
-
-    def _unlock(fd: int) -> None:
-        try:
-            msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
-        except OSError:
-            pass
-else:
-    import fcntl
-
-    def _lock_ex(fd: int) -> None:
-        fcntl.flock(fd, fcntl.LOCK_EX)
-
-    def _lock_sh(fd: int) -> None:
-        fcntl.flock(fd, fcntl.LOCK_SH)
-
-    def _unlock(fd: int) -> None:
-        fcntl.flock(fd, fcntl.LOCK_UN)
+from ouroboros.platform_layer import (
+    file_lock_exclusive as _lock_ex,
+    file_lock_shared as _lock_sh,
+    file_unlock as _unlock,
+)
 
 log = logging.getLogger(__name__)
 

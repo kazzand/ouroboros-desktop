@@ -39,7 +39,7 @@ def test_should_not_consolidate_small_scratchpad(tmp_path):
     (drive / "memory").mkdir(parents=True)
     (drive / "logs").mkdir(parents=True)
     mem = Memory(drive_root=drive)
-    mem.scratchpad_path().write_text("x" * 10000)
+    mem.scratchpad_path().write_text("x" * 10000, encoding="utf-8")
     assert not mod.should_consolidate_scratchpad(mem)
 
 
@@ -49,7 +49,7 @@ def test_should_consolidate_large_scratchpad(tmp_path):
     (drive / "memory").mkdir(parents=True)
     (drive / "logs").mkdir(parents=True)
     mem = Memory(drive_root=drive)
-    mem.scratchpad_path().write_text("x" * 35000)
+    mem.scratchpad_path().write_text("x" * 35000, encoding="utf-8")
     assert mod.should_consolidate_scratchpad(mem)
 
 
@@ -75,8 +75,8 @@ def test_rebuild_knowledge_index_creates_index():
     mod = _get_consolidator()
     with tempfile.TemporaryDirectory() as tmpdir:
         kb_dir = pathlib.Path(tmpdir)
-        (kb_dir / "topic-one.md").write_text("# Topic One\n\nSome content here.\n")
-        (kb_dir / "topic-two.md").write_text("# Topic Two\n\nOther content.\n")
+        (kb_dir / "topic-one.md").write_text("# Topic One\n\nSome content here.\n", encoding="utf-8")
+        (kb_dir / "topic-two.md").write_text("# Topic Two\n\nOther content.\n", encoding="utf-8")
         mod._rebuild_knowledge_index(kb_dir)
         index_path = kb_dir / "index-full.md"
         assert index_path.exists(), "index-full.md was not created"
@@ -90,8 +90,8 @@ def test_rebuild_knowledge_index_skips_underscore_files():
     mod = _get_consolidator()
     with tempfile.TemporaryDirectory() as tmpdir:
         kb_dir = pathlib.Path(tmpdir)
-        (kb_dir / "_private.md").write_text("# Private\n\nHidden.\n")
-        (kb_dir / "visible.md").write_text("# Visible\n\nShown.\n")
+        (kb_dir / "_private.md").write_text("# Private\n\nHidden.\n", encoding="utf-8")
+        (kb_dir / "visible.md").write_text("# Visible\n\nShown.\n", encoding="utf-8")
         mod._rebuild_knowledge_index(kb_dir)
         index_text = (kb_dir / "index-full.md").read_text()
         assert "_private" not in index_text

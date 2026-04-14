@@ -15,7 +15,7 @@ import threading
 from subprocess import Popen, CompletedProcess
 from typing import Any, Dict, List
 
-from ouroboros.compat import IS_WINDOWS, kill_process_tree
+from ouroboros.platform_layer import IS_WINDOWS, kill_process_tree, subprocess_new_group_kwargs
 from ouroboros.config import load_settings
 from ouroboros.tools.commit_gate import _invalidate_advisory
 from ouroboros.tools.registry import ToolContext, ToolEntry
@@ -39,10 +39,7 @@ def _tracked_subprocess_run(cmd, **kwargs):
     entire process tree can be killed via os.killpg() on panic.
     """
     timeout = kwargs.pop("timeout", None)
-    if IS_WINDOWS:
-        kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
-    else:
-        kwargs["start_new_session"] = True
+    kwargs.update(subprocess_new_group_kwargs())
     kwargs.setdefault("stdin", subprocess.DEVNULL)
     proc = Popen(cmd, **kwargs)
     with _subprocess_lock:
