@@ -1179,7 +1179,8 @@ def test_update_state_serializes_concurrent_writers(tmp_path):
     raw = (tmp_path / "state" / "advisory_review.json").read_text(encoding="utf-8")
     parsed = json.loads(raw)
     assert len(parsed["attempts"]) == 8
-    assert not (tmp_path / "locks" / "advisory_review.lock").exists()
+    # Lock file persists (flock/LockFileEx model — file stays, lock is advisory)
+    assert (tmp_path / "locks" / "advisory_review.lock").exists()
 
 
 # ---------------------------------------------------------------------------

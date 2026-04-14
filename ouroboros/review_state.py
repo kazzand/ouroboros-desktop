@@ -579,7 +579,6 @@ class AdvisoryReviewState:
 
         return expired
 
-
 # ---------------------------------------------------------------------------
 # Serialization
 # ---------------------------------------------------------------------------
@@ -752,10 +751,9 @@ def _save_state_unlocked(drive_root: pathlib.Path, state: AdvisoryReviewState) -
 
 def save_state(drive_root: pathlib.Path, state: AdvisoryReviewState) -> None:
     """Persist review state atomically with a best-effort lock."""
-    lock_path = drive_root / _LOCK_RELPATH
     lock_fd = acquire_review_state_lock(drive_root)
     if lock_fd is None:
-        log.warning("Failed to acquire review state lock at %s; skipping save", lock_path)
+        log.warning("Failed to acquire review state lock; skipping save")
         return
     try:
         _save_state_unlocked(drive_root, state)
@@ -785,50 +783,51 @@ def update_state(
 # ---------------------------------------------------------------------------
 
 def acquire_review_state_lock(
-    drive_root: pathlib.Path,
-    timeout_sec: float = 4.0,
-    stale_sec: float = 90.0,
+    drive_root: pathlib.Path, timeout_sec: float = 4.0, **_kw: Any,
 ) -> Optional[int]:
+    """Acquire cross-platform file lock (flock on Unix, LockFileEx on Windows)."""
+    from ouroboros.platform_layer import file_lock_exclusive_nb
     lock_path = drive_root / _LOCK_RELPATH
     lock_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        fd = os.open(str(lock_path), os.O_CREAT | os.O_WRONLY, 0o644)
+    except Exception:
+        log.warning("Failed to open review-state lock at %s", lock_path, exc_info=True)
+        return None
     started = time.time()
     while (time.time() - started) < timeout_sec:
         try:
-            fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
-            meta = f"pid={os.getpid()} ts={_utc_now()}\n".encode("utf-8")
-            try:
-                os.write(fd, meta)
+            file_lock_exclusive_nb(fd)
+            try:  # best-effort metadata
+                os.lseek(fd, 0, os.SEEK_SET)
+                os.write(fd, f"pid={os.getpid()} ts={_utc_now()}\n".encode())
             except Exception:
-                log.debug("Failed to write review-state lock metadata", exc_info=True)
+                pass
             return fd
-        except FileExistsError:
-            try:
-                age = time.time() - lock_path.stat().st_mtime
-                if age > stale_sec:
-                    lock_path.unlink()
-                    continue
-            except Exception:
-                log.debug("Failed to inspect/remove stale review-state lock", exc_info=True)
+        except OSError:
             time.sleep(0.05)
-        except Exception:
-            log.warning("Failed to acquire review-state lock at %s", lock_path, exc_info=True)
-            break
+    try:
+        os.close(fd)
+    except Exception:
+        pass
     return None
 
 
 def release_review_state_lock(drive_root: pathlib.Path, lock_fd: Optional[int]) -> None:
-    lock_path = drive_root / _LOCK_RELPATH
-    if lock_fd is not None:
-        try:
-            os.close(lock_fd)
-        except Exception:
-            log.debug("Failed to close review-state lock fd", exc_info=True)
+    if lock_fd is None:
+        return
+    from ouroboros.platform_layer import file_unlock
     try:
-        if lock_path.exists():
-            lock_path.unlink()
+        file_unlock(lock_fd)
     except Exception:
-        log.debug("Failed to unlink review-state lock", exc_info=True)
-
+        pass
+    try:
+        os.close(lock_fd)
+    except Exception:
+        pass
+    # NOTE: do NOT unlink the lock file — with flock/LockFileEx, the file must
+    # persist so all waiters contend on the same inode. Unlinking breaks mutual
+    # exclusion (waiters can open a new file while holders still lock the old).
 
 # ---------------------------------------------------------------------------
 # Snapshot hash / repo identity
