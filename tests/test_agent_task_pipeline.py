@@ -414,3 +414,23 @@ def test_collect_review_evidence_scopes_open_obligations_to_repo(tmp_path):
     assert evidence["current_repo"]["stale_reason"] == ""
     assert evidence["current_repo"]["stale_ts"] == ""
     assert evidence["open_obligations"] == []
+
+
+def test_truncate_with_notice_uses_utils_ssot():
+    """_truncate_with_notice in agent_task_pipeline is now truncate_review_artifact from utils.
+    Verify it truncates long strings and adds a visible omission note (no silent clipping)."""
+    from ouroboros.utils import truncate_review_artifact
+    # The alias in agent_task_pipeline should be the same object
+    assert pipeline._truncate_with_notice is truncate_review_artifact
+
+    short = "hello"
+    assert pipeline._truncate_with_notice(short, 100) == short
+
+    long_text = "x" * 200
+    result = pipeline._truncate_with_notice(long_text, 50)
+    assert result.startswith("x" * 50)
+    assert "50" in result  # omission note mentions limit
+    assert len(result) > 50  # note appended, not just raw slice
+
+    # Handles None gracefully
+    assert pipeline._truncate_with_notice(None, 10) == ""

@@ -22,7 +22,7 @@ from ouroboros.task_results import (
     load_task_result,
     write_task_result,
 )
-from ouroboros.utils import utc_now_iso, append_jsonl
+from ouroboros.utils import utc_now_iso, append_jsonl, truncate_review_artifact as _truncate_with_notice
 
 log = logging.getLogger(__name__)
 
@@ -72,13 +72,6 @@ def _resolve_task_summary_model(default_model: str) -> str:
         if candidate and model_has_credentials(candidate):
             return candidate
     return default_model
-
-
-def _truncate_with_notice(text: Any, limit: int) -> str:
-    raw = str(text or "")
-    if len(raw) <= limit:
-        return raw
-    return raw[:limit] + f"\n...[truncated from {len(raw)} chars; omitted {len(raw) - limit}]"
 
 
 def build_trace_summary(llm_trace: dict) -> str:

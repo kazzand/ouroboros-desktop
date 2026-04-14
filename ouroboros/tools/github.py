@@ -9,15 +9,9 @@ import subprocess
 from typing import Any, Dict, List, Optional
 
 from ouroboros.tools.registry import ToolContext, ToolEntry
+from ouroboros.utils import truncate_review_artifact as _truncate_with_notice
 
 log = logging.getLogger(__name__)
-
-
-def _truncate_with_notice(text: str, limit: int) -> str:
-    raw = str(text or "")
-    if len(raw) <= limit:
-        return raw
-    return raw[:limit] + f"\n...[truncated from {len(raw)} chars; omitted {len(raw) - limit}]"
 
 # ---------------------------------------------------------------------------
 # Helpers
