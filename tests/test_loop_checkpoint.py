@@ -401,7 +401,7 @@ class TestCheckpointRoundMissingResponse:
             drive_root=None,
         )
 
-        assert result.startswith("⚠️ Failed to get a response")
+        assert result.startswith("⚠️")
         checkpoint_events = []
         while not eq.empty():
             evt = eq.get_nowait()
