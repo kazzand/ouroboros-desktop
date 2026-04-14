@@ -19,6 +19,17 @@ from typing import Any, Dict, List, Optional
 
 from ouroboros.utils import utc_now_iso, append_jsonl
 
+
+def _truncate_with_notice(text: Any, limit: int) -> str:
+    raw = str(text or "")
+    if len(raw) <= limit:
+        return raw
+    marker = f"... [+{len(raw)} chars]"
+    available = max(0, limit - len(marker))
+    marker = f"... [+{len(raw) - available} chars]"
+    available = max(0, limit - len(marker))
+    return raw[:available] + marker
+
 log = logging.getLogger(__name__)
 
 _ERROR_MARKERS = frozenset({
@@ -101,7 +112,8 @@ def should_generate_reflection(llm_trace: Dict[str, Any]) -> bool:
     for tc in tool_calls:
         if not isinstance(tc, dict):
             continue
-        if _tool_call_is_failure(tc):
+        # Failure: is_error flag or non-OK structured status
+        if tc.get("is_error") or str(tc.get("status") or "").strip().lower() not in ("", "ok"):
             return True
         result_str = str(tc.get("result", ""))
         for marker in _ERROR_MARKERS:
@@ -109,14 +121,6 @@ def should_generate_reflection(llm_trace: Dict[str, Any]) -> bool:
                 return True
 
     return False
-
-
-def _tool_call_is_failure(tc: Dict[str, Any]) -> bool:
-    """Return True when structured tool facts indicate a failed outcome."""
-    if tc.get("is_error"):
-        return True
-    status = str(tc.get("status") or "").strip().lower()
-    return status not in {"", "ok"}
 
 
 def _collect_error_details(llm_trace: Dict[str, Any], cap: int = 3000) -> str:
@@ -129,7 +133,8 @@ def _collect_error_details(llm_trace: Dict[str, Any], cap: int = 3000) -> str:
         if not isinstance(tc, dict):
             continue
         result_str = str(tc.get("result", ""))
-        is_relevant = _tool_call_is_failure(tc) or any(m in result_str for m in _ERROR_MARKERS)
+        is_error = tc.get("is_error") or str(tc.get("status") or "").strip().lower() not in ("", "ok")
+        is_relevant = is_error or any(m in result_str for m in _ERROR_MARKERS)
         if not is_relevant:
             continue
         tool_name = tc.get("tool", "unknown")
@@ -165,47 +170,6 @@ def _detect_markers(llm_trace: Dict[str, Any]) -> List[str]:
     return sorted(found)
 
 
-def _extract_backlog_candidates(reflection_text: str, task_id: str) -> tuple[str, List[Dict[str, Any]]]:
-    marker = "BACKLOG_CANDIDATES_JSON:"
-    if marker not in reflection_text:
-        return reflection_text.strip(), []
-
-    body, marker_tail = reflection_text.rsplit(marker, 1)
-    payload = marker_tail.strip()
-    cleaned_text = body.rstrip()
-    if not payload:
-        return cleaned_text, []
-    try:
-        raw_candidates = json.loads(payload)
-    except Exception:
-        log.warning("Reflection backlog candidates JSON parse failed", exc_info=True)
-        return cleaned_text, []
-    if not isinstance(raw_candidates, list):
-        return cleaned_text, []
-
-    candidates: List[Dict[str, Any]] = []
-    for raw in raw_candidates[:3]:
-        if not isinstance(raw, dict):
-            continue
-        summary = _truncate_with_notice(raw.get("summary", ""), 260).strip()
-        category = _truncate_with_notice(raw.get("category", "process"), 80).strip() or "process"
-        source = _truncate_with_notice(raw.get("source", "execution_reflection"), 80).strip() or "execution_reflection"
-        evidence = _truncate_with_notice(raw.get("evidence", ""), 220).strip()
-        if not summary or not evidence:
-            continue
-        candidates.append({
-            "summary": summary,
-            "category": category,
-            "source": source,
-            "evidence": evidence,
-            "context": _truncate_with_notice(raw.get("context", ""), 400).strip(),
-            "proposed_next_step": _truncate_with_notice(raw.get("proposed_next_step", ""), 260).strip(),
-            "task_id": _truncate_with_notice(raw.get("task_id", task_id), 80).strip() or task_id,
-            "requires_plan_review": bool(raw.get("requires_plan_review", True)),
-        })
-    return cleaned_text, candidates
-
-
 def generate_reflection(
     task: Dict[str, Any],
     llm_trace: Dict[str, Any],
@@ -225,7 +189,10 @@ def generate_reflection(
     markers = _detect_markers(llm_trace)
     error_count = sum(
         1 for tc in (llm_trace.get("tool_calls") or [])
-        if isinstance(tc, dict) and _tool_call_is_failure(tc)
+        if isinstance(tc, dict) and (
+            tc.get("is_error")
+            or str(tc.get("status") or "").strip().lower() not in ("", "ok")
+        )
     )
     try:
         from ouroboros.review_evidence import format_review_evidence_for_prompt
@@ -249,10 +216,45 @@ def generate_reflection(
             max_tokens=4096,
         )
         raw_reflection_text = (resp_msg.get("content") or "").strip()
-        reflection_text, backlog_candidates = _extract_backlog_candidates(
-            raw_reflection_text,
-            str(task.get("id", "") or ""),
-        )
+
+        # --- Parse backlog candidates from reflection text ---
+        _backlog_marker = "BACKLOG_CANDIDATES_JSON:"
+        if _backlog_marker in raw_reflection_text:
+            body, marker_tail = raw_reflection_text.rsplit(_backlog_marker, 1)
+            reflection_text = body.rstrip()
+            payload = marker_tail.strip()
+            backlog_candidates: List[Dict[str, Any]] = []
+            if payload:
+                try:
+                    raw_candidates = json.loads(payload)
+                except Exception:
+                    log.warning("Reflection backlog candidates JSON parse failed", exc_info=True)
+                    raw_candidates = None
+                task_id_str = str(task.get("id", "") or "")
+                if isinstance(raw_candidates, list):
+                    for raw in raw_candidates[:3]:
+                        if not isinstance(raw, dict):
+                            continue
+                        summary = _truncate_with_notice(raw.get("summary", ""), 260).strip()
+                        category = _truncate_with_notice(raw.get("category", "process"), 80).strip() or "process"
+                        source = _truncate_with_notice(raw.get("source", "execution_reflection"), 80).strip() or "execution_reflection"
+                        evidence = _truncate_with_notice(raw.get("evidence", ""), 220).strip()
+                        if not summary or not evidence:
+                            continue
+                        backlog_candidates.append({
+                            "summary": summary,
+                            "category": category,
+                            "source": source,
+                            "evidence": evidence,
+                            "context": _truncate_with_notice(raw.get("context", ""), 400).strip(),
+                            "proposed_next_step": _truncate_with_notice(raw.get("proposed_next_step", ""), 260).strip(),
+                            "task_id": _truncate_with_notice(raw.get("task_id", task_id_str), 80).strip() or task_id_str,
+                            "requires_plan_review": bool(raw.get("requires_plan_review", True)),
+                        })
+        else:
+            reflection_text = raw_reflection_text.strip()
+            backlog_candidates = []
+
         # Track cost — reflection runs in daemon thread path, so update directly.
         if refl_usage:
             try:
@@ -328,17 +330,6 @@ _PATTERNS_HEADER = (
 )
 
 
-def _truncate_with_notice(text: Any, limit: int) -> str:
-    raw = str(text or "")
-    if len(raw) <= limit:
-        return raw
-    marker = f"... [+{len(raw) - limit} chars]"
-    available = max(0, limit - len(marker))
-    marker = f"... [+{len(raw) - available} chars]"
-    available = max(0, limit - len(marker))
-    return raw[:available] + marker
-
-
 def _update_patterns(drive_root: pathlib.Path, entry: Dict[str, Any]) -> None:
     """Update patterns.md knowledge base topic via LLM (Pattern Register)."""
     from ouroboros.llm import LLMClient, DEFAULT_LIGHT_MODEL
@@ -351,9 +342,10 @@ def _update_patterns(drive_root: pathlib.Path, entry: Dict[str, Any]) -> None:
     else:
         current = _PATTERNS_HEADER
 
+    current_truncated = _truncate_with_notice(current, 3000)
     prompt = _PATTERNS_PROMPT.format(
         current_patterns=(
-            _truncate_with_notice(current, 3000)
+            current_truncated
             + (
                 "\n\n[IMPORTANT: The current register was compacted for prompt size. "
                 "Preserve existing rows unless you are intentionally merging or updating them.]"

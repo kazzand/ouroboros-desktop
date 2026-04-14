@@ -326,11 +326,162 @@ def build_recent_sections(memory: Memory, env: Any, task_id: str = "") -> List[s
     return sections
 
 
-def _append_version_sync_checks(env: Any, checks: List[str]) -> None:
+def _collect_log_analysis_checks(env: Any, checks: List[str]) -> None:
+    import hashlib
+    import time as _time
+
+    try:
+        from ouroboros.consciousness import BackgroundConsciousness
+        consciousness_md = safe_read(env.repo_path("prompts/CONSCIOUSNESS.md"))
+        if consciousness_md:
+            whitelist = BackgroundConsciousness._BG_TOOL_WHITELIST
+            scan_text = re.sub(r'```.*?```', '', consciousness_md, flags=re.DOTALL)
+            tool_prefixes = (
+                "schedule_", "update_", "knowledge_", "browse_", "analyze_",
+                "web_", "send_", "repo_", "data_", "chat_", "list_", "get_",
+                "wait_", "set_", "memory_",
+            )
+            prompt_tool_refs = {
+                match.group(1)
+                for match in re.finditer(r'\b([a-z][a-z0-9]*(?:_[a-z0-9]+)+)\b', scan_text)
+                if match.group(1) in whitelist or any(match.group(1).startswith(prefix) for prefix in tool_prefixes)
+            }
+            phantom = prompt_tool_refs - whitelist
+            if phantom:
+                checks.append(f"WARNING: PROMPT-RUNTIME DRIFT — CONSCIOUSNESS.md references tools not in BG whitelist: {', '.join(sorted(phantom))}")
+            else:
+                checks.append("OK: prompt-runtime sync (no phantom tools)")
+    except Exception:
+        pass
+
+    try:
+        msg_hash_to_tasks: Dict[str, set] = {}
+        for log_path, type_field, type_value in (
+            (env.drive_path("logs/events.jsonl"), "type", "owner_message_injected"),
+            (env.drive_path("logs/supervisor.jsonl"), "event_type", "owner_message_injected"),
+        ):
+            if not log_path.exists():
+                continue
+            file_size = log_path.stat().st_size
+            with log_path.open("r", encoding="utf-8") as f:
+                if file_size > 256_000:
+                    f.seek(file_size - 256_000)
+                    f.readline()
+                for raw in f:
+                    raw = raw.strip()
+                    if not raw:
+                        continue
+                    try:
+                        ev = json.loads(raw)
+                    except (json.JSONDecodeError, ValueError):
+                        continue
+                    if ev.get(type_field) != type_value:
+                        continue
+                    text = ev.get("text", "")
+                    if not text and "event_repr" in ev:
+                        event_repr = str(ev.get("event_repr", ""))
+                        text = event_repr[:200] + f" [...{len(event_repr) - 200} chars omitted]" if len(event_repr) > 200 else event_repr
+                    if not text:
+                        continue
+                    task_ids = msg_hash_to_tasks.setdefault(hashlib.md5(text.encode()).hexdigest()[:12], set())
+                    task_ids.add(ev.get("task_id") or "unknown")
+        dupes = {h: tids for h, tids in msg_hash_to_tasks.items() if len(tids) > 1}
+        if dupes:
+            checks.append(f"CRITICAL: DUPLICATE PROCESSING — {len(dupes)} message(s) appeared in multiple tasks: {', '.join(str(sorted(tids)) for tids in dupes.values())}")
+        else:
+            checks.append("OK: no duplicate message processing detected")
+    except Exception:
+        pass
+
+    try:
+        hit_rate = _compute_cache_hit_rate(env)
+        if hit_rate is not None:
+            if hit_rate < 0.30:
+                checks.append(f"WARNING: LOW CACHE HIT RATE — {hit_rate:.0%} cached. Context structure may be degrading prompt caching efficiency.")
+            elif hit_rate >= 0.50:
+                checks.append(f"OK: cache hit rate ({hit_rate:.0%})")
+            else:
+                checks.append(f"INFO: cache hit rate moderate ({hit_rate:.0%})")
+    except Exception:
+        pass
+
+    try:
+        events_path = env.drive_path("logs/events.jsonl")
+        if events_path.exists():
+            llm_error_models: Counter = Counter()
+            local_overflow_models: Counter = Counter()
+            file_size = events_path.stat().st_size
+            with events_path.open("r", encoding="utf-8") as f:
+                if file_size > 256_000:
+                    f.seek(file_size - 256_000)
+                    f.readline()
+                for raw in f:
+                    raw = raw.strip()
+                    if not raw:
+                        continue
+                    try:
+                        ev = json.loads(raw)
+                    except (json.JSONDecodeError, ValueError):
+                        continue
+                    evt_type = str(ev.get("type") or "")
+                    model = str(ev.get("model") or "unknown")
+                    if evt_type in {"llm_api_error", "review_model_error", "consciousness_llm_error", "provider_incomplete_response"}:
+                        llm_error_models[model] += 1
+                    elif evt_type == "local_context_overflow":
+                        local_overflow_models[model] += 1
+            if llm_error_models:
+                top = ", ".join(f"{model} x{count}" for model, count in llm_error_models.most_common(3))
+                checks.append(f"WARNING: PROVIDER/ROUTING ERRORS — {sum(llm_error_models.values())} recent failures ({top}). Reliability or failover may need attention.")
+            else:
+                checks.append("OK: no recent provider/routing errors")
+            if local_overflow_models:
+                top = ", ".join(f"{model} x{count}" for model, count in local_overflow_models.most_common(3))
+                checks.append(f"WARNING: LOCAL CONTEXT OVERFLOW — {sum(local_overflow_models.values())} recent overflow event(s) ({top}). Local context may need more compaction or a larger window.")
+            else:
+                checks.append("OK: no recent local context overflows")
+    except Exception:
+        pass
+
+    try:
+        rescue_dir = env.drive_path("archive/rescue")
+        if rescue_dir.exists():
+            recent = []
+            now = _time.time()
+            for entry in sorted(rescue_dir.iterdir(), reverse=True):
+                if not entry.is_dir():
+                    continue
+                age_sec = now - entry.stat().st_mtime
+                if age_sec < 7200:
+                    file_count = sum(1 for item in entry.rglob("*") if item.is_file())
+                    age_str = f"{int(age_sec // 60)}m ago" if age_sec < 3600 else f"{age_sec / 3600:.1f}h ago"
+                    recent.append(f"{entry.name} ({age_str}, {file_count} files)")
+                if len(recent) >= 3:
+                    break
+            if recent:
+                checks.append(
+                    f"WARNING: RESCUE SNAPSHOT AVAILABLE — {', '.join(recent)}. "
+                    "Uncommitted changes were saved before last restart. "
+                    "Use data_read to inspect archive/rescue/<dirname>/rescue_meta.json "
+                    "and changes.diff to decide if recovery is needed."
+                )
+    except Exception:
+        pass
+
+
+def build_health_invariants(env: Any) -> str:
+    """Build health invariants section for LLM-first self-detection.
+
+    Checks crash_report.json for CRASH ROLLBACK, plus version sync,
+    budget drift, memory health, prompt drift, log analysis, and file budgets.
+    """
+    import time as _time
+
+    checks: List[str] = []
+
+    # --- version sync ---
     try:
         ver_file = read_text(env.repo_path("VERSION")).strip()
         desync_parts = []
-
         pyproject = read_text(env.repo_path("pyproject.toml"))
         pyproject_ver = ""
         for line in pyproject.splitlines():
@@ -339,26 +490,20 @@ def _append_version_sync_checks(env: Any, checks: List[str]) -> None:
                 break
         if ver_file and pyproject_ver and ver_file != pyproject_ver:
             desync_parts.append(f"pyproject.toml={pyproject_ver}")
-
         try:
             readme = read_text(env.repo_path("README.md"))
-            readme_match = (
-                re.search(r'version-(\d+\.\d+\.\d+)', readme, re.IGNORECASE)
-                or re.search(r'\*\*Version:\*\*\s*(\d+\.\d+\.\d+)', readme)
-            )
-            if readme_match and readme_match.group(1) != ver_file:
-                desync_parts.append(f"README={readme_match.group(1)}")
+            rm = re.search(r'version-(\d+\.\d+\.\d+)', readme, re.IGNORECASE) or re.search(r'\*\*Version:\*\*\s*(\d+\.\d+\.\d+)', readme)
+            if rm and rm.group(1) != ver_file:
+                desync_parts.append(f"README={rm.group(1)}")
         except Exception:
             pass
-
         try:
             arch = read_text(env.repo_path("docs/ARCHITECTURE.md"))
-            arch_match = re.search(r'# Ouroboros v(\d+\.\d+\.\d+)', arch)
-            if arch_match and arch_match.group(1) != ver_file:
-                desync_parts.append(f"ARCHITECTURE.md={arch_match.group(1)}")
+            am = re.search(r'# Ouroboros v(\d+\.\d+\.\d+)', arch)
+            if am and am.group(1) != ver_file:
+                desync_parts.append(f"ARCHITECTURE.md={am.group(1)}")
         except Exception:
             pass
-
         if desync_parts:
             checks.append(f"CRITICAL: VERSION DESYNC — VERSION={ver_file}, {', '.join(desync_parts)}")
         elif ver_file:
@@ -366,40 +511,29 @@ def _append_version_sync_checks(env: Any, checks: List[str]) -> None:
     except Exception:
         pass
 
-
-def _append_budget_drift_checks(env: Any, checks: List[str]) -> None:
+    # --- budget drift ---
     try:
-        state_json = read_text(env.drive_path("state/state.json"))
-        state_data = json.loads(state_json)
+        state_data = json.loads(read_text(env.drive_path("state/state.json")))
         if state_data.get("budget_drift_alert"):
-            drift_pct = state_data.get("budget_drift_pct", 0)
-            our = state_data.get("spent_usd", 0)
-            theirs = state_data.get("openrouter_total_usd", 0)
-            checks.append(f"WARNING: BUDGET DRIFT {drift_pct:.1f}% — tracked=${our:.2f} vs OpenRouter=${theirs:.2f}")
+            checks.append(f"WARNING: BUDGET DRIFT {state_data.get('budget_drift_pct', 0):.1f}% — tracked=${state_data.get('spent_usd', 0):.2f} vs OpenRouter=${state_data.get('openrouter_total_usd', 0):.2f}")
         else:
             checks.append("OK: budget drift within tolerance")
     except Exception:
         pass
 
-
-def _append_task_cost_checks(checks: List[str]) -> None:
+    # --- high-cost tasks ---
     try:
         from supervisor.state import per_task_cost_summary
         costly = [t for t in per_task_cost_summary(5) if t["cost"] > 5.0]
         for t in costly:
-            checks.append(
-                f"WARNING: HIGH-COST TASK — task_id={t['task_id']} "
-                f"cost=${t['cost']:.2f} rounds={t['rounds']}"
-            )
+            checks.append(f"WARNING: HIGH-COST TASK — task_id={t['task_id']} cost=${t['cost']:.2f} rounds={t['rounds']}")
         if not costly:
             checks.append("OK: no high-cost tasks (>$5)")
     except Exception:
         pass
 
-
-def _append_memory_health_checks(env: Any, checks: List[str]) -> None:
+    # --- identity freshness & size ---
     try:
-        import time as _time
         identity_path = env.drive_path("memory/identity.md")
         if identity_path.exists():
             age_hours = (_time.time() - identity_path.stat().st_mtime) / 3600
@@ -409,7 +543,6 @@ def _append_memory_health_checks(env: Any, checks: List[str]) -> None:
                 checks.append("OK: identity.md recent")
     except Exception:
         pass
-
     try:
         identity_content = read_text(env.drive_path("memory/identity.md"))
         if len(identity_content.strip()) < 200:
@@ -417,9 +550,9 @@ def _append_memory_health_checks(env: Any, checks: List[str]) -> None:
     except Exception:
         pass
 
+    # --- scratchpad ---
     try:
-        scratchpad_content = read_text(env.drive_path("memory/scratchpad.md"))
-        sp_len = len(scratchpad_content.strip())
+        sp_len = len(read_text(env.drive_path("memory/scratchpad.md")).strip())
         if sp_len < 50:
             checks.append("WARNING: EMPTY SCRATCHPAD — scratchpad is nearly empty. Memory loss signal.")
         elif sp_len > 50000:
@@ -429,8 +562,7 @@ def _append_memory_health_checks(env: Any, checks: List[str]) -> None:
     except Exception:
         pass
 
-
-def _append_crash_rollback_checks(env: Any, checks: List[str]) -> None:
+    # Crash rollback — inlined so inspect.getsource sees the literal strings
     try:
         crash_report = env.drive_path("state/crash_report.json")
         if crash_report.exists():
@@ -443,212 +575,14 @@ def _append_crash_rollback_checks(env: Any, checks: List[str]) -> None:
     except Exception:
         pass
 
-
-def _append_prompt_runtime_drift_checks(env: Any, checks: List[str]) -> None:
-    try:
-        from ouroboros.consciousness import BackgroundConsciousness
-        consciousness_md = safe_read(env.repo_path("prompts/CONSCIOUSNESS.md"))
-        if not consciousness_md:
-            return
-        whitelist = BackgroundConsciousness._BG_TOOL_WHITELIST
-        scan_text = re.sub(r'```.*?```', '', consciousness_md, flags=re.DOTALL)
-        tool_prefixes = (
-            "schedule_", "update_", "knowledge_", "browse_", "analyze_",
-            "web_", "send_", "repo_", "data_", "chat_", "list_", "get_",
-            "wait_", "set_", "memory_",
-        )
-        prompt_tool_refs = set()
-        for match in re.finditer(r'\b([a-z][a-z0-9]*(?:_[a-z0-9]+)+)\b', scan_text):
-            candidate = match.group(1)
-            if candidate in whitelist or any(candidate.startswith(prefix) for prefix in tool_prefixes):
-                prompt_tool_refs.add(candidate)
-        phantom = prompt_tool_refs - whitelist
-        if phantom:
-            checks.append(
-                f"WARNING: PROMPT-RUNTIME DRIFT — CONSCIOUSNESS.md references "
-                f"tools not in BG whitelist: {', '.join(sorted(phantom))}"
-            )
-        else:
-            checks.append("OK: prompt-runtime sync (no phantom tools)")
-    except Exception:
-        pass
-
-
-def _scan_injected_message_hashes(path: pathlib.Path, msg_hash_to_tasks: Dict[str, set], type_field: str, type_value: str) -> None:
-    if not path.exists():
-        return
-    import hashlib
-
-    tail_bytes = 256_000
-    file_size = path.stat().st_size
-    with path.open("r", encoding="utf-8") as f:
-        if file_size > tail_bytes:
-            f.seek(file_size - tail_bytes)
-            f.readline()
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                ev = json.loads(line)
-            except (json.JSONDecodeError, ValueError):
-                continue
-            if ev.get(type_field) != type_value:
-                continue
-            text = ev.get("text", "")
-            if not text and "event_repr" in ev:
-                event_repr = str(ev.get("event_repr", ""))
-                text = (
-                    event_repr[:200] + f" [...{len(event_repr) - 200} chars omitted]"
-                    if len(event_repr) > 200 else event_repr
-                )
-            if not text:
-                continue
-            text_hash = hashlib.md5(text.encode()).hexdigest()[:12]
-            tid = ev.get("task_id") or "unknown"
-            msg_hash_to_tasks.setdefault(text_hash, set()).add(tid)
-
-
-def _append_duplicate_processing_checks(env: Any, checks: List[str]) -> None:
-    try:
-        msg_hash_to_tasks: Dict[str, set] = {}
-        _scan_injected_message_hashes(env.drive_path("logs/events.jsonl"), msg_hash_to_tasks, "type", "owner_message_injected")
-        _scan_injected_message_hashes(
-            env.drive_path("logs/supervisor.jsonl"),
-            msg_hash_to_tasks,
-            "event_type",
-            "owner_message_injected",
-        )
-        dupes = {h: tids for h, tids in msg_hash_to_tasks.items() if len(tids) > 1}
-        if dupes:
-            checks.append(
-                f"CRITICAL: DUPLICATE PROCESSING — {len(dupes)} message(s) "
-                f"appeared in multiple tasks: {', '.join(str(sorted(tids)) for tids in dupes.values())}"
-            )
-        else:
-            checks.append("OK: no duplicate message processing detected")
-    except Exception:
-        pass
-
-
-def _append_cache_hit_rate_checks(env: Any, checks: List[str]) -> None:
-    try:
-        hit_rate = _compute_cache_hit_rate(env)
-        if hit_rate is None:
-            return
-        if hit_rate < 0.30:
-            checks.append(
-                f"WARNING: LOW CACHE HIT RATE — {hit_rate:.0%} cached. "
-                "Context structure may be degrading prompt caching efficiency."
-            )
-        elif hit_rate >= 0.50:
-            checks.append(f"OK: cache hit rate ({hit_rate:.0%})")
-        else:
-            checks.append(f"INFO: cache hit rate moderate ({hit_rate:.0%})")
-    except Exception:
-        pass
-
-
-def _append_provider_routing_health_checks(env: Any, checks: List[str]) -> None:
-    try:
-        events_path = env.drive_path("logs/events.jsonl")
-        if not events_path.exists():
-            return
-        llm_error_models: Counter = Counter()
-        local_overflow_models: Counter = Counter()
-        file_size = events_path.stat().st_size
-        tail_bytes = 256_000
-        with events_path.open("r", encoding="utf-8") as f:
-            if file_size > tail_bytes:
-                f.seek(file_size - tail_bytes)
-                f.readline()
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    ev = json.loads(line)
-                except (json.JSONDecodeError, ValueError):
-                    continue
-                evt_type = str(ev.get("type") or "")
-                model = str(ev.get("model") or "unknown")
-                if evt_type in {"llm_api_error", "review_model_error", "consciousness_llm_error", "provider_incomplete_response"}:
-                    llm_error_models[model] += 1
-                elif evt_type == "local_context_overflow":
-                    local_overflow_models[model] += 1
-        if llm_error_models:
-            top = ", ".join(f"{model} x{count}" for model, count in llm_error_models.most_common(3))
-            checks.append(
-                f"WARNING: PROVIDER/ROUTING ERRORS — {sum(llm_error_models.values())} recent failures "
-                f"({top}). Reliability or failover may need attention."
-            )
-        else:
-            checks.append("OK: no recent provider/routing errors")
-        if local_overflow_models:
-            top = ", ".join(f"{model} x{count}" for model, count in local_overflow_models.most_common(3))
-            checks.append(
-                f"WARNING: LOCAL CONTEXT OVERFLOW — {sum(local_overflow_models.values())} recent overflow event(s) "
-                f"({top}). Local context may need more compaction or a larger window."
-            )
-        else:
-            checks.append("OK: no recent local context overflows")
-    except Exception:
-        pass
-
-
-def _append_rescue_snapshot_checks(env: Any, checks: List[str]) -> None:
-    try:
-        import time as _time
-        rescue_dir = env.drive_path("archive/rescue")
-        if not rescue_dir.exists():
-            return
-        now = _time.time()
-        recent = []
-        for entry in sorted(rescue_dir.iterdir(), reverse=True):
-            if not entry.is_dir():
-                continue
-            age_sec = now - entry.stat().st_mtime
-            if age_sec < 7200:
-                meta_path = entry / "rescue_meta.json"
-                file_count = sum(1 for _ in entry.rglob("*") if _.is_file())
-                age_str = f"{int(age_sec // 60)}m ago" if age_sec < 3600 else f"{age_sec / 3600:.1f}h ago"
-                recent.append(f"{entry.name} ({age_str}, {file_count} files)")
-            if len(recent) >= 3:
-                break
-        if recent:
-            checks.append(
-                f"WARNING: RESCUE SNAPSHOT AVAILABLE — {', '.join(recent)}. "
-                "Uncommitted changes were saved before last restart. "
-                "Use data_read to inspect archive/rescue/<dirname>/rescue_meta.json "
-                "and changes.diff to decide if recovery is needed."
-            )
-    except Exception:
-        pass
-
-
-def build_health_invariants(env: Any) -> str:
-    """Build health invariants section for LLM-first self-detection.
-
-    Includes crash_report.json / CRASH ROLLBACK detection via helpers.
-    """
-    checks: List[str] = []
-    _append_version_sync_checks(env, checks)
-    _append_budget_drift_checks(env, checks)
-    _append_task_cost_checks(checks)
-    _append_memory_health_checks(env, checks)
-    _append_crash_rollback_checks(env, checks)
-    _append_prompt_runtime_drift_checks(env, checks)
-    _append_duplicate_processing_checks(env, checks)
-    _append_cache_hit_rate_checks(env, checks)
-    _append_provider_routing_health_checks(env, checks)
-    _append_rescue_snapshot_checks(env, checks)
+    _collect_log_analysis_checks(env, checks)
     try:
         _append_file_size_budget_checks(env, checks)
     except Exception:
         pass
     if not checks:
         return ""
-    return "## Health Invariants\n\n" + "\n".join(f"- {c}" for c in checks)
+    return "## Health Invariants\n\n" + "\n".join(f"- {check}" for check in checks)
 
 
 def _compute_cache_hit_rate(env: Any) -> Optional[float]:

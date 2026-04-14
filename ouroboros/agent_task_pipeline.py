@@ -27,37 +27,39 @@ from ouroboros.utils import utc_now_iso, append_jsonl
 log = logging.getLogger(__name__)
 
 
-def _parse_model_provider(model: str) -> str:
-    model_name = str(model or "").strip()
-    for prefix, provider in (
-        ("openai::", "openai"),
-        ("anthropic::", "anthropic"),
-        ("cloudru::", "cloudru"),
-        ("openai-compatible::", "openai-compatible"),
-        ("openrouter::", "openrouter"),
-    ):
-        if model_name.startswith(prefix):
-            return provider
-    return "openrouter"
-
-
-def _has_provider_credentials(provider: str) -> bool:
-    if provider == "openai":
-        return bool(str(os.environ.get("OPENAI_API_KEY", "") or "").strip())
-    if provider == "anthropic":
-        return bool(str(os.environ.get("ANTHROPIC_API_KEY", "") or "").strip())
-    if provider == "cloudru":
-        return bool(str(os.environ.get("CLOUDRU_FOUNDATION_MODELS_API_KEY", "") or "").strip())
-    if provider == "openai-compatible":
-        compatible_key = str(os.environ.get("OPENAI_COMPATIBLE_API_KEY", "") or "").strip()
-        legacy_key = str(os.environ.get("OPENAI_API_KEY", "") or "").strip()
-        legacy_base = str(os.environ.get("OPENAI_BASE_URL", "") or "").strip()
-        return bool(compatible_key or (legacy_key and legacy_base))
-    return bool(str(os.environ.get("OPENROUTER_API_KEY", "") or "").strip())
-
-
 def _resolve_task_summary_model(default_model: str) -> str:
-    if _has_provider_credentials(_parse_model_provider(default_model)):
+    prefix_to_provider = {
+        "openai::": "openai",
+        "anthropic::": "anthropic",
+        "cloudru::": "cloudru",
+        "openai-compatible::": "openai-compatible",
+        "openrouter::": "openrouter",
+    }
+    provider_env_keys: dict[str, list[str]] = {
+        "openai": ["OPENAI_API_KEY"],
+        "anthropic": ["ANTHROPIC_API_KEY"],
+        "cloudru": ["CLOUDRU_FOUNDATION_MODELS_API_KEY"],
+        "openrouter": ["OPENROUTER_API_KEY"],
+    }
+
+    def model_has_credentials(model: str) -> bool:
+        name = str(model or "").strip()
+        provider = "openrouter"
+        for prefix, candidate_provider in prefix_to_provider.items():
+            if name.startswith(prefix):
+                provider = candidate_provider
+                break
+        if provider == "openai-compatible":
+            compat = str(os.environ.get("OPENAI_COMPATIBLE_API_KEY", "") or "").strip()
+            legacy_key = str(os.environ.get("OPENAI_API_KEY", "") or "").strip()
+            legacy_base = str(os.environ.get("OPENAI_BASE_URL", "") or "").strip()
+            return bool(compat or (legacy_key and legacy_base))
+        for env_key in provider_env_keys.get(provider, ["OPENROUTER_API_KEY"]):
+            if str(os.environ.get(env_key, "") or "").strip():
+                return True
+        return False
+
+    if model_has_credentials(default_model):
         return default_model
 
     for env_name in (
@@ -67,7 +69,7 @@ def _resolve_task_summary_model(default_model: str) -> str:
         "OUROBOROS_MODEL_CODE",
     ):
         candidate = str(os.environ.get(env_name, "") or "").strip()
-        if candidate and _has_provider_credentials(_parse_model_provider(candidate)):
+        if candidate and model_has_credentials(candidate):
             return candidate
     return default_model
 

@@ -56,6 +56,22 @@ def test_task_summary_keeps_openrouter_model_when_key_present(monkeypatch):
     )
 
 
+def test_task_summary_accepts_openai_compatible_when_legacy_base_url_is_present(monkeypatch):
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_COMPATIBLE_API_KEY", raising=False)
+    monkeypatch.setenv("OPENAI_API_KEY", "legacy-openai-key")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://example.invalid/v1")
+    monkeypatch.setenv("OUROBOROS_MODEL_LIGHT", "anthropic/claude-opus-4.6")
+    monkeypatch.setenv("OUROBOROS_MODEL_FALLBACK", "openai-compatible::custom-model")
+    monkeypatch.setenv("OUROBOROS_MODEL", "anthropic/claude-opus-4.6")
+    monkeypatch.setenv("OUROBOROS_MODEL_CODE", "anthropic/claude-opus-4.6")
+
+    assert (
+        pipeline._resolve_task_summary_model("anthropic/claude-sonnet-4.6")
+        == "openai-compatible::custom-model"
+    )
+
+
 def test_emit_task_results_queues_restart_after_final_events(tmp_path, monkeypatch):
     monkeypatch.setattr(pipeline, "_store_task_result", lambda *args, **kwargs: None)
     monkeypatch.setattr(pipeline, "_run_chat_consolidation", lambda *args, **kwargs: None)

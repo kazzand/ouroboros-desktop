@@ -52,6 +52,42 @@ class TestCacheHitRateInvariant:
         assert "LOW CACHE HIT RATE" in result
 
 
+def _make_health_env(tmp_path, events_lines=None):
+    class FakeEnv:
+        def drive_path(self, p):
+            return tmp_path / p
+
+        def repo_path(self, p):
+            return tmp_path / "repo" / p
+
+        @property
+        def repo_dir(self):
+            return tmp_path / "repo"
+
+        @property
+        def drive_root(self):
+            return tmp_path
+
+    (tmp_path / "state").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "logs").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "memory").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "repo" / "docs").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "repo" / "prompts").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "archive" / "rescue").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "repo" / "VERSION").write_text("1.2.3", encoding="utf-8")
+    (tmp_path / "repo" / "pyproject.toml").write_text('version = "1.2.3"', encoding="utf-8")
+    (tmp_path / "repo" / "README.md").write_text('version-1.2.3', encoding="utf-8")
+    (tmp_path / "repo" / "docs" / "ARCHITECTURE.md").write_text('# Ouroboros v1.2.3', encoding="utf-8")
+    (tmp_path / "repo" / "docs" / "DEVELOPMENT.md").write_text('# Dev', encoding="utf-8")
+    (tmp_path / "repo" / "prompts" / "CONSCIOUSNESS.md").write_text('Prompt text', encoding="utf-8")
+    (tmp_path / "state" / "state.json").write_text('{"spent_usd": 0, "budget_drift_alert": false}', encoding="utf-8")
+    (tmp_path / "memory" / "identity.md").write_text('x' * 300, encoding="utf-8")
+    (tmp_path / "memory" / "scratchpad.md").write_text('x' * 300, encoding="utf-8")
+    event_lines = events_lines or []
+    (tmp_path / "logs" / "events.jsonl").write_text("\n".join(event_lines) + ("\n" if event_lines else ""), encoding="utf-8")
+    return FakeEnv()
+
+
 class TestFileSizeBudgetHealthInvariant:
     def _make_env(self, tmp_path, development_text: str):
         class FakeEnv:
@@ -108,6 +144,66 @@ class TestFileSizeBudgetHealthInvariant:
         result = build_health_invariants(env)
         assert "FILE SIZE BUDGET EXCEEDED" in result
         assert "prompts/SYSTEM.md" in result
+
+
+class TestAdditionalHealthInvariantCoverage:
+    def test_version_desync_warning(self, tmp_path):
+        env = _make_health_env(tmp_path)
+        (tmp_path / "repo" / "pyproject.toml").write_text('version = "1.2.4"', encoding="utf-8")
+
+        result = build_health_invariants(env)
+        assert "VERSION DESYNC" in result
+        assert "pyproject.toml=1.2.4" in result
+
+    def test_duplicate_processing_warning(self, tmp_path):
+        env = _make_health_env(tmp_path)
+        (tmp_path / "logs" / "events.jsonl").write_text(
+            json.dumps({
+                "type": "owner_message_injected",
+                "text": "same message",
+                "task_id": "task-a",
+            }) + "\n",
+            encoding="utf-8",
+        )
+        (tmp_path / "logs" / "supervisor.jsonl").write_text(
+            json.dumps({
+                "event_type": "owner_message_injected",
+                "text": "same message",
+                "task_id": "task-b",
+            }) + "\n",
+            encoding="utf-8",
+        )
+
+        result = build_health_invariants(env)
+        assert "DUPLICATE PROCESSING" in result
+        assert "task-a" in result
+        assert "task-b" in result
+
+    def test_provider_and_overflow_warnings(self, tmp_path):
+        env = _make_health_env(
+            tmp_path,
+            events_lines=[
+                json.dumps({"type": "llm_api_error", "model": "openai/gpt-5.4"}),
+                json.dumps({"type": "local_context_overflow", "model": "local/qwen"}),
+            ],
+        )
+
+        result = build_health_invariants(env)
+        assert "PROVIDER/ROUTING ERRORS" in result
+        assert "openai/gpt-5.4 x1" in result
+        assert "LOCAL CONTEXT OVERFLOW" in result
+        assert "local/qwen x1" in result
+
+    def test_rescue_snapshot_warning(self, tmp_path):
+        env = _make_health_env(tmp_path)
+        rescue_dir = tmp_path / "archive" / "rescue" / "2026-04-14-test"
+        rescue_dir.mkdir(parents=True, exist_ok=True)
+        (rescue_dir / "rescue_meta.json").write_text("{}", encoding="utf-8")
+        (rescue_dir / "changes.diff").write_text("diff", encoding="utf-8")
+
+        result = build_health_invariants(env)
+        assert "RESCUE SNAPSHOT AVAILABLE" in result
+        assert "2026-04-14-test" in result
 
 
 class TestAdvisoryReviewStatusInContext:

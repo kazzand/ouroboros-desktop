@@ -28,6 +28,7 @@ _BACKLOG_PREAMBLE = (
     "Items here are advisory backlog nominations, not auto-started work.\n"
     "Before implementation, run plan_task for non-trivial backlog items."
 )
+_DEFAULT_BACKLOG_TEXT = f"{_BACKLOG_TITLE}\n\n{_BACKLOG_PREAMBLE}\n"
 
 
 def backlog_path(drive_root: Any) -> pathlib.Path:
@@ -58,37 +59,17 @@ def ensure_backlog_file(drive_root: Any) -> pathlib.Path:
         fh.seek(0)
         current = fh.read()
         if not current:
-            fh.write(_default_backlog_text())
+            fh.write(_DEFAULT_BACKLOG_TEXT)
             fh.flush()
     return path
 
 
-def _default_backlog_text() -> str:
-    return f"{_BACKLOG_TITLE}\n\n{_BACKLOG_PREAMBLE}\n"
-
-
-def _normalize_text(value: Any) -> str:
-    return re.sub(r"\s+", " ", str(value or "")).strip()
-
-
 def _stable_fingerprint(summary: str, category: str, source: str) -> str:
-    key = " | ".join([
-        _normalize_text(summary).lower(),
-        _normalize_text(category).lower(),
-        _normalize_text(source).lower(),
-    ])
+    key = " | ".join(
+        re.sub(r"\s+", " ", str(value or "")).strip().lower()
+        for value in (summary, category, source)
+    )
     return hashlib.sha256(key.encode("utf-8")).hexdigest()[:12]
-
-
-def _sanitize_field(value: Any, *, limit: int = 300) -> str:
-    text = _normalize_text(value)
-    if len(text) <= limit:
-        return text
-    return text[:limit] + f"... [+{len(text) - limit} chars]"
-
-
-def _bool_to_yes_no(value: Any) -> str:
-    return "yes" if bool(value) else "no"
 
 
 def _parse_backlog_items(text: str) -> List[Dict[str, str]]:
@@ -125,6 +106,11 @@ def load_backlog_items(drive_root: Any) -> List[Dict[str, str]]:
 def append_backlog_items(drive_root: Any, items: List[Dict[str, Any]]) -> int:
     if not items:
         return 0
+
+    def _sanitize(value: Any, limit: int = 300) -> str:
+        text = re.sub(r"\s+", " ", str(value or "")).strip()
+        return text if len(text) <= limit else text[:limit] + f"... [+{len(text) - limit} chars]"
+
     path = ensure_backlog_file(drive_root)
     with _locked_text_file(path, mode="r+") as fh:
         existing_text = fh.read()
@@ -134,27 +120,27 @@ def append_backlog_items(drive_root: Any, items: List[Dict[str, Any]]) -> int:
         added = 0
 
         for item in items:
-            summary = _sanitize_field(item.get("summary", ""), limit=260)
+            summary = _sanitize(item.get("summary", ""), 260)
             if not summary:
                 continue
-            category = _sanitize_field(item.get("category", "process"), limit=60) or "process"
-            source = _sanitize_field(item.get("source", "task"), limit=60) or "task"
+            category = _sanitize(item.get("category", "process"), 60) or "process"
+            source = _sanitize(item.get("source", "task"), 60) or "task"
             fingerprint = str(item.get("fingerprint") or _stable_fingerprint(summary, category, source))
             if fingerprint in seen:
                 continue
             entry = {
                 "id": str(item.get("id") or f"ibl-{fingerprint}"),
-                "status": _sanitize_field(item.get("status", "open"), limit=40) or "open",
-                "created_at": _sanitize_field(item.get("created_at", utc_now_iso()), limit=40),
+                "status": _sanitize(item.get("status", "open"), 40) or "open",
+                "created_at": _sanitize(item.get("created_at", utc_now_iso()), 40),
                 "source": source,
                 "category": category,
-                "task_id": _sanitize_field(item.get("task_id", ""), limit=80),
-                "requires_plan_review": _bool_to_yes_no(item.get("requires_plan_review", True)),
+                "task_id": _sanitize(item.get("task_id", ""), 80),
+                "requires_plan_review": "yes" if item.get("requires_plan_review", True) else "no",
                 "fingerprint": fingerprint,
                 "summary": summary,
-                "evidence": _sanitize_field(item.get("evidence", ""), limit=260),
-                "context": _sanitize_field(item.get("context", ""), limit=400),
-                "proposed_next_step": _sanitize_field(item.get("proposed_next_step", ""), limit=260),
+                "evidence": _sanitize(item.get("evidence", ""), 260),
+                "context": _sanitize(item.get("context", ""), 400),
+                "proposed_next_step": _sanitize(item.get("proposed_next_step", ""), 260),
             }
             block = [f"### {entry['id']}"]
             for key in (
@@ -179,7 +165,7 @@ def append_backlog_items(drive_root: Any, items: List[Dict[str, Any]]) -> int:
         if not blocks:
             return 0
 
-        current = existing_text.rstrip() or _default_backlog_text().rstrip()
+        current = existing_text.rstrip() or _DEFAULT_BACKLOG_TEXT.rstrip()
         new_text = current + "\n\n" + "\n\n".join(blocks) + "\n"
         fh.seek(0)
         fh.write(new_text)
