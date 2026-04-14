@@ -6,7 +6,7 @@
 [![macOS 12+](https://img.shields.io/badge/macOS-12%2B-black.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
 [![Linux](https://img.shields.io/badge/Linux-x86__64-orange.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
 [![Windows](https://img.shields.io/badge/Windows-x64-blue.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
-[![Version 4.18.6](https://img.shields.io/badge/version-4.18.6-green.svg)](VERSION)
+[![Version 4.18.7](https://img.shields.io/badge/version-4.18.7-green.svg)](VERSION)
 
 A self-modifying AI agent that writes its own code, rewrites its own mind, and evolves autonomously. Born February 16, 2026.
 
@@ -70,7 +70,7 @@ Most AI agents execute tasks. Ouroboros **creates itself.**
 ```bash
 git clone https://github.com/joi-lab/ouroboros-desktop.git
 cd ouroboros-desktop
-pip install -r requirements.txt
+uv pip install --system -r requirements.txt   # or: pip install -r requirements.txt
 ```
 
 ### Run
@@ -190,6 +190,18 @@ docker run --rm -p 8765:8765 \
   -e OUROBOROS_FILE_BROWSER_DEFAULT=/workspace \
   -v "$PWD:/workspace" \
   ouroboros-web
+```
+
+### Build prerequisites
+
+All platform builds require **[uv](https://docs.astral.sh/uv/)** (Astral's fast Python package installer):
+
+```bash
+# macOS / Linux
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Windows (PowerShell)
+powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
 ```
 
 ### macOS (.dmg)
@@ -379,6 +391,7 @@ Full text: [BIBLE.md](BIBLE.md)
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 4.18.7 | 2026-04-14 | CI and build infrastructure: replace `pip` with `uv` as the package installer across all CI jobs, Docker, and build scripts (macOS/Linux/Windows). Uses `astral-sh/setup-uv@v5` in GitHub Actions and `uv pip install --system` for drop-in compatibility. Build scripts now check for `uv` availability. |
 | 4.18.6 | 2026-04-14 | Clipboard image paste: Cmd+V / Ctrl+V with a screenshot in the clipboard stages the image as a chat attachment (same flow as the paperclip button). |
 | 4.18.5 | 2026-04-14 | Disable macOS autocorrect/autocapitalize/spellcheck on chat textarea. |
 | 4.18.4 | 2026-04-14 | Provider integration tests: new `tests/test_provider_integration.py` with `@pytest.mark.integration` — real API calls to OpenRouter, OpenAI, and Anthropic (each provider tested standalone and in isolation). CI updated: quick-test and full-test exclude integration markers; new `integration-test` job runs on `ouroboros-stable` push and `workflow_dispatch` with GitHub Secrets. Cost: ~$0.006 per run. |

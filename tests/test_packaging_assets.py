@@ -102,3 +102,41 @@ def test_build_sh_supports_unsigned_macos_release():
     assert 'OUROBOROS_SIGN' in build_source
     assert 'Skipping signing' in build_source
     assert 'Unsigned DMG:' in build_source
+
+
+def test_build_scripts_use_uv():
+    """Build scripts must use uv instead of pip and check for uv presence."""
+    build_sh = _read("build.sh")
+    assert "uv pip install" in build_sh
+    assert "command -v uv" in build_sh
+    assert "pip install" not in build_sh.replace("uv pip install", "")
+
+    build_linux = _read("build_linux.sh")
+    assert "uv pip install" in build_linux
+    assert "command -v uv" in build_linux
+    assert "pip install" not in build_linux.replace("uv pip install", "")
+
+    build_win = _read("build_windows.ps1")
+    assert "uv pip install" in build_win
+    assert "Get-Command uv" in build_win
+    assert "pip install" not in build_win.replace("uv pip install", "")
+
+
+def test_ci_uses_uv():
+    """CI workflow must use uv via astral-sh/setup-uv action."""
+    ci = _read(".github/workflows/ci.yml")
+    assert "astral-sh/setup-uv" in ci
+    assert "uv pip install" in ci
+    # No bare "pip install" remaining (all should be "uv pip install")
+    import re
+    bare_pip = re.findall(r'(?<!uv )pip install', ci)
+    assert bare_pip == [], f"Found bare 'pip install' in ci.yml: {bare_pip}"
+
+
+def test_dockerfile_uses_uv():
+    """Dockerfile must use uv without pip bootstrap."""
+    dockerfile = _read("Dockerfile")
+    assert "uv pip install" in dockerfile
+    assert "ghcr.io/astral-sh/uv" in dockerfile
+    # Should NOT have "pip install uv" (bootstrapping uv via pip)
+    assert "pip install uv" not in dockerfile.lower()

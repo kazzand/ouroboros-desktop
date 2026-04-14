@@ -12,6 +12,11 @@ DMG_PATH="dist/$DMG_NAME"
 
 echo "=== Building Ouroboros.app ==="
 
+if ! command -v uv >/dev/null 2>&1; then
+    echo "ERROR: uv not found. Install: curl -LsSf https://astral.sh/uv/install.sh | sh"
+    exit 1
+fi
+
 if [ ! -f "python-standalone/bin/python3" ]; then
     echo "ERROR: python-standalone/ not found."
     echo "Run first: bash scripts/download_python_standalone.sh"
@@ -19,10 +24,10 @@ if [ ! -f "python-standalone/bin/python3" ]; then
 fi
 
 echo "--- Installing launcher dependencies ---"
-pip install -q -r requirements-launcher.txt
+uv pip install --python python3 -q -r requirements-launcher.txt
 
 echo "--- Installing agent dependencies into python-standalone ---"
-python-standalone/bin/pip3 install -q -r requirements.txt
+uv pip install --python python-standalone/bin/python3 -q -r requirements.txt
 
 echo "--- Normalizing python-standalone symlinks for PyInstaller ---"
 python3 - <<'PY'

@@ -1,4 +1,4 @@
-# Ouroboros v4.18.6 — Architecture & Reference
+# Ouroboros v4.18.7 — Architecture & Reference
 
 This document describes every component, page, button, API endpoint, and data flow.
 It is the single source of truth for how the system works. Keep it updated.
@@ -1036,7 +1036,8 @@ Uncommitted changes are rescued to `~/Ouroboros/data/archive/rescue/` before res
 
 ## 8.1 CI/CD Pipeline (`.github/workflows/ci.yml`)
 
-Three-tier GitHub Actions workflow:
+Three-tier GitHub Actions workflow. All jobs use `uv` (via `astral-sh/setup-uv@v5`)
+instead of `pip` for faster, more deterministic dependency installation.
 
 | Tier | Trigger | What runs | Time |
 |------|---------|-----------|------|
@@ -1058,15 +1059,17 @@ Tag pushes (`v*`) always fire regardless of paths.
 | `build_linux.sh` | Linux | `dist/Ouroboros-linux-x86_64.tar.gz` |
 | `build_windows.ps1` | Windows | `dist/Ouroboros-windows-x64.zip` |
 
-All three use PyInstaller with `server.py` as entry point. Hidden imports cover
-starlette, uvicorn, websockets, dulwich, huggingface_hub. Data bundles include
-`ouroboros/`, `supervisor/`, `web/`, `prompts/`, `docs/`, `assets/`, `BIBLE.md`,
-`README.md`, `VERSION`, `pyproject.toml`.
+All three require `uv` (Astral) as the package installer and check for its presence
+before proceeding. Dependencies are installed via `uv pip install --python <interpreter>`
+(launcher deps target the build interpreter, agent deps target embedded Python). PyInstaller
+with `server.py` as entry point. Hidden imports cover starlette, uvicorn, websockets,
+dulwich, huggingface_hub. Data bundles include `ouroboros/`, `supervisor/`, `web/`,
+`prompts/`, `docs/`, `assets/`, `BIBLE.md`, `README.md`, `VERSION`, `pyproject.toml`.
 
 ### Docker (`Dockerfile`)
 
 ```
-python:3.10-slim + git → pip install requirements → python server.py
+python:3.10-slim + uv (COPY --from ghcr.io/astral-sh/uv) + git → uv pip install requirements → python server.py
 Binds 0.0.0.0:8765, sets OUROBOROS_FILE_BROWSER_DEFAULT=/app.
 ```
 

@@ -5,6 +5,9 @@
 
 FROM python:3.10-slim
 
+# Copy uv binary from official image (no pip bootstrap needed)
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
+
 # System dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
@@ -14,9 +17,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 ENV APP_HOME=/app
 WORKDIR ${APP_HOME}
 
-# Install Python dependencies
+# Install Python dependencies via uv
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN uv pip install --system --no-cache -r requirements.txt
 
 # Copy application
 COPY . .
