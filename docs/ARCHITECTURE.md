@@ -1,4 +1,4 @@
-# Ouroboros v4.18.7 — Architecture & Reference
+# Ouroboros v4.18.8 — Architecture & Reference
 
 This document describes every component, page, button, API endpoint, and data flow.
 It is the single source of truth for how the system works. Keep it updated.
@@ -1043,8 +1043,8 @@ instead of `pip` for faster, more deterministic dependency installation.
 |------|---------|-----------|------|
 | Quick | Push to `ouroboros` (code paths only) | Ubuntu-only: `pytest` (excludes `@integration`) | ~1 min |
 | Full | Push to `ouroboros-stable`, manual (`workflow_dispatch`), or tag `v*` | Matrix: Ubuntu + Windows + macOS: `pytest` (excludes `@integration`) | ~5 min |
-| Integration | Push to `ouroboros-stable` or manual (`workflow_dispatch`) | Ubuntu-only: real API calls to OpenRouter, OpenAI, Anthropic (requires GitHub Secrets) | ~30 sec |
-| Build | Tag `v*` (after full-test passes) | Matrix: PyInstaller build → `.dmg` / `.tar.gz` / `.zip` + GitHub Release | ~15 min |
+| Integration | Push to `ouroboros-stable`, manual (`workflow_dispatch`), or tag `v*` | Ubuntu-only: real API calls to OpenRouter, OpenAI, Anthropic (requires GitHub Secrets) | ~30 sec |
+| Build | Tag `v*` (after full-test + integration-test pass) | Matrix: PyInstaller build → `.dmg` / `.tar.gz` / `.zip` + GitHub Release | ~15 min |
 
 Path filters for branch pushes: `ouroboros/**`, `supervisor/**`, `server.py`, `tests/**`,
 `web/**`, `requirements.txt`, `pyproject.toml`, `.github/workflows/**`, `build.sh`,

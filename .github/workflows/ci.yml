@@ -82,7 +82,7 @@ jobs:
         run: python -m pytest tests/ -q --tb=short -m "not integration"
 
   # ──────────────────────────────────────────────────────────────────
-  # Tier 2.5: Provider integration tests (stable + manual only)
+  # Tier 2.5: Provider integration tests (stable + manual + tag)
   # Real API calls to OpenRouter, OpenAI, Anthropic.
   # Runs on Ubuntu only — provider APIs are platform-independent.
   # Cost: ~$0.006 per run.
@@ -91,6 +91,7 @@ jobs:
     if: |
       github.ref == 'refs/heads/ouroboros-stable'
       || github.event_name == 'workflow_dispatch'
+      || startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -114,7 +115,7 @@ jobs:
   # ──────────────────────────────────────────────────────────────────
   build:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: full-test
+    needs: [full-test, integration-test]
     strategy:
       fail-fast: false
       matrix:
