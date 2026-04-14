@@ -173,10 +173,6 @@ export function initSettings({ state }) {
         byId('s-effort-scope-review').value = s.OUROBOROS_EFFORT_SCOPE_REVIEW || 'high';
         byId('s-review-enforcement').value = s.OUROBOROS_REVIEW_ENFORCEMENT || 'advisory';
         if (s.OUROBOROS_MAX_WORKERS) byId('s-workers').value = s.OUROBOROS_MAX_WORKERS;
-        if (s.TOTAL_BUDGET) byId('s-budget').value = s.TOTAL_BUDGET;
-        if (s.OUROBOROS_PER_TASK_COST_USD !== null && s.OUROBOROS_PER_TASK_COST_USD !== undefined) {
-            byId('s-per-task-cost').value = s.OUROBOROS_PER_TASK_COST_USD;
-        }
         if (s.OUROBOROS_SOFT_TIMEOUT_SEC) byId('s-soft-timeout').value = s.OUROBOROS_SOFT_TIMEOUT_SEC;
         if (s.OUROBOROS_HARD_TIMEOUT_SEC) byId('s-hard-timeout').value = s.OUROBOROS_HARD_TIMEOUT_SEC;
         if (s.OUROBOROS_TOOL_TIMEOUT_SEC) byId('s-tool-timeout').value = s.OUROBOROS_TOOL_TIMEOUT_SEC;
@@ -226,8 +222,6 @@ export function initSettings({ state }) {
             OUROBOROS_EFFORT_SCOPE_REVIEW: byId('s-effort-scope-review').value,
             OUROBOROS_REVIEW_ENFORCEMENT: byId('s-review-enforcement').value,
             OUROBOROS_MAX_WORKERS: readInt('s-workers', 5),
-            TOTAL_BUDGET: readFloat('s-budget', 10),
-            OUROBOROS_PER_TASK_COST_USD: readFloat('s-per-task-cost', 20),
             OUROBOROS_SOFT_TIMEOUT_SEC: readInt('s-soft-timeout', 600),
             OUROBOROS_HARD_TIMEOUT_SEC: readInt('s-hard-timeout', 1800),
             OUROBOROS_TOOL_TIMEOUT_SEC: readInt('s-tool-timeout', 120),

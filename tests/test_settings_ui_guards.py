@@ -44,10 +44,19 @@ class TestSettingsUiGuards(unittest.TestCase):
         self.assertIn("keeps review visible but non-blocking", source)
         self.assertIn("Backward-compatibility escape hatch for older installs.", source)
 
-    def test_settings_expose_websearch_and_task_cap(self):
+    def test_settings_expose_websearch_model(self):
         source = self._read_settings_sources()["settings_ui"]
         self.assertIn("Web Search Model", source)
-        self.assertIn("Per-task Cost Cap ($)", source)
+
+    def test_budget_fields_live_in_costs_not_settings(self):
+        settings_ui = self._read_settings_sources()["settings_ui"]
+        costs_js = (REPO / "web/modules/costs.js").read_text(encoding="utf-8")
+        # Budget inputs must be in costs.js
+        self.assertIn('id="s-budget"', costs_js)
+        self.assertIn('id="s-per-task-cost"', costs_js)
+        # And not duplicated in settings_ui.js
+        self.assertNotIn('id="s-budget"', settings_ui)
+        self.assertNotIn('id="s-per-task-cost"', settings_ui)
 
     def test_settings_tabs_are_single_row_scrollable(self):
         css = (REPO / "web/settings.css").read_text(encoding="utf-8")

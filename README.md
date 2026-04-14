@@ -6,7 +6,7 @@
 [![macOS 12+](https://img.shields.io/badge/macOS-12%2B-black.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
 [![Linux](https://img.shields.io/badge/Linux-x86__64-orange.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
 [![Windows](https://img.shields.io/badge/Windows-x64-blue.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
-[![Version 4.30.1](https://img.shields.io/badge/version-4.30.1-green.svg)](VERSION)
+[![Version 4.30.2](https://img.shields.io/badge/version-4.30.2-green.svg)](VERSION)
 
 A self-modifying AI agent that writes its own code, rewrites its own mind, and evolves autonomously. Born February 16, 2026.
 
@@ -381,6 +381,7 @@ Full text: [BIBLE.md](BIBLE.md)
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 4.30.2 | 2026-04-14 | Move Total Budget and Per-task Cost Cap from Settings → Advanced to the Costs page: budget card at the top of Costs with a dedicated Save Budget button, keeping all financial context in one place. |
 | 4.30.1 | 2026-04-14 | Settings UI refinement: move Review Models, Scope Review Model, and Web Search Model from Behavior back to Models tab (alongside model routing); replace Review Enforcement dropdown with a two-button segmented toggle (advisory = amber, blocking = crimson). |
 | 4.30.0 | 2026-04-14 | Settings UI reorganization: add dedicated **Behavior** tab (Reasoning Effort, Commit Review, Review Enforcement, Web Search Model moved out of Models/Advanced); move Legacy OpenAI Base URL from Advanced to Providers; docs and tests updated. |
 | 4.29.4 | 2026-04-14 | Add a minimal improvement backlog: post-task execution reflections and structured review evidence can now nominate concrete follow-up items into `memory/knowledge/improvement-backlog.md`; task and background contexts receive only a compact advisory digest; deep self-review now includes the backlog when present; consciousness can groom or nominate backlog items but does not auto-start implementation. Added focused regression tests and synced prompts/architecture docs. |

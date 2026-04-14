@@ -10,6 +10,22 @@ export function initCosts({ ws, state }) {
             <button class="btn btn-default btn-sm" id="btn-refresh-costs">Refresh</button>
         </div>
         <div class="costs-scroll">
+            <div class="costs-budget-card">
+                <h3 class="costs-budget-title">Budget</h3>
+                <div class="costs-budget-fields">
+                    <div class="form-field">
+                        <label>Total Budget ($)</label>
+                        <input id="s-budget" type="number" min="1" value="10">
+                    </div>
+                    <div class="form-field">
+                        <label>Per-task Cost Cap ($)</label>
+                        <input id="s-per-task-cost" type="number" min="1" value="20">
+                        <div class="settings-inline-note">Soft threshold only. When a task crosses it, Ouroboros is asked to wrap up rather than being hard-killed.</div>
+                    </div>
+                </div>
+                <button class="btn btn-save costs-budget-save" id="btn-save-budget">Save Budget</button>
+                <div id="budget-save-status" class="settings-inline-status"></div>
+            </div>
             <div class="costs-stats-grid">
                 <div class="stat-card"><div class="label">Total Spent</div><div class="value" id="cost-total">$0.00</div></div>
                 <div class="stat-card"><div class="label">Total Calls</div><div class="value" id="cost-calls">0</div></div>
@@ -94,10 +110,51 @@ export function initCosts({ ws, state }) {
         } catch {}
     }
 
+    async function loadBudget() {
+        try {
+            const resp = await fetch('/api/settings', { cache: 'no-store' });
+            const s = await resp.json().catch(() => ({}));
+            if (s.TOTAL_BUDGET) document.getElementById('s-budget').value = s.TOTAL_BUDGET;
+            if (s.OUROBOROS_PER_TASK_COST_USD != null) document.getElementById('s-per-task-cost').value = s.OUROBOROS_PER_TASK_COST_USD;
+        } catch {}
+    }
+
     document.getElementById('btn-refresh-costs').addEventListener('click', loadCosts);
 
+    document.getElementById('btn-save-budget').addEventListener('click', async () => {
+        const statusEl = document.getElementById('budget-save-status');
+        const budget = parseFloat(document.getElementById('s-budget').value) || 10;
+        const perTask = parseFloat(document.getElementById('s-per-task-cost').value) || 20;
+        try {
+            const resp = await fetch('/api/settings', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ TOTAL_BUDGET: budget, OUROBOROS_PER_TASK_COST_USD: perTask }),
+            });
+            const data = await resp.json().catch(() => ({}));
+            if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+            let msg;
+            if (data.no_changes) {
+                msg = 'No changes.';
+            } else if (data.restart_required) {
+                msg = 'Saved. Restart required.';
+            } else if (data.immediate_changed && data.next_task_changed) {
+                msg = 'Saved. Budget limit took effect immediately; per-task cap applies on the next task.';
+            } else if (data.immediate_changed) {
+                msg = 'Saved. Took effect immediately.';
+            } else {
+                msg = 'Saved. Applies on the next task.';
+            }
+            if (data.warnings && data.warnings.length) msg += ' ⚠️ ' + data.warnings.join(' | ');
+            statusEl.textContent = msg;
+        } catch (e) {
+            statusEl.textContent = 'Error: ' + e.message;
+        }
+        setTimeout(() => { statusEl.textContent = ''; }, 4000);
+    });
+
     const obs = new MutationObserver(() => {
-        if (page.classList.contains('active')) loadCosts();
+        if (page.classList.contains('active')) { loadCosts(); loadBudget(); }
     });
     obs.observe(page, { attributes: true, attributeFilter: ['class'] });
 }

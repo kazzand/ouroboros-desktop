@@ -1,4 +1,4 @@
-# Ouroboros v4.30.1 — Architecture & Reference
+# Ouroboros v4.30.2 — Architecture & Reference
 
 This document describes every component, page, button, API endpoint, and data flow.
 It is the single source of truth for how the system works. Keep it updated.
@@ -305,7 +305,7 @@ The Dashboard tab has been removed. Its functionality is now distributed:
 - **OpenAI-only review fallback**: if official OpenAI is the only configured remote runtime and the review list is invalid/underspecified, review falls back to the main model repeated three times.
 - **Review Enforcement**: `Advisory` or `Blocking` for pre-commit review behavior. Rendered as a two-button segmented toggle (advisory = amber, blocking = crimson) rather than a dropdown.
   Backed by `OUROBOROS_REVIEW_ENFORCEMENT`. Review always runs in both modes.
-- **Advanced tab**: local model runtime, max workers, total budget, per-task soft threshold, tool timeout, soft/hard timeout, and reset controls.
+- **Advanced tab**: local model runtime, max workers, tool timeout, soft/hard timeout, and reset controls. Total budget and per-task cost cap have moved to the **Costs** page.
 - **Local Model Runtime**: source, GGUF filename, port, GPU layers, context length, chat format, start/stop/test buttons, live local-model status, real download progress bar (updates via `download_progress` from `/api/local-model/status`), and an **Install Local Runtime** button (hidden until runtime is missing). The Start button performs a preflight check via `/api/local-model/start` before downloading; on a `runtime_missing` (HTTP 412) response it surfaces the install button and a human-readable hint instead of a raw traceback. After install completes (`runtime_status == "install_ok"`), the start flow resumes automatically if a source was configured. `LOCAL_MODEL_FILENAME` now accepts subfolder paths (`quant/model.gguf`) and split GGUF patterns (`quant/model-00001-of-00003.gguf`); all shards are downloaded automatically and the server is started with the first shard. If the user omits the subfolder prefix (types just the bare filename), `_resolve_hf_path` auto-resolves the full path by querying `list_repo_files` on the HF repo (fail-open on network errors).
 - **Telegram**: Bot Token and primary chat id. If no primary chat id is pinned, the bridge binds to the first active Telegram chat and keeps replies attached there.
 - **GitHub**: Token + Repo (for remote sync).
@@ -340,7 +340,8 @@ See section 3.8 (Evolution) for the combined page.
 
 ### 3.7 Costs
 
-- **Total Spent / Total Calls / Top Model** stat cards at top.
+- **Budget card** at top of page: Total Budget (`s-budget`) and Per-task Cost Cap (`s-per-task-cost`) inputs with a **Save Budget** button that POSTs directly to `/api/settings`. These fields moved here from Settings → Advanced so the full financial picture lives in one place.
+- **Total Spent / Total Calls / Top Model** stat cards below the budget card.
 - **Breakdown tables**: By Model, By API Key, By Model Category, By Task Category.
   Each row shows name, call count, cost, and a proportional bar.
 - **Refresh** button reloads data from `/api/cost-breakdown`.

@@ -360,21 +360,12 @@ export function renderSettingsPage() {
                     </div>
 
                     <div class="form-section">
-                        <h3>Runtime Budget And Limits</h3>
-                        <div class="settings-section-copy">Workers control parallel task capacity. Budget and timeout values are safety rails for long or stuck tasks and tools.</div>
+                        <h3>Runtime Limits</h3>
+                        <div class="settings-section-copy">Workers control parallel task capacity. Timeout values are safety rails for long or stuck tasks and tools.</div>
                         <div class="form-grid two">
                             <div class="form-field">
                                 <label>Max Workers</label>
                                 <input id="s-workers" type="number" min="1" max="10" value="5">
-                            </div>
-                            <div class="form-field">
-                                <label>Total Budget ($)</label>
-                                <input id="s-budget" type="number" min="1" value="10">
-                            </div>
-                            <div class="form-field">
-                                <label>Per-task Cost Cap ($)</label>
-                                <input id="s-per-task-cost" type="number" min="1" value="20">
-                                <div class="settings-inline-note">Soft threshold only. When a task crosses it, Ouroboros is asked to wrap up rather than being hard-killed.</div>
                             </div>
                             <div class="form-field">
                                 <label>Soft Timeout (s)</label>
