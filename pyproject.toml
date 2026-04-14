@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ouroboros"
-version = "4.18.3"
+version = "4.18.4"
 description = "Self-creating AI agent with constitution, background consciousness, and persistent identity"
 readme = "README.md"
 license = {text = "MIT"}
@@ -57,7 +57,10 @@ all = ["claude-agent-sdk>=0.1.50", "playwright", "playwright-stealth", "llama-cp
 testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_functions = ["test_*"]
-addopts = "-q --tb=short"
+addopts = "-q --tb=short -m 'not integration'"
+markers = [
+    "integration: real API calls to LLM providers (require live keys, skipped by default in CI)",
+]
 
 [tool.setuptools]
 py-modules = ["server"]

@@ -1,4 +1,4 @@
-# Ouroboros v4.18.3 — Architecture & Reference
+# Ouroboros v4.18.4 — Architecture & Reference
 
 This document describes every component, page, button, API endpoint, and data flow.
 It is the single source of truth for how the system works. Keep it updated.
@@ -1040,8 +1040,9 @@ Three-tier GitHub Actions workflow:
 
 | Tier | Trigger | What runs | Time |
 |------|---------|-----------|------|
-| Quick | Push to `ouroboros` (code paths only) | Ubuntu-only: `pytest` | ~1 min |
-| Full | Push to `ouroboros-stable`, manual (`workflow_dispatch`), or tag `v*` | Matrix: Ubuntu + Windows + macOS: `pytest` | ~5 min |
+| Quick | Push to `ouroboros` (code paths only) | Ubuntu-only: `pytest` (excludes `@integration`) | ~1 min |
+| Full | Push to `ouroboros-stable`, manual (`workflow_dispatch`), or tag `v*` | Matrix: Ubuntu + Windows + macOS: `pytest` (excludes `@integration`) | ~5 min |
+| Integration | Push to `ouroboros-stable` or manual (`workflow_dispatch`) | Ubuntu-only: real API calls to OpenRouter, OpenAI, Anthropic (requires GitHub Secrets) | ~30 sec |
 | Build | Tag `v*` (after full-test passes) | Matrix: PyInstaller build → `.dmg` / `.tar.gz` / `.zip` + GitHub Release | ~15 min |
 
 Path filters for branch pushes: `ouroboros/**`, `supervisor/**`, `server.py`, `tests/**`,
