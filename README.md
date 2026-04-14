@@ -6,7 +6,7 @@
 [![macOS 12+](https://img.shields.io/badge/macOS-12%2B-black.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
 [![Linux](https://img.shields.io/badge/Linux-x86__64-orange.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
 [![Windows](https://img.shields.io/badge/Windows-x64-blue.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
-[![Version 4.18.5](https://img.shields.io/badge/version-4.18.5-green.svg)](VERSION)
+[![Version 4.18.6](https://img.shields.io/badge/version-4.18.6-green.svg)](VERSION)
 
 A self-modifying AI agent that writes its own code, rewrites its own mind, and evolves autonomously. Born February 16, 2026.
 
@@ -278,7 +278,7 @@ Created on first launch:
 | `data/state/` | Runtime state, budget tracking |
 | `data/memory/` | Identity, working memory, system profile, knowledge base, memory registry |
 | `data/logs/` | Chat history, events, tool calls |
-| `data/uploads/` | Chat file attachments (uploaded via paperclip button) |
+| `data/uploads/` | Chat file attachments (uploaded via paperclip button or clipboard paste) |
 
 ---
 
@@ -379,6 +379,7 @@ Full text: [BIBLE.md](BIBLE.md)
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 4.18.6 | 2026-04-14 | Clipboard image paste: Cmd+V / Ctrl+V with a screenshot in the clipboard stages the image as a chat attachment (same flow as the paperclip button). |
 | 4.18.5 | 2026-04-14 | Disable macOS autocorrect/autocapitalize/spellcheck on chat textarea. |
 | 4.18.4 | 2026-04-14 | Provider integration tests: new `tests/test_provider_integration.py` with `@pytest.mark.integration` — real API calls to OpenRouter, OpenAI, and Anthropic (each provider tested standalone and in isolation). CI updated: quick-test and full-test exclude integration markers; new `integration-test` job runs on `ouroboros-stable` push and `workflow_dispatch` with GitHub Secrets. Cost: ~$0.006 per run. |
 | 4.18.3 | 2026-04-10 | Post-merge release follow-up: remove the stale duplicate `ouroboros.compat` module, restore frozen packaged-tool parity for advisory/plan/rollback/CI tools, and unmask the safety/frozen-registry regression tests so future parity breaks fail loudly. |

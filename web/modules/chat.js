@@ -1151,6 +1151,42 @@ export function initChat({ ws, state, updateUnreadBadge }) {
         });
     }
 
+    // Paste image from clipboard (Cmd+V / Ctrl+V with screenshot in clipboard)
+    input.addEventListener('paste', (e) => {
+        const items = e.clipboardData?.items;
+        if (!items) return;
+        for (const item of items) {
+            if (item.type.startsWith('image/')) {
+                e.preventDefault();
+                const blob = item.getAsFile();
+                if (!blob) return;
+                // Build a friendly filename: "clipboard-2026-04-14_18-30-05.png"
+                const now = new Date();
+                const ts = now.toISOString().replace(/[:.]/g, '-').slice(0, 19);
+                const ext = blob.type.split('/')[1] || 'png';
+                const file = new File([blob], `clipboard-${ts}.${ext}`, { type: blob.type });
+                pendingAttachment = { file, display_name: file.name };
+                attachmentPreview.classList.add('visible');
+                attachmentPreview.innerHTML = `
+                    <span class="attach-badge">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><polyline points="13 2 13 9 20 9"/></svg>
+                        <span class="attach-name">${escapeHtml(file.name)}</span>
+                        <button class="attach-remove" type="button" title="Remove">×</button>
+                    </span>
+                `;
+                requestAnimationFrame(() => updateMessagesPadding());
+                attachmentPreview.querySelector('.attach-remove').addEventListener('click', () => {
+                    pendingAttachment = null;
+                    attachmentPreview.classList.remove('visible');
+                    attachmentPreview.innerHTML = '';
+                    requestAnimationFrame(() => updateMessagesPadding());
+                });
+                return;  // consume the first image item
+            }
+        }
+        // Non-image paste (text) falls through to default browser behavior
+    });
+
     sendBtn.addEventListener('click', sendMessage);
     input.addEventListener('keydown', (e) => {
         if (e.key === 'Enter' && !e.shiftKey) {

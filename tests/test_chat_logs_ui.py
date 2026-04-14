@@ -578,6 +578,47 @@ def test_update_live_card_no_forcecard_for_completed():
         "updateLiveCardFromProgressMessage must not force-open cards for already-completed tasks"
 
 
+def test_clipboard_image_paste_handler():
+    """Regression: chat textarea must have a paste handler that stages clipboard images."""
+    source = _read("web/modules/chat.js")
+
+    # paste event listener must exist on the input
+    assert "input.addEventListener('paste'" in source, \
+        "chat textarea must have a paste event listener"
+
+    # Must check for image items in clipboardData
+    assert "item.type.startsWith('image/')" in source, \
+        "paste handler must detect image/* clipboard items"
+
+    # Must call getAsFile() to get the blob
+    assert "item.getAsFile()" in source, \
+        "paste handler must call getAsFile() on the clipboard item"
+
+    # Must create a File with a clipboard-timestamp name
+    assert "clipboard-" in source, \
+        "paste handler must generate a clipboard-<timestamp> filename"
+
+    # Must set pendingAttachment (same flow as paperclip)
+    paste_start = source.index("input.addEventListener('paste'")
+    paste_end = source.index("// Non-image paste", paste_start)
+    paste_body = source[paste_start:paste_end]
+    assert "pendingAttachment = " in paste_body, \
+        "paste handler must set pendingAttachment"
+    assert "attachmentPreview.classList.add('visible')" in paste_body, \
+        "paste handler must show the attachment preview badge"
+    assert "attach-remove" in paste_body, \
+        "paste handler must include a remove button in the preview badge"
+
+    # Must call e.preventDefault() to suppress default paste for images
+    assert "e.preventDefault();" in paste_body, \
+        "paste handler must call preventDefault for image paste"
+
+    # Non-image paste must fall through (no preventDefault for text)
+    # Verify the comment indicating this intentional design
+    assert "Non-image paste" in source, \
+        "paste handler must have a comment about non-image paste falling through"
+
+
 def test_live_card_timeline_css_scrollable():
     """Expanded chat live timeline must be scrollable with a max-height."""
     import re
