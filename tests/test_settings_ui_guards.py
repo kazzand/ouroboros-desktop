@@ -36,7 +36,7 @@ class TestSettingsUiGuards(unittest.TestCase):
     def test_models_section_explains_local_switching(self):
         source = self._read_settings_sources()["settings_ui"]
         self.assertIn("These fields are cloud model IDs.", source)
-        self.assertIn("through the GGUF server configured above.", source)
+        self.assertIn("through the GGUF server configured in Advanced.", source)
 
     def test_strange_settings_have_inline_explainer_copy(self):
         source = self._read_settings_sources()["settings_ui"]
@@ -44,7 +44,7 @@ class TestSettingsUiGuards(unittest.TestCase):
         self.assertIn("keeps review visible but flexible", source)
         self.assertIn("Backward-compatibility escape hatch for older installs.", source)
 
-    def test_advanced_settings_expose_websearch_and_task_cap(self):
+    def test_settings_expose_websearch_and_task_cap(self):
         source = self._read_settings_sources()["settings_ui"]
         self.assertIn("Web Search Model", source)
         self.assertIn("Per-task Cost Cap ($)", source)
@@ -58,6 +58,26 @@ class TestSettingsUiGuards(unittest.TestCase):
         source = self._read_settings_sources()["settings_ui"]
         self.assertNotIn('data-settings-tab="runtime"', source)
         self.assertIn('data-settings-tab="advanced"', source)
+
+    def test_behavior_tab_exists_and_contains_review_and_effort(self):
+        source = self._read_settings_sources()["settings_ui"]
+        self.assertIn('data-settings-tab="behavior"', source)
+        self.assertIn('data-settings-panel="behavior"', source)
+        # Reasoning Effort and Commit Review live in Behavior, not Models.
+        # effortField() uses template literals so check for the call arg pattern,
+        # not the rendered id="" attribute.
+        behavior_section = source.split('data-settings-panel="behavior"')[1].split('data-settings-panel=')[0]
+        self.assertIn("id: 's-effort-task'", behavior_section)
+        self.assertIn('id="s-review-models"', behavior_section)
+        self.assertIn('id="s-review-enforcement"', behavior_section)
+        self.assertIn('id="s-websearch-model"', behavior_section)
+
+    def test_legacy_base_url_is_in_providers_not_advanced(self):
+        source = self._read_settings_sources()["settings_ui"]
+        providers_section = source.split('data-settings-panel="providers"')[1].split('data-settings-panel=')[0]
+        advanced_section = source.split('data-settings-panel="advanced"')[1].split('data-settings-panel=')[0]
+        self.assertIn('id="s-openai-base-url"', providers_section)
+        self.assertNotIn('id="s-openai-base-url"', advanced_section)
 
     def test_save_reloads_settings_after_success(self):
         source = self._read_settings_sources()["settings"]

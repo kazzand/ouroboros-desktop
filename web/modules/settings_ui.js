@@ -77,6 +77,7 @@ export function renderSettingsPage() {
                 <div class="settings-tabs">
                     <button class="settings-tab active" data-settings-tab="providers">Providers</button>
                     <button class="settings-tab" data-settings-tab="models">Models</button>
+                    <button class="settings-tab" data-settings-tab="behavior">Behavior</button>
                     <button class="settings-tab" data-settings-tab="integrations">Integrations</button>
                     <button class="settings-tab" data-settings-tab="advanced">Advanced</button>
                 </div>
@@ -178,6 +179,16 @@ export function renderSettingsPage() {
                         `,
                     })}
                     <div class="form-section compact">
+                        <h3>Legacy Compatibility</h3>
+                        <div class="form-row">
+                            <div class="form-field">
+                                <label>Legacy OpenAI Base URL</label>
+                                <input id="s-openai-base-url" placeholder="https://api.openai.com/v1 or compatible endpoint">
+                            </div>
+                        </div>
+                        <div class="settings-inline-note">Backward-compatibility escape hatch for older installs. For new custom providers, use the dedicated <code>OpenAI Compatible</code> card instead.</div>
+                    </div>
+                    <div class="form-section compact">
                         <h3>Network Gate</h3>
                         <div class="form-row">${secretField({
                             id: 's-network-password',
@@ -194,7 +205,7 @@ export function renderSettingsPage() {
                         <h3>Model Routing</h3>
                         <div class="settings-section-copy">
                             These fields are cloud model IDs. Enable <code>Local</code> to route that model
-                            through the GGUF server configured above.
+                            through the GGUF server configured in Advanced.
                         </div>
                         <div class="settings-toolbar">
                             <button type="button" class="settings-ghost-btn" id="btn-refresh-model-catalog">Refresh Model Catalog</button>
@@ -210,13 +221,16 @@ export function renderSettingsPage() {
                             <div class="form-field">
                                 <label>Claude Code Model</label>
                                 <input id="s-claude-code-model" value="opus" placeholder="sonnet, opus, or full name">
+                                <div class="settings-inline-note">Anthropic model for <code>claude_code_edit</code> and <code>advisory_pre_review</code> tools. Requires Anthropic key in Providers.</div>
                             </div>
                         </div>
                     </div>
+                </section>
 
+                <section class="settings-panel" data-settings-panel="behavior">
                     <div class="form-section">
                         <h3>Reasoning Effort</h3>
-                        <div class="settings-section-copy">Per-task-type reasoning effort. Controls how deeply the model thinks before responding.</div>
+                        <div class="settings-section-copy">Controls how deeply the model thinks per task type. Higher effort = slower but more thorough.</div>
                         <div class="settings-effort-grid">
                             ${effortField({ id: 's-effort-task', label: 'Task / Chat', defaultValue: 'medium' })}
                             ${effortField({ id: 's-effort-evolution', label: 'Evolution', defaultValue: 'high' })}
@@ -227,21 +241,37 @@ export function renderSettingsPage() {
 
                     <div class="form-section">
                         <h3>Commit Review</h3>
+                        <div class="settings-section-copy">Multi-model pre-commit review gate. Runs automatically on every <code>repo_commit</code>.</div>
                         <div class="form-row">
                             <div class="form-field">
                                 <label>Pre-commit Review Models</label>
                                 <input id="s-review-models" placeholder="model1,model2,model3">
-                                <div class="settings-inline-note">Comma-separated review models. In direct-provider-only mode, review automatically falls back to repeated runs of the current main model when this list still points elsewhere.</div>
+                                <div class="settings-inline-note">Comma-separated review models (triad). In direct-provider-only mode, review automatically falls back to repeated runs of the current main model when this list still points elsewhere.</div>
                             </div>
                         </div>
                         <div class="form-grid two">
                             <div class="form-field">
                                 <label>Scope Review Model</label>
                                 <input id="s-scope-review-model" placeholder="anthropic/claude-opus-4.6">
-                                <div class="settings-inline-note">Single model for the blocking scope reviewer. Runs after the triad diff review.</div>
+                                <div class="settings-inline-note">Single model for the blocking scope reviewer. Runs in parallel with the triad diff review.</div>
                             </div>
                             <div class="form-field">
                                 ${effortField({ id: 's-effort-scope-review', label: 'Scope Review Effort', defaultValue: 'high' })}
+                            </div>
+                        </div>
+                        <div class="form-grid two">
+                            <div class="form-field">
+                                <label>Review Enforcement</label>
+                                <select id="s-review-enforcement">
+                                    <option value="advisory">Advisory</option>
+                                    <option value="blocking">Blocking</option>
+                                </select>
+                                <div class="settings-inline-note"><code>Advisory</code> keeps review visible but flexible. <code>Blocking</code> stops commits when critical findings remain unresolved.</div>
+                            </div>
+                            <div class="form-field">
+                                <label>Web Search Model</label>
+                                <input id="s-websearch-model" placeholder="gpt-5.2">
+                                <div class="settings-inline-note">OpenAI model for <code>web_search</code>. Requires <code>OPENAI_API_KEY</code> and an empty Legacy Base URL.</div>
                             </div>
                         </div>
                     </div>
@@ -358,36 +388,6 @@ export function renderSettingsPage() {
                                 <input id="s-tool-timeout" type="number" value="120">
                             </div>
                         </div>
-                    </div>
-
-                    <div class="form-section">
-                        <h3>Research And Review</h3>
-                        <div class="form-grid two">
-                            <div class="form-field">
-                                <label>Web Search Model</label>
-                                <input id="s-websearch-model" placeholder="gpt-5.2">
-                                <div class="settings-inline-note">OpenAI model used by <code>web_search</code> when the official OpenAI Responses API is configured. This requires <code>OPENAI_API_KEY</code> and an empty <code>OPENAI_BASE_URL</code>.</div>
-                            </div>
-                            <div class="form-field">
-                                <label>Review Enforcement</label>
-                                <select id="s-review-enforcement">
-                                    <option value="advisory">Advisory</option>
-                                    <option value="blocking">Blocking</option>
-                                </select>
-                                <div class="settings-inline-note"><code>Advisory</code> keeps review visible but flexible. <code>Blocking</code> stops commits when critical review findings remain unresolved.</div>
-                            </div>
-                        </div>
-                    </div>
-
-                    <div class="form-section">
-                        <h3>Legacy Compatibility</h3>
-                        <div class="form-row">
-                            <div class="form-field">
-                                <label>Legacy OpenAI Base URL</label>
-                                <input id="s-openai-base-url" placeholder="https://api.openai.com/v1 or compatible endpoint">
-                            </div>
-                        </div>
-                        <div class="settings-inline-note">Backward-compatibility escape hatch for older installs. For new custom providers, use the dedicated <code>OpenAI Compatible</code> card instead.</div>
                     </div>
 
                     <div class="form-section danger">

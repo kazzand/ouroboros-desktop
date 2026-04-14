@@ -1,4 +1,4 @@
-# Ouroboros v4.29.4 — Architecture & Reference
+# Ouroboros v4.30.0 — Architecture & Reference
 
 This document describes every component, page, button, API endpoint, and data flow.
 It is the single source of truth for how the system works. Keep it updated.
@@ -277,13 +277,14 @@ The Dashboard tab has been removed. Its functionality is now distributed:
 
 ### 3.4 Settings
 
-- **Tabbed layout**: `Providers`, `Models`, `Integrations`, `Advanced`.
+- **Tabbed layout**: `Providers`, `Models`, `Behavior`, `Integrations`, `Advanced`.
 - **Provider cards**: OpenRouter, OpenAI, OpenAI-compatible, Cloud.ru, Anthropic, plus optional Network Password. Cards are collapsible and use masked-secret inputs with show/hide toggles.
 - **API Keys**: OpenRouter, OpenAI, OpenAI-compatible, Cloud.ru, Anthropic, Telegram Bot Token, GitHub Token, and Network Password.
   Keys are displayed as masked values (e.g., `sk-or-v1...`), can be explicitly cleared, and are only overwritten on save if the user enters a new value (not containing `...`).
 - **Claude Runtime Status**: when Anthropic is configured, the Anthropic card shows app-managed Claude runtime status with `Repair Runtime` action.
   The Claude runtime (SDK + bundled CLI) powers delegated code editing and advisory review and is managed automatically by the app.
-- **Models**: Main, Code, Light, Fallback.
+- **Providers tab**: also contains `Legacy OpenAI Base URL` (backward-compatibility escape hatch for older installs) and `Network Gate` (optional non-localhost password) at the bottom.
+- **Models tab**: Main, Code, Light, Fallback model routing. Each card has a `Local` toggle to route through the GGUF server configured in Advanced. `Claude Code Model` field selects the Anthropic model for `claude_code_edit` / `advisory_pre_review`.
 - **Model catalog**: optional `Refresh Model Catalog` action calls `/api/model-catalog`. Failures are non-fatal and surfaced as inline warnings.
 - **Model pickers**: searchable provider-aware pickers replace legacy raw dropdowns for remote models.
 - **Provider prefixes**:
@@ -292,6 +293,7 @@ The Dashboard tab has been removed. Its functionality is now distributed:
   - OpenAI-compatible model values use `openai-compatible::...`.
   - Cloud.ru model values use `cloudru::...`.
   - Anthropic model values use `anthropic::...` (e.g. `anthropic::claude-opus-4.6`).
+- **Behavior tab**: agent-behavior policy settings — Reasoning Effort, Commit Review, Review Enforcement, and Web Search Model.
 - **Reasoning Effort**: Five segmented controls for task/chat, evolution, review, scope review, and consciousness.
   Backed by `OUROBOROS_EFFORT_TASK`, `OUROBOROS_EFFORT_EVOLUTION`, `OUROBOROS_EFFORT_REVIEW`,
   `OUROBOROS_EFFORT_SCOPE_REVIEW`, `OUROBOROS_EFFORT_CONSCIOUSNESS`. Loading falls back to legacy
@@ -303,7 +305,7 @@ The Dashboard tab has been removed. Its functionality is now distributed:
 - **OpenAI-only review fallback**: if official OpenAI is the only configured remote runtime and the review list is invalid/underspecified, review falls back to the main model repeated three times.
 - **Review Enforcement**: `Advisory` or `Blocking` for pre-commit review behavior.
   Backed by `OUROBOROS_REVIEW_ENFORCEMENT`. Review always runs in both modes.
-- **Advanced**: local model runtime, max workers, total budget, per-task soft threshold, tool timeout, soft/hard timeout, web search model, review enforcement, legacy compatibility, and reset controls.
+- **Advanced tab**: local model runtime, max workers, total budget, per-task soft threshold, tool timeout, soft/hard timeout, and reset controls.
 - **Local Model Runtime**: source, GGUF filename, port, GPU layers, context length, chat format, start/stop/test buttons, live local-model status, real download progress bar (updates via `download_progress` from `/api/local-model/status`), and an **Install Local Runtime** button (hidden until runtime is missing). The Start button performs a preflight check via `/api/local-model/start` before downloading; on a `runtime_missing` (HTTP 412) response it surfaces the install button and a human-readable hint instead of a raw traceback. After install completes (`runtime_status == "install_ok"`), the start flow resumes automatically if a source was configured. `LOCAL_MODEL_FILENAME` now accepts subfolder paths (`quant/model.gguf`) and split GGUF patterns (`quant/model-00001-of-00003.gguf`); all shards are downloaded automatically and the server is started with the first shard. If the user omits the subfolder prefix (types just the bare filename), `_resolve_hf_path` auto-resolves the full path by querying `list_repo_files` on the HF repo (fail-open on network errors).
 - **Telegram**: Bot Token and primary chat id. If no primary chat id is pinned, the bridge binds to the first active Telegram chat and keeps replies attached there.
 - **GitHub**: Token + Repo (for remote sync).
