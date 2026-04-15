@@ -805,7 +805,7 @@ def acquire_review_state_lock(
             except Exception:
                 log.debug("Failed to write review-state lock metadata", exc_info=True)
             return fd
-        except FileExistsError:
+        except (FileExistsError, PermissionError):
             try:
                 age = time.time() - lock_path.stat().st_mtime
                 if age > stale_sec:

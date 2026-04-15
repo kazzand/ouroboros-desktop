@@ -1182,6 +1182,42 @@ def test_update_state_serializes_concurrent_writers(tmp_path):
     assert not (tmp_path / "locks" / "advisory_review.lock").exists()
 
 
+def test_acquire_review_state_lock_retries_permission_error_contention(tmp_path, monkeypatch):
+    """Windows may raise PermissionError instead of FileExistsError for held O_EXCL locks."""
+    import os as _os
+
+    from ouroboros.review_state import acquire_review_state_lock, release_review_state_lock
+
+    lock_path = tmp_path / "locks" / "advisory_review.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path.write_text("held", encoding="utf-8")
+
+    real_open = _os.open
+    attempts = {"count": 0}
+
+    def fake_open(path, flags, mode=0o777):
+        if pathlib.Path(path) == lock_path and attempts["count"] == 0:
+            attempts["count"] += 1
+            raise PermissionError(13, "Permission denied", str(path))
+        return real_open(path, flags, mode)
+
+    def fake_sleep(_seconds: float) -> None:
+        if lock_path.exists():
+            lock_path.unlink()
+
+    monkeypatch.setattr("ouroboros.review_state.os.open", fake_open)
+    monkeypatch.setattr("ouroboros.review_state.time.sleep", fake_sleep)
+
+    lock_fd = acquire_review_state_lock(tmp_path, timeout_sec=0.5, stale_sec=90.0)
+    assert lock_fd is not None
+    try:
+        assert lock_path.exists()
+    finally:
+        release_review_state_lock(tmp_path, lock_fd)
+    assert attempts["count"] == 1
+    assert not lock_path.exists()
+
+
 # ---------------------------------------------------------------------------
 # 11. Startup reconciliation of stale 'reviewing' state
 # ---------------------------------------------------------------------------
