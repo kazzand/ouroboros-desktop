@@ -40,6 +40,9 @@ TARGET_FUNCTION_LINES = 150
 MAX_FUNCTION_LINES = 250
 MAX_TOTAL_FUNCTIONS = 1110  # raised in v4.31.0: +6 PR integration tools
 GRANDFATHERED_OVERSIZED_MODULES = {"llm.py"}
+# Immutable bundle-only entrypoints ship with release artifacts but should not
+# count against the self-editable codebase function budget.
+FUNCTION_COUNT_EXCLUDED_FILES = {"launcher.py"}
 
 
 # ---------------------------------------------------------------------------
@@ -62,6 +65,8 @@ def compute_complexity_metrics(sections: List[Tuple[str, str]]) -> Dict[str, Any
         file_sizes.append((path, line_count))
 
         if not path.endswith(".py"):
+            continue
+        if pathlib.Path(path).name in FUNCTION_COUNT_EXCLUDED_FILES:
             continue
         py_files += 1
 

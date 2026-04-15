@@ -440,6 +440,8 @@ _SKIP_DIRS = {'.git', '__pycache__', 'tests', 'python-standalone', 'build', 'dis
 
 def _get_function_sizes():
     """Return list of (file, func_name, lines) for all functions."""
+    from ouroboros.review import FUNCTION_COUNT_EXCLUDED_FILES
+
     results = []
     for root, dirs, files in os.walk(REPO):
         dirs[:] = [d for d in dirs if d not in _SKIP_DIRS]
@@ -447,6 +449,8 @@ def _get_function_sizes():
             if not f.endswith(".py"):
                 continue
             if f in ("app.py", "demo_app.py"):
+                continue
+            if f in FUNCTION_COUNT_EXCLUDED_FILES:
                 continue
             path = pathlib.Path(root) / f
             try:
