@@ -26,14 +26,25 @@ if sys.platform == "win32":
             if len(_candidates) > 5:
                 break
 
+    def _unblock_file(_path: str) -> None:
+        try:
+            os.remove(f"{_path}:Zone.Identifier")
+        except OSError:
+            pass
+
+    def _unblock_tree(_root: str) -> None:
+        if not os.path.isdir(_root):
+            return
+        for _dirpath, _dirnames, _filenames in os.walk(_root):
+            for _filename in _filenames:
+                if os.path.splitext(_filename)[1].lower() in {".dll", ".exe", ".pyd"}:
+                    _unblock_file(os.path.join(_dirpath, _filename))
+
     _selected_pydll = None
     for _path in _candidates:
         if os.path.isfile(_path):
             os.environ["PYTHONNET_PYDLL"] = _path
-            try:
-                os.remove(f"{_path}:Zone.Identifier")
-            except OSError:
-                pass
+            _unblock_file(_path)
             _selected_pydll = _path
             break
 
@@ -44,27 +55,9 @@ if sys.platform == "win32":
                 _runtime_dll = os.path.join(_root, "Python.Runtime.dll")
                 break
     if os.path.isfile(_runtime_dll):
-        try:
-            os.remove(f"{_runtime_dll}:Zone.Identifier")
-        except OSError:
-            pass
-        _runtime_root = os.path.dirname(_runtime_dll)
-        if os.path.isdir(_runtime_root):
-            for _dirpath, _dirnames, _filenames in os.walk(_runtime_root):
-                for _filename in _filenames:
-                    if os.path.splitext(_filename)[1].lower() in {".dll", ".exe", ".pyd"}:
-                        try:
-                            os.remove(f"{os.path.join(_dirpath, _filename)}:Zone.Identifier")
-                        except OSError:
-                            pass
-    if os.path.isdir(_webview_lib_dir):
-        for _dirpath, _dirnames, _filenames in os.walk(_webview_lib_dir):
-            for _filename in _filenames:
-                if os.path.splitext(_filename)[1].lower() in {".dll", ".exe", ".pyd"}:
-                    try:
-                        os.remove(f"{os.path.join(_dirpath, _filename)}:Zone.Identifier")
-                    except OSError:
-                        pass
+        _unblock_file(_runtime_dll)
+        _unblock_tree(os.path.dirname(_runtime_dll))
+    _unblock_tree(_webview_lib_dir)
 
     _search_dirs = []
     for _path in (
