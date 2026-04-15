@@ -6,7 +6,7 @@
 [![macOS 12+](https://img.shields.io/badge/macOS-12%2B-black.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
 [![Linux](https://img.shields.io/badge/Linux-x86__64-orange.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
 [![Windows](https://img.shields.io/badge/Windows-x64-blue.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
-[![Version 4.30.2](https://img.shields.io/badge/version-4.30.2-green.svg)](VERSION)
+[![Version 4.31.0](https://img.shields.io/badge/version-4.31.0-green.svg)](VERSION)
 
 A self-modifying AI agent that writes its own code, rewrites its own mind, and evolves autonomously. Born February 16, 2026.
 
@@ -65,6 +65,7 @@ Most AI agents execute tasks. Ouroboros **creates itself.**
 - Python 3.10+
 - macOS, Linux, or Windows
 - Git
+- [GitHub CLI (`gh`)](https://cli.github.com/) — required for GitHub API tools (`list_github_prs`, `get_github_pr`, `comment_on_pr`, issue tools). Not required for pure-git PR tools (`fetch_pr_ref`, `cherry_pick_pr_commits`, etc.)
 
 ### Setup
 
@@ -381,6 +382,7 @@ Full text: [BIBLE.md](BIBLE.md)
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 4.31.0 | 2026-04-14 | Add PR integration toolset (non-core, activate via `enable_tools`): `list_github_prs`, `get_github_pr` (with diff/patch, changed files, review comments), `comment_on_pr` in `github.py`; `fetch_pr_ref`, `create_integration_branch`, `cherry_pick_pr_commits`, `stage_adaptations`, `stage_pr_merge` in new `git_pr.py`. Attribution-preserving design: `cherry_pick_pr_commits` uses `git cherry-pick --no-edit` (real authored commits, original author/date preserved for GitHub contribution graph; GIT_COMMITTER_* set explicitly from repo config); `stage_adaptations` stages Ouroboros adaptation changes without committing (all commits route through advisory_pre_review + repo_commit, BIBLE P8 compliant); `stage_pr_merge` uses `git merge --no-ff --no-commit` (sets MERGE_HEAD for proper two-parent merge commit via `repo_commit`); `_gh_cmd` injects GH_TOKEN via env (no `gh auth login`). Raise `MAX_TOTAL_FUNCTIONS` 1100 → 1110. **Frozen-build note:** `github.py` PR tools (`list_github_prs`, `get_github_pr`, `comment_on_pr`) work in packaged builds; `git_pr.py` integration tools are source/dev-only until the next bundled registry update. |
 | 4.30.2 | 2026-04-14 | Move Total Budget and Per-task Cost Cap from Settings → Advanced to the Costs page: budget card at the top of Costs with a dedicated Save Budget button, keeping all financial context in one place. |
 | 4.30.1 | 2026-04-14 | Settings UI refinement: move Review Models, Scope Review Model, and Web Search Model from Behavior back to Models tab (alongside model routing); replace Review Enforcement dropdown with a two-button segmented toggle (advisory = amber, blocking = crimson). |
 | 4.30.0 | 2026-04-14 | Settings UI reorganization: add dedicated **Behavior** tab (Reasoning Effort, Commit Review, Review Enforcement, Web Search Model moved out of Models/Advanced); move Legacy OpenAI Base URL from Advanced to Providers; docs and tests updated. |

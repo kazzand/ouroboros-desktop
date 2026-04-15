@@ -6,7 +6,7 @@ import json
 import logging
 import os
 import subprocess
-from typing import Any, Dict, List, Optional
+from typing import List, Optional
 
 from ouroboros.tools.registry import ToolContext, ToolEntry
 from ouroboros.utils import truncate_review_artifact as _truncate_with_notice
@@ -17,8 +17,37 @@ log = logging.getLogger(__name__)
 # Helpers
 # ---------------------------------------------------------------------------
 
+def _gh_env(ctx: ToolContext) -> dict:
+    """Build env for gh CLI: inject GITHUB_TOKEN / GH_TOKEN without gh auth login.
+
+    gh CLI reads GH_TOKEN (or GITHUB_TOKEN) directly from the environment.
+    We pull from (in priority order):
+      1. GITHUB_TOKEN already in os.environ (set by apply_settings_to_env)
+      2. load_settings() — same pattern as ci.py::_get_github_config()
+    This avoids any interactive `gh auth login` and works in packaged mode.
+    ToolContext has no .settings field; load_settings() is the correct path.
+    """
+    from ouroboros.config import load_settings
+    env = os.environ.copy()
+    token = env.get("GITHUB_TOKEN") or env.get("GH_TOKEN") or ""
+    if not token:
+        try:
+            settings = load_settings()
+            token = settings.get("GITHUB_TOKEN", "")
+        except Exception:
+            pass
+    if token:
+        env["GH_TOKEN"] = token
+        env["GITHUB_TOKEN"] = token
+    return env
+
+
 def _gh_cmd(args: List[str], ctx: ToolContext, timeout: int = 30, input_data: Optional[str] = None) -> str:
-    """Run `gh` CLI command and return stdout or error string."""
+    """Run `gh` CLI command and return stdout or error string.
+
+    Token is injected via GH_TOKEN env var (no `gh auth login` required).
+    Works in packaged/frozen mode as long as GITHUB_TOKEN is in settings.
+    """
     cmd = ["gh"] + args
     try:
         res = subprocess.run(
@@ -28,6 +57,7 @@ def _gh_cmd(args: List[str], ctx: ToolContext, timeout: int = 30, input_data: Op
             text=True,
             timeout=timeout,
             input=input_data,
+            env=_gh_env(ctx),
         )
         if res.returncode != 0:
             err = (res.stderr or "").strip()
@@ -35,30 +65,11 @@ def _gh_cmd(args: List[str], ctx: ToolContext, timeout: int = 30, input_data: Op
             return f"⚠️ GH_ERROR: {err.split(chr(10))[0][:200]}"
         return res.stdout.strip()
     except FileNotFoundError:
-        return "⚠️ GH_ERROR: `gh` CLI not found."
+        return "⚠️ GH_ERROR: `gh` CLI not found. Install GitHub CLI and ensure it is on PATH (https://cli.github.com/)"
     except subprocess.TimeoutExpired:
         return f"⚠️ GH_TIMEOUT: exceeded {timeout}s."
     except Exception as e:
         return f"⚠️ GH_ERROR: {e}"
-
-
-def _get_repo_slug(ctx: ToolContext) -> str:
-    """Get 'owner/repo' from git remote."""
-    try:
-        res = subprocess.run(
-            ["gh", "repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"],
-            cwd=str(ctx.repo_dir),
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        if res.returncode == 0 and res.stdout.strip():
-            return res.stdout.strip()
-    except Exception:
-        log.debug("Failed to get repo slug from gh", exc_info=True)
-    user = os.environ.get("GITHUB_USER", "")
-    repo = os.environ.get("GITHUB_REPO", "")
-    return f"{user}/{repo}"
 
 
 # ---------------------------------------------------------------------------
@@ -184,6 +195,185 @@ def _close_issue(ctx: ToolContext, number: int, comment: str = "") -> str:
     return f"✅ Issue #{number} closed."
 
 
+# ---------------------------------------------------------------------------
+# Pull request tools
+# ---------------------------------------------------------------------------
+
+def _list_prs(ctx: ToolContext, state: str = "open", limit: int = 20) -> str:
+    """List GitHub pull requests."""
+    args = [
+        "pr", "list",
+        "--state", state,
+        "--limit", str(min(limit, 50)),
+        "--json", "number,title,author,headRefName,baseRefName,createdAt,isDraft,reviewDecision,commits",
+    ]
+    raw = _gh_cmd(args, ctx)
+    if raw.startswith("⚠️"):
+        return raw
+
+    try:
+        prs = json.loads(raw)
+    except json.JSONDecodeError:
+        return f"⚠️ Failed to parse PRs JSON: {raw[:500]}"
+
+    if not prs:
+        return f"No {state} pull requests found."
+
+    lines = [f"**{len(prs)} {state} PR(s):**\n"]
+    for pr in prs:
+        author = pr.get("author", {}).get("login", "unknown")
+        head = pr.get("headRefName", "?")
+        base = pr.get("baseRefName", "?")
+        draft = " [DRAFT]" if pr.get("isDraft") else ""
+        review = pr.get("reviewDecision") or ""
+        review_str = f" [{review}]" if review else ""
+        n_commits = len(pr.get("commits", []))
+        lines.append(
+            f"- **PR #{pr['number']}**{draft}{review_str} {pr['title']}"
+            f" (by @{author}, {head}→{base}, {n_commits} commits, created {pr['createdAt'][:10]})"
+        )
+
+    return "\n".join(lines)
+
+
+def _get_pr(ctx: ToolContext, number: int) -> str:
+    """Get full details of a pull request.
+
+    Returns: metadata, description, commits with original author names/emails,
+    list of changed files, review comments summary, and integration instructions.
+    Use this before fetch_pr_ref to understand what the PR changes.
+    """
+    if number <= 0:
+        return "⚠️ PR number must be positive."
+
+    # 1. PR metadata + commits
+    meta_args = [
+        "pr", "view", str(number),
+        "--json", "number,title,body,author,headRefName,baseRefName,headRepository,"
+                  "createdAt,updatedAt,state,isDraft,reviewDecision,mergeable,"
+                  "additions,deletions,changedFiles,commits,reviews,comments",
+    ]
+    raw = _gh_cmd(meta_args, ctx, timeout=30)
+    if raw.startswith("⚠️"):
+        return raw
+
+    try:
+        pr = json.loads(raw)
+    except json.JSONDecodeError:
+        return f"⚠️ Failed to parse PR JSON: {raw[:500]}"
+
+    author = pr.get("author", {}).get("login", "unknown")
+    head_repo = (pr.get("headRepository") or {}).get("nameWithOwner", "?")
+
+    lines = [
+        f"## PR #{pr['number']}: {pr['title']}",
+        f"**State:** {pr['state']}  |  **Author:** @{author}",
+        f"**Branch:** {head_repo}@{pr.get('headRefName','?')} → {pr.get('baseRefName','?')}",
+        f"**Changes:** +{pr.get('additions',0)} / -{pr.get('deletions',0)}"
+        f" across {pr.get('changedFiles',0)} file(s)",
+        f"**Mergeable:** {pr.get('mergeable', 'unknown')}",
+    ]
+    if pr.get("isDraft"):
+        lines.append("**⚠️ Draft PR**")
+    if pr.get("reviewDecision"):
+        lines.append(f"**Review decision:** {pr['reviewDecision']}")
+
+    body = (pr.get("body") or "").strip()
+    if body:
+        lines.append(f"\n**Description:**\n{_truncate_with_notice(body, 2000)}")
+
+    # 2. Commits with original author metadata
+    commits = pr.get("commits", [])
+    if commits:
+        lines.append(
+            f"\n**Commits ({len(commits)}) — original author preserved on cherry-pick:**"
+        )
+        shas_for_pick = []
+        for c in commits:
+            node = c.get("commit", c)
+            sha = c.get("oid", "?")[:12]
+            full_sha = c.get("oid", "?")
+            msg = (node.get("messageHeadline") or node.get("message") or "?")[:70]
+            authored_by = node.get("authors", {})
+            if isinstance(authored_by, dict):
+                authored_by = authored_by.get("nodes", [])
+            if authored_by:
+                a = authored_by[0]
+                author_str = f"{a.get('name','?')} <{a.get('email','?')}>"
+            else:
+                author_str = "unknown"
+            lines.append(f"  {sha} | {author_str} | {msg}")
+            shas_for_pick.append(full_sha)
+        lines.append(
+            f"\nSHAs for cherry_pick_pr_commits:\n  {shas_for_pick}"
+        )
+
+    # 3. Changed files — via `gh pr diff --name-only`
+    diff_names_raw = _gh_cmd(["pr", "diff", str(number), "--name-only"], ctx, timeout=30)
+    if not diff_names_raw.startswith("⚠️") and diff_names_raw.strip():
+        file_list = diff_names_raw.strip().splitlines()
+        lines.append(f"\n**Changed files ({len(file_list)}):**")
+        for f in file_list[:50]:
+            lines.append(f"  {f}")
+        if len(file_list) > 50:
+            lines.append(f"  ... and {len(file_list) - 50} more")
+
+    # 4. Diff/patch — via `gh pr diff` (truncated)
+    diff_raw = _gh_cmd(["pr", "diff", str(number)], ctx, timeout=60)
+    if not diff_raw.startswith("⚠️") and diff_raw.strip():
+        lines.append(f"\n**Diff (truncated to 8000 chars):**\n```diff")
+        lines.append(_truncate_with_notice(diff_raw, 8000))
+        lines.append("```")
+
+    # 5. Review comments summary
+    reviews = pr.get("reviews", [])
+    comments = pr.get("comments", [])
+    if reviews or comments:
+        lines.append(f"\n**Reviews ({len(reviews)}) + PR comments ({len(comments)}):**")
+        for rv in reviews[:5]:
+            rv_author = (rv.get("author") or {}).get("login", "?")
+            rv_state = rv.get("state", "?")
+            rv_body = _truncate_with_notice((rv.get("body") or "").strip(), 300)
+            lines.append(f"  [{rv_state}] @{rv_author}: {rv_body}")
+        for cm in comments[:5]:
+            cm_author = (cm.get("author") or {}).get("login", "?")
+            cm_body = _truncate_with_notice((cm.get("body") or "").strip(), 300)
+            lines.append(f"  @{cm_author}: {cm_body}")
+
+    lines.append(
+        f"\n**Integration steps:**\n"
+        f"  1. fetch_pr_ref(pr_number={number})\n"
+        f"  2. create_integration_branch(pr_number={number})\n"
+        f"  3. cherry_pick_pr_commits(shas=[...])   # SHAs listed above; original author preserved\n"
+        f"  4. stage_adaptations()                  # optional: stage Ouroboros adaptation changes\n"
+        f"                                          #   (do NOT repo_commit here — see below)\n"
+        f"  5. stage_pr_merge(branch='integrate/pr-{number}') → advisory_pre_review → repo_commit\n"
+        f"     # staged adaptations from step 4 land in the merge commit automatically\n"
+        f"  6. comment_on_pr(number={number}, body='Integrated as ...')"
+    )
+
+    return "\n".join(lines)
+
+
+def _comment_on_pr(ctx: ToolContext, number: int, body: str) -> str:
+    """Add a comment to a GitHub pull request.
+
+    Use to: acknowledge receipt, report integration status, request changes,
+    or leave an audit trail after integration.
+    Body is passed via stdin to prevent argument injection.
+    """
+    if number <= 0:
+        return "⚠️ PR number must be positive."
+    if not (body or "").strip():
+        return "⚠️ Comment body cannot be empty."
+
+    args = ["pr", "comment", str(number), "--body-file", "-"]
+    raw = _gh_cmd(args, ctx, input_data=body)
+    if raw.startswith("⚠️"):
+        return raw
+    return f"✅ Comment added to PR #{number}."
+
+
 def _create_issue(ctx: ToolContext, title: str, body: str = "", labels: str = "") -> str:
     """Create a new GitHub issue."""
     if not title or not title.strip():
@@ -220,6 +410,48 @@ def _create_issue(ctx: ToolContext, title: str, body: str = "", labels: str = ""
 
 def get_tools() -> List[ToolEntry]:
     return [
+        ToolEntry("list_github_prs", {
+            "name": "list_github_prs",
+            "description": (
+                "List GitHub pull requests for the current repository. "
+                "Shows PR number, title, author, branch, commit count, and state. "
+                "Use before get_github_pr to identify which PR to inspect."
+            ),
+            "parameters": {"type": "object", "properties": {
+                "state": {"type": "string", "default": "open",
+                          "enum": ["open", "closed", "merged", "all"],
+                          "description": "Filter by PR state"},
+                "limit": {"type": "integer", "default": 20,
+                          "description": "Max PRs to return (max 50)"},
+            }, "required": []},
+        }, _list_prs),
+
+        ToolEntry("get_github_pr", {
+            "name": "get_github_pr",
+            "description": (
+                "Get full details of a GitHub PR: metadata, description, commit list "
+                "with original author names/emails, changed files list, diff/patch "
+                "(truncated to 8000 chars), review comments, and mergeable state. "
+                "Shows the exact SHAs needed for cherry_pick_pr_commits."
+            ),
+            "parameters": {"type": "object", "properties": {
+                "number": {"type": "integer", "description": "PR number"},
+            }, "required": ["number"]},
+        }, _get_pr),
+
+        ToolEntry("comment_on_pr", {
+            "name": "comment_on_pr",
+            "description": (
+                "Add a comment to a GitHub pull request. "
+                "Use to acknowledge receipt, report integration status, request changes, "
+                "or leave an audit trail after integration."
+            ),
+            "parameters": {"type": "object", "properties": {
+                "number": {"type": "integer", "description": "PR number"},
+                "body": {"type": "string", "description": "Comment text (markdown)"},
+            }, "required": ["number", "body"]},
+        }, _comment_on_pr),
+
         ToolEntry("list_github_issues", {
             "name": "list_github_issues",
             "description": "List GitHub issues. Use to check for new tasks, bug reports, or feature requests from the user or contributors.",

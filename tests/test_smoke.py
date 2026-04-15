@@ -49,6 +49,8 @@ TOOL_MODULES = [
     "ouroboros.tools.review_helpers",
     "ouroboros.tools.plan_review",
     "ouroboros.tools.git_rollback",
+    "ouroboros.tools.git_pr",
+    "ouroboros.tools.github",
     "ouroboros.tools.ci",
 ]
 
@@ -112,6 +114,11 @@ EXPECTED_TOOLS = [
     # GitHub Issues
     "list_github_issues", "get_github_issue", "comment_on_issue",
     "close_github_issue", "create_github_issue",
+    # GitHub PRs
+    "list_github_prs", "get_github_pr", "comment_on_pr",
+    # Git PR integration (non-core: require enable_tools)
+    "fetch_pr_ref", "create_integration_branch",
+    "cherry_pick_pr_commits", "stage_adaptations", "stage_pr_merge",
     "summarize_dialogue",
     # Code search
     "code_search",
@@ -184,6 +191,10 @@ def test_frozen_registry_includes_packaged_tool_modules(monkeypatch):
         "plan_task",
         "rollback_to_target",
         "run_ci_tests",
+        # github.py is in _FROZEN_TOOL_MODULES — PR inspection tools must work in frozen builds
+        "list_github_prs",
+        "get_github_pr",
+        "comment_on_pr",
     }
     missing = expected_subset - available
     assert missing == set(), f"Frozen registry missing tools: {sorted(missing)}"

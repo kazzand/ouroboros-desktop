@@ -28,6 +28,8 @@ log = logging.getLogger(__name__)
 
 CHECKED_TOOLS = frozenset([
     "run_shell", "claude_code_edit", "repo_write", "repo_write_commit", "repo_commit", "data_write",
+    "fetch_pr_ref", "create_integration_branch", "cherry_pick_pr_commits",
+    "stage_adaptations", "stage_pr_merge",
 ])
 
 SAFE_SHELL_COMMANDS = frozenset([

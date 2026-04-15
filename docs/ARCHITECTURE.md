@@ -1,4 +1,4 @@
-# Ouroboros v4.30.2 — Architecture & Reference
+# Ouroboros v4.31.0 — Architecture & Reference
 
 This document describes every component, page, button, API endpoint, and data flow.
 It is the single source of truth for how the system works. Keep it updated.
@@ -77,6 +77,8 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on localhost:8765
       │   ├── claude_advisory_review.py ← Advisory pre-review tool (read-only Claude Agent SDK)
       │   ├── commit_gate.py     ← Advisory freshness gate and commit-attempt recording (extracted from git.py)
       │   ├── git_rollback.py    ← rollback_to_target tool (wraps git_ops.rollback_to_version)
+      │   ├── git_pr.py          ← PR integration tools: fetch_pr_ref, create_integration_branch, cherry_pick_pr_commits, stage_adaptations, stage_pr_merge (non-core, require enable_tools)
+      │   ├── github.py          ← GitHub integration: issues (list/get/comment/close) + PR tools: list_github_prs, get_github_pr, comment_on_pr (non-core; github.py is in _FROZEN_TOOL_MODULES so PR inspection/comment tools work in packaged builds)
       │   ├── parallel_review.py ← Parallel triad+scope orchestration and verdict aggregation (extracted from git.py)
       │   ├── plan_review.py     ← Pre-implementation design review (3 parallel full-codebase reviewers, plan_task tool)
       │   ├── review.py          ← Triad diff review (3-model parallel review against CHECKLISTS.md)
@@ -620,6 +622,44 @@ backward compatibility but is not the runtime authority.
 - **Defense-in-depth**: post-edit revert in `registry.py` remains as secondary safety layer
 - Safety-critical files mirror: `BIBLE.md`, `ouroboros/safety.py`,
   `ouroboros/tools/registry.py`, `prompts/SAFETY.md`
+
+### PR integration tools (tools/git_pr.py + tools/github.py)
+
+**Non-core tools** — require `enable_tools("fetch_pr_ref,create_integration_branch,cherry_pick_pr_commits,stage_adaptations,stage_pr_merge,list_github_prs,get_github_pr,comment_on_pr")` before use.
+
+**Prerequisite:** `gh` CLI must be installed and on PATH for all `github.py` tools: PR tools (`list_github_prs`, `get_github_pr`, `comment_on_pr`) and existing issue tools (`list_github_issues`, `get_github_issue`, `comment_on_issue`, `close_github_issue`, `create_github_issue`). The pure-git tools in `git_pr.py` (`fetch_pr_ref`, `create_integration_branch`, `cherry_pick_pr_commits`, `stage_adaptations`, `stage_pr_merge`) use only `git` and do NOT require `gh`. Install: https://cli.github.com/ (available for macOS, Linux, Windows). Authentication uses `GITHUB_TOKEN` from Settings — no interactive `gh auth login` required.
+
+**Frozen-bundle availability split:**
+- `list_github_prs`, `get_github_pr`, `comment_on_pr` (from `github.py`) — **available in frozen/packaged builds** because `github` is in `_FROZEN_TOOL_MODULES`.
+- `fetch_pr_ref`, `create_integration_branch`, `cherry_pick_pr_commits`, `stage_adaptations`, `stage_pr_merge` (from `git_pr.py`) — **unavailable in frozen/packaged builds** until a new bundle is cut with `git_pr` added to `registry.py::_FROZEN_TOOL_MODULES`.
+
+**Attribution design (critical):**
+- `cherry_pick_pr_commits` uses `git cherry-pick --no-edit` (NOT `--no-commit`).
+  Each PR commit is replayed as a **real commit** with:
+  - `author name / email` = original contributor (preserved by git)
+  - `author date`         = original timestamp (preserved by git)
+  - `committer`           = Ouroboros (who applied the cherry-pick)
+- GitHub contribution counting is based on `author.email`, so external contributors receive full graph credit.
+- `Co-authored-by` in the final merge commit message is an additional hint, NOT the primary attribution mechanism.
+- `stage_adaptations` stages Ouroboros adaptation changes without committing. Call it immediately before `stage_pr_merge` — do NOT run `repo_commit` in between, because `repo_commit` always checks out `branch_dev` (ouroboros) first, which drops off the integration branch and discards the staged state. Staged adaptation changes survive into the final merge commit created by `advisory_pre_review → repo_commit` after `stage_pr_merge`.
+- `stage_pr_merge` uses `git merge --no-ff --no-commit` which sets `MERGE_HEAD` and stages the diff. The resulting `repo_commit` creates a proper merge commit with both parents, permanently linking the integration branch (with its original-author history). Any staged adaptation changes from `stage_adaptations` are included in this merge commit.
+
+**PR intake workflow:**
+1. `list_github_prs(state, limit)` — list open PRs
+2. `get_github_pr(number=N)` — inspect PR: metadata, commits with authors/emails, changed files, diff/patch (truncated), review comments, mergeability + integration instructions
+3. `fetch_pr_ref(pr_number=N)` — fetch `+refs/pull/N/head:pr/N` (force-update for rebased PRs); lists commits with original author metadata
+4. `create_integration_branch(pr_number=N)` — create `integrate/pr-N` from `ouroboros`
+5. `cherry_pick_pr_commits(shas=[...])` — replay each commit with `--no-edit`; real authored commits, original authorship preserved. Provides `Co-authored-by` hint for final merge commit.
+6. `stage_adaptations()` — optional: stage Ouroboros adaptation/fixup changes without committing. Call `stage_pr_merge` immediately after — do NOT run `repo_commit` here (see note above).
+7. `stage_pr_merge(branch="integrate/pr-N")` → `advisory_pre_review` → `repo_commit` — finalise through the standard reviewed pipeline; creates a merge commit with both parents (staged adaptations from step 6 land here)
+8. `comment_on_pr(number=N, body="...")` — leave an audit trail on the PR
+
+**GitHub PR tools (tools/github.py):**
+- `list_github_prs(state, limit)` — list PRs via `gh pr list`; shows draft/review status and commit count per PR
+- `get_github_pr(number)` — full PR detail: author, commits with author names/emails, changed files list, diff/patch, review comments, mergeability
+- `comment_on_pr(number, body)` — add comment to a PR via `gh pr comment` (body via stdin, no injection risk)
+
+**Frozen-bundle limitation (known):** `git_pr.py` is auto-discovered by `pkgutil` at runtime in dev/source mode. It is intentionally NOT in `_FROZEN_TOOL_MODULES` in `registry.py` (that file is safety-critical and overwritten from the bundle on every launch). PR tools are **unavailable in the packaged `.app`/`.tar.gz` bundle** until a new bundle is cut that includes an updated `registry.py`. This is a documented limitation, not an oversight.
 
 ### Git tools (tools/git.py + tools/review.py + supervisor/git_ops.py)
 
