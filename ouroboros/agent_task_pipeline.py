@@ -576,7 +576,10 @@ def build_review_context(env: Any) -> str:
         if scoped_continuations:
             lines.append("\n### Open review continuations")
             scoped_continuations.sort(key=lambda item: str(item.updated_ts or item.created_ts or ""), reverse=True)
-            for item in scoped_continuations[:3]:
+            # v4.33: surface more accumulated context — 5 continuations, up to 3 findings
+            # each, so serial blocked-attempts don't hide evidence that helps the agent
+            # notice persistent-issue patterns (BIBLE P2: fix the class, not the instance).
+            for item in scoped_continuations[:5]:
                 task_status = str((load_task_result(env.drive_root, item.task_id) or {}).get("status") or "missing")
                 lines.append(
                     f"- task={item.task_id} status={task_status} source={item.source} "
@@ -586,18 +589,19 @@ def build_review_context(env: Any) -> str:
                 if item.block_reason:
                     lines.append(f"  block_reason={item.block_reason}")
                 if item.readiness_warnings:
-                    warning = _truncate_with_notice(item.readiness_warnings[0], 180).replace("\n", " ")
-                    lines.append(f"  readiness_warning={warning}")
+                    for warn in item.readiness_warnings[:3]:
+                        warning = _truncate_with_notice(warn, 180).replace("\n", " ")
+                        lines.append(f"  readiness_warning={warning}")
                 if item.critical_findings:
-                    top = item.critical_findings[0]
-                    label = str(top.get("item") or top.get("reason") or "critical finding")
-                    reason = _truncate_with_notice(top.get("reason") or "", 140).replace("\n", " ")
-                    lines.append(f"  critical_finding={label}: {reason}")
-                elif item.advisory_findings:
-                    top = item.advisory_findings[0]
-                    label = str(top.get("item") or top.get("reason") or "advisory finding")
-                    reason = _truncate_with_notice(top.get("reason") or "", 140).replace("\n", " ")
-                    lines.append(f"  advisory_finding={label}: {reason}")
+                    for top in item.critical_findings[:3]:
+                        label = str(top.get("item") or top.get("reason") or "critical finding")
+                        reason = _truncate_with_notice(top.get("reason") or "", 140).replace("\n", " ")
+                        lines.append(f"  critical_finding={label}: {reason}")
+                if item.advisory_findings:
+                    for top in item.advisory_findings[:3]:
+                        label = str(top.get("item") or top.get("reason") or "advisory finding")
+                        reason = _truncate_with_notice(top.get("reason") or "", 140).replace("\n", " ")
+                        lines.append(f"  advisory_finding={label}: {reason}")
                 if item.obligation_ids:
                     lines.append(f"  obligation_ids={', '.join(item.obligation_ids)}")
         if corrupt:

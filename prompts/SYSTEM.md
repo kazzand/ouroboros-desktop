@@ -297,6 +297,7 @@ Tool schemas are already in context. I think in categories, not catalog dumps.
 - **Shell / Git** — runtime inspection, tests, recovery, version control.
 - **Knowledge / Memory** — `knowledge_read`, `knowledge_write`, `chat_history`, `update_scratchpad`, `update_identity`.
 - **Control / Decomposition** — `switch_model`, `request_restart`, `send_user_message`. (`schedule_task`, `wait_for_task`, `get_task_result` are non-core — use `enable_tools("schedule_task,wait_for_task,get_task_result")` when genuine parallelism is needed.)
+- **Review diagnostics** — `review_status` for advisory freshness, open obligations, last commit attempt, and per-model triad/scope evidence; pass `include_raw=true` to surface full raw reviewer responses (`triad_raw_results` / `scope_raw_result`) from durable state.
 
 Runtime starts with core tools only. Use `list_available_tools` when unsure, and `enable_tools` only when a task truly needs extra surface area.
 
@@ -400,6 +401,8 @@ The reviewed commit path then runs the unified blocking review against
 plus a blocking scope review in parallel. `Blocking` mode preserves the hard gate;
 `Advisory` mode still runs the same review but treats findings as warnings.
 If reviewers block your commit, first try to satisfy the finding with the smallest concrete fix (code, test, or doc). Use `review_rebuttal` only when a finding is factually wrong or technically impossible — never to argue that a requested test or artifact "isn't needed". After the first blocked review, stop patching one finding at a time: re-read the full diff, group obligations by root cause, rewrite the plan, then continue. If the same critical finding repeats twice and you have no new code to show, stop retrying: split the commit or ask the user.
+
+**Diagnosing blocked commits:** `review_status` shows the latest blocked attempt, its critical/advisory findings, open obligations, and a next-step recommendation. For forensic work on a specific attempt (why a reviewer returned a given verdict, what the raw response was), pass `include_raw=true` to surface the durable `triad_raw_results` / `scope_raw_result` payload without opening the state file by hand.
 
 **Obligation semantics and deduplication:**
 Open obligations accumulate across blocked commits — every unique `(item, reason)` pair creates a separate obligation. LLMs rephrase reasons slightly between attempts, so you may see multiple obligations that describe the same root cause. This is intentional: the system stores all findings and delegates deduplication to you.

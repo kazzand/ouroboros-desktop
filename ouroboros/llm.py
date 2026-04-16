@@ -226,6 +226,14 @@ def fetch_openrouter_pricing() -> Dict[str, Tuple[float, float, float]]:
 class LLMClient:
     """LLM API wrapper. Routes calls to OpenRouter or a local llama-cpp-python server."""
 
+    # Per-process cache of OpenRouter model capabilities. Populated lazily on
+    # the first request that needs it, then reused for the lifetime of the
+    # process. A missing entry means "unknown" — callers treat that as broad
+    # support and do NOT strip any parameters (zero-regression fallback when
+    # the capabilities endpoint is unreachable or a model isn't listed).
+    _SUPPORTED_PARAMS_CACHE: Dict[str, set] = {}
+    _SUPPORTED_PARAMS_FETCHED: bool = False
+
     def __init__(
         self,
         api_key: Optional[str] = None,
@@ -242,6 +250,49 @@ class LLMClient:
         self._local_port: Optional[int] = None
         self._remote_clients: Dict[Tuple[str, str, str, Tuple[Tuple[str, str], ...]], Any] = {}
         self._async_remote_clients: Dict[Tuple[str, str, str, Tuple[Tuple[str, str], ...]], Any] = {}
+
+    @classmethod
+    def _fetch_openrouter_capabilities(cls) -> None:
+        """Populate _SUPPORTED_PARAMS_CACHE via OpenRouter's /models endpoint.
+
+        Runs at most once per process. On any failure the cache remains empty,
+        which means every ``_get_supported_parameters`` lookup returns ``None``
+        and callers fall back to the pre-v4.33 behavior of not stripping any
+        kwargs.
+        """
+        cls._SUPPORTED_PARAMS_FETCHED = True
+        try:
+            import requests
+            resp = requests.get(
+                "https://openrouter.ai/api/v1/models",
+                timeout=15,
+            )
+            if resp.status_code != 200:
+                log.debug(
+                    "OpenRouter /models returned %d; supported_parameters cache empty",
+                    resp.status_code,
+                )
+                return
+            for m in resp.json().get("data", []) or []:
+                mid = m.get("id") or ""
+                sp = m.get("supported_parameters")
+                if mid and isinstance(sp, list) and sp:
+                    cls._SUPPORTED_PARAMS_CACHE[mid] = set(sp)
+        except Exception:
+            log.debug("Failed to fetch OpenRouter model capabilities", exc_info=True)
+
+    @classmethod
+    def _get_supported_parameters(cls, model_id: str) -> Optional[set]:
+        """Return the set of parameter names the given OpenRouter model accepts.
+
+        Returns ``None`` when we don't know — caller should treat this as broad
+        support (no parameter stripping). The first call triggers a one-shot
+        fetch of every model's capabilities; subsequent calls use the in-memory
+        cache populated by that fetch.
+        """
+        if not cls._SUPPORTED_PARAMS_FETCHED:
+            cls._fetch_openrouter_capabilities()
+        return cls._SUPPORTED_PARAMS_CACHE.get(model_id)
 
     @staticmethod
     def _parse_provider_model(model: str) -> Tuple[str, str]:
@@ -1318,6 +1369,21 @@ class LLMClient:
                 tools_with_cache[-1] = last_tool
             kwargs["tools"] = tools_with_cache
             kwargs["tool_choice"] = tool_choice
+
+        # Drop kwargs that this model's OpenRouter providers don't list in
+        # `supported_parameters`. Combined with `provider.require_parameters:
+        # true` (set above for anthropic/), unknown params cause a 404
+        # "No endpoints found that can handle the requested parameters".
+        # Capabilities cache returns None for unknown models → no stripping.
+        supported = self._get_supported_parameters(resolved_model)
+        if supported is not None:
+            for sampling_param in ("temperature", "top_p", "top_k"):
+                if sampling_param not in supported and sampling_param in kwargs:
+                    log.debug(
+                        "Model %s does not list %s in supported_parameters; stripping",
+                        resolved_model, sampling_param,
+                    )
+                    kwargs.pop(sampling_param, None)
         return kwargs
 
     def _build_openrouter_kwargs(

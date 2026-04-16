@@ -15,7 +15,6 @@ from typing import Any, Dict, List, Optional
 
 from ouroboros.tools.registry import ToolContext
 from ouroboros.utils import (
-    truncate_review_artifact as _truncate_review_artifact,
     truncate_review_reason as _truncate_review_reason,
 )
 
@@ -145,7 +144,11 @@ def _record_commit_attempt(ctx: ToolContext, commit_message: str, status: str,
                 status=status,
                 snapshot_hash=snapshot_hash,
                 block_reason=block_reason,
-                block_details=_truncate_review_artifact(block_details),
+                # Canonical evidence — full text. Display-side truncation
+                # (review_status, format_status_section) is the right layer
+                # to shorten; durable state stores everything so post-hoc
+                # forensics can reconstruct the exact block message.
+                block_details=block_details,
                 duration_sec=duration_sec,
                 task_id=task_id,
                 critical_findings=_list_or_default(

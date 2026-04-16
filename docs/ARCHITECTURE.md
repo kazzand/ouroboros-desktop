@@ -1,4 +1,4 @@
-# Ouroboros v4.32.1 — Architecture & Reference
+# Ouroboros v4.33.0 — Architecture & Reference
 
 This document describes every component, page, button, API endpoint, and data flow.
 It is the single source of truth for how the system works. Keep it updated.
@@ -978,6 +978,12 @@ errors surface via the same observability path.
   When open obligations exist after a blocked review, the next-step guidance now explicitly
   instructs the agent to re-read the full diff, group obligations by root cause, rewrite the plan,
   and only then continue instead of patching one finding at a time.
+  **Verbose mode** (v4.33.0): passing `include_raw=true` attaches a `raw_evidence` block for the
+  targeted commit attempt containing the full per-actor records — `triad_raw_results` (per triad
+  model: `model_id`, `status`, `raw_text`, `parsed_items`, `tokens_in/out`, `cost_usd`) and
+  `scope_raw_result` (same shape plus `prompt_chars`). This is a durable read path for
+  epistemic-integrity forensics: the agent no longer has to open `data/state/advisory_review.json`
+  by hand to reconstruct why a review produced a given verdict.
 - **`review_state.py`**: durable state. State file: `data/state/advisory_review.json`.
   Stores advisory runs plus a typed reviewed-attempt ledger, bounded blocking-attempt history,
   open obligations, stale markers, repo/tool/task identities, and reviewed-diff fingerprints.
@@ -1126,15 +1132,24 @@ errors surface via the same observability path.
   filtered via `build_full_repo_pack`; `tests/` excluded from full repo pack to stay under the 850K-token
   budget gate (`_SCOPE_BUDGET_TOKEN_LIMIT`) — touched test files remain visible via `build_touched_file_pack`),
   goal/scope sections, DEVELOPMENT.md, staged diff, review history.
-- **Pre-change (HEAD) snapshots** (best-effort): `build_head_snapshot_section` in `review_helpers.py`
-  fetches the HEAD version of each touched file via `git show HEAD:<path>`. Sensitive files (`.env`,
-  `.pem`, `.key`, `credentials.json`, etc. — case-insensitive) are suppressed before the subprocess
-  call; their content never reaches review prompts or external models. Binary files (extension check +
-  NUL/control-char/UTF-8-decode sniffer on raw bytes) and oversized files (>1MB raw bytes) are also
-  omitted with explicit notes. New files get a "File is new" note; deleted/renamed files show old
-  content. When a snapshot cannot be fetched (git timeout, git error), an explicit omission note is
-  included. This enriches scope reviewer context but is not a hard gate — scope review proceeds even
-  when individual snapshots are unavailable.
+- **Deleted-file inlining** (v4.33.0): scope review no longer emits a separate "Pre-change (HEAD)
+  snapshots" section — the staged diff's `-` lines plus the full repo pack already cover cross-module
+  context, and the separate section previously added ~164K tokens (~21% of the budget). For files
+  deleted by the staged diff, `_inline_deleted_file_pack` fetches the HEAD content via
+  `git show HEAD:<path>` and embeds it inside `Current touched files` with an explicit
+  `*(DELETED — content from HEAD)*` marker so reviewers still see what was removed. When `git show`
+  can't produce the file (e.g. staged-for-delete without ever being committed), the fallback is an
+  `*(DELETED — HEAD content unavailable)*` marker. **Defense-in-depth filtering** on the inline-pack
+  copy: `_classify_deleted_for_inline` suppresses sensitive paths (`.env`, `.pem`, `.key`,
+  `credentials.json`, etc. — checked via `_SENSITIVE_NAMES` / `_SENSITIVE_EXTENSIONS` from
+  `review_helpers.py`) and binary-extension paths (`BINARY_EXTENSIONS`), and a `_DELETED_INLINE_MAX_BYTES`
+  (1 MB) cap rejects oversize HEAD content after fetch. Suppressed deletions show as
+  `*(DELETED — <reason>; content suppressed)*` instead of the fenced HEAD block. The staged-diff
+  trunk (`## Staged diff`, built from `git diff --cached`) is a separate pre-existing layer and is
+  not filtered by this change — secrets staged-for-delete remain visible there through plain git
+  output, and pre-commit git-add hygiene is the correct layer to prevent that.
+  `build_head_snapshot_section` in `review_helpers.py` remains and is still used by `plan_task`,
+  which has no diff to draw from.
 - **Full repo pack** (v4.13.0): `build_full_repo_pack` replaces the deprecated `build_broader_repo_pack`.
   No hardcoded char cap. Excludes: binary/media files (`_FULL_REPO_BINARY_EXTENSIONS`), vendored/minified
   (`.min.js`, `.min.css`, named vendored assets), sensitive files (`.env`, `.pem`, `.key`, etc.),

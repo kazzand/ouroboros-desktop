@@ -27,11 +27,13 @@ from ouroboros.tools.registry import ToolContext
 from ouroboros.tools.review_helpers import (
     build_full_repo_pack,
     build_goal_section,
-    build_head_snapshot_section,
     build_scope_section,
     build_touched_file_pack,
     load_checklist_section,
     CRITICAL_FINDING_CALIBRATION,
+    BINARY_EXTENSIONS,
+    _SENSITIVE_EXTENSIONS,
+    _SENSITIVE_NAMES,
 )
 from ouroboros.utils import run_cmd, utc_now_iso, append_jsonl, estimate_tokens
 
@@ -55,6 +57,12 @@ _SCOPE_MAX_TOKENS = 100_000  # 100K output tokens
 # conscious trade: 850K lets scope-review prompts that previously skipped at
 # ~778K actually run.
 _SCOPE_BUDGET_TOKEN_LIMIT = 850_000
+
+# Defense-in-depth cap for deleted-file content inlined into the scope prompt.
+# Matches the >1MB guard that `build_head_snapshot_section` applied before
+# v4.33 — the staged diff itself is not size-capped here, but the inline pack
+# has no reason to carry a 10 MB HEAD snapshot.
+_DELETED_INLINE_MAX_BYTES = 1_048_576  # 1 MB
 
 
 @dataclass
@@ -215,14 +223,85 @@ def _parse_staged_name_status(repo_dir: pathlib.Path) -> list:
     return entries
 
 
-def _add_deletion_placeholders(current_files_section: str, deleted_paths: list) -> str:
-    """Append deletion placeholders to the current-files section for reviewer awareness."""
+def _classify_deleted_for_inline(path: str) -> Optional[str]:
+    """Return a suppression reason for a deleted path, or None to inline its content.
+
+    Mirrors the sensitive / binary filtering that ``build_head_snapshot_section``
+    applied before v4.33 (defense-in-depth — the staged diff itself is not
+    filtered, but our inline pack has no reason to duplicate a secret or a
+    binary blob into the scope prompt). Path-only check; size check happens
+    after ``git show`` in ``_inline_deleted_file_pack``.
+    """
+    fp = pathlib.Path(path)
+    fname_lower = fp.name.lower()
+    suffix_lower = fp.suffix.lower()
+    if suffix_lower in _SENSITIVE_EXTENSIONS or fname_lower in _SENSITIVE_NAMES:
+        return "sensitive (env/credential/key)"
+    if suffix_lower in BINARY_EXTENSIONS:
+        return "binary extension"
+    return None
+
+
+def _inline_deleted_file_pack(
+    current_files_section: str,
+    deleted_paths: list,
+    repo_dir: pathlib.Path,
+) -> str:
+    """Append deleted-file blocks to the current-files section with HEAD content.
+
+    Since v4.33.0 scope review no longer emits a separate ``Pre-change
+    snapshots`` section (the staged diff and full repo pack already cover
+    cross-module context). For deleted files we still want the reviewer to
+    see what was removed, so we inline the HEAD version directly with an
+    explicit ``DELETED`` marker.
+
+    Defense-in-depth filtering — sensitive / binary / oversize
+    deletions are replaced with a suppression marker instead of having
+    their HEAD content echoed into the scope prompt. Falls back to an
+    ``HEAD content unavailable`` marker when ``git show`` can't produce the
+    file (e.g. staged-for-delete without ever being committed, or HEAD is
+    corrupt). Never raises.
+    """
     if not deleted_paths:
         return current_files_section
-    notes = [
-        f"### {dp}\n\n*(File was DELETED — see HEAD snapshot section above for its content)*\n"
-        for dp in deleted_paths
-    ]
+
+    notes: list[str] = []
+    for dp in deleted_paths:
+        suffix = pathlib.Path(dp).suffix.lstrip(".") or "text"
+        suppress_reason = _classify_deleted_for_inline(dp)
+        if suppress_reason is not None:
+            notes.append(
+                f"### {dp}\n\n*(DELETED — {suppress_reason}; content suppressed)*\n"
+            )
+            continue
+
+        try:
+            head_content = run_cmd(
+                ["git", "show", f"HEAD:{dp}"], cwd=repo_dir
+            )
+        except Exception:
+            head_content = ""
+
+        if head_content and len(
+            head_content.encode("utf-8", errors="replace")
+        ) > _DELETED_INLINE_MAX_BYTES:
+            notes.append(
+                f"### {dp}\n\n*(DELETED — content > "
+                f"{_DELETED_INLINE_MAX_BYTES // 1024} KB; suppressed)*\n"
+            )
+            continue
+
+        if head_content:
+            notes.append(
+                f"### {dp}\n\n*(DELETED — content from HEAD)*\n\n"
+                f"```{suffix}\n{head_content}\n```\n"
+            )
+        else:
+            notes.append(
+                f"### {dp}\n\n*(DELETED — HEAD content unavailable; "
+                "see staged diff for removed lines)*\n"
+            )
+
     joint = "\n".join(notes)
     if current_files_section.strip():
         return current_files_section + "\n\n" + joint
@@ -355,12 +434,12 @@ def _build_scope_prompt(
     touched_entries = _parse_staged_name_status(repo_dir)
     current_paths = [ep[1] for ep in touched_entries if ep[0] != "D"]
     deleted_paths = [ep[1] for ep in touched_entries if ep[0] == "D"]
-    head_snapshot_paths = [ep[2] for ep in touched_entries]
     all_touched_paths = [ep[1] for ep in touched_entries]
 
     current_files_section, omitted = build_touched_file_pack(repo_dir, current_paths)
-    current_files_section = _add_deletion_placeholders(current_files_section, deleted_paths)
-    head_snapshots_section = build_head_snapshot_section(repo_dir, head_snapshot_paths)
+    current_files_section = _inline_deleted_file_pack(
+        current_files_section, deleted_paths, repo_dir
+    )
     touched_status = _compute_touched_status(
         current_files_section, deleted_paths, omitted, current_paths
     )
@@ -421,6 +500,7 @@ Severity rules:
 - Use "critical" only when you can cite a concrete missing file, symbol, test, prompt, doc, config, or sibling path and explain why the transformation is incomplete or inconsistent.
 - If you cannot point to an exact touchpoint, use "advisory".
 - Scope affects only unchanged legacy code outside the diff. The diff itself is always fully reviewable.
+- For cross-surface / prose-vs-code mismatches apply the `Critical surface whitelist` in `docs/CHECKLISTS.md` — only release metadata, tool schema, module map, behavioural documentation, and safety contracts qualify as critical; commentary and narrative prose mismatches are advisory.
 
 {critical_calibration}
 
@@ -435,15 +515,12 @@ Severity rules:
 
 {rebuttal_section}{history_section}{scope_history_section}
 
-## Pre-change snapshots (HEAD versions — before this diff)
-
-These are the versions of each touched file AS THEY EXISTED IN HEAD before this change.
-Use them to judge the correctness of the transformation: what was there before vs. what is there now.
-For new files (status A), the note says "File is new — no HEAD snapshot".
-
-{head_snapshots_section}
-
 ## Current touched files (post-change — what the file looks like NOW)
+
+Files deleted by this diff appear here with an explicit `DELETED` marker and
+their HEAD content inlined; other removed lines are visible via the staged
+diff below. HEAD versions of modified files are not sent as a separate
+section — the staged diff below already shows every `-` line.
 
 {current_files_section}
 
@@ -544,8 +621,19 @@ def _classify_scope_findings(items: list) -> tuple:
     return critical_findings, advisory_findings
 
 
-def _log_scope_result(ctx: ToolContext, critical_count: int, advisory_count: int) -> None:
-    """Append a scope_review_complete event to events.jsonl."""
+def _log_scope_result(
+    ctx: ToolContext,
+    critical_count: int,
+    advisory_count: int,
+    prompt_chars: int = 0,
+) -> None:
+    """Append a scope_review_complete event to events.jsonl.
+
+    Also emits budget headroom metrics so operators can see when the scope
+    pack is approaching the gate. ``headroom_tokens`` is a signed delta
+    (negative when the prompt exceeds the gate — would have been skipped).
+    """
+    prompt_tokens = max(0, int(prompt_chars) // 4) if prompt_chars else 0
     try:
         append_jsonl(ctx.drive_logs() / "events.jsonl", {
             "ts": utc_now_iso(), "type": "scope_review_complete",
@@ -553,6 +641,9 @@ def _log_scope_result(ctx: ToolContext, critical_count: int, advisory_count: int
             "model": _get_scope_model(),
             "critical_count": critical_count,
             "advisory_count": advisory_count,
+            "prompt_tokens": prompt_tokens,
+            "prompt_tokens_budget": _SCOPE_BUDGET_TOKEN_LIMIT,
+            "headroom_tokens": _SCOPE_BUDGET_TOKEN_LIMIT - prompt_tokens,
         })
     except Exception:
         pass
@@ -758,10 +849,12 @@ def run_scope_review(
 
     signal_result = _handle_prompt_signals(prompt, context_status)
     if signal_result is not None:
-        # Populate model_id and status from context_status for epistemic traceability
+        # Populate model_id for epistemic traceability. DO NOT overwrite
+        # signal_result.status — _handle_prompt_signals already sets the
+        # canonical status for every early-exit path (budget_exceeded/
+        # empty/omitted/error) and any further assignment here would
+        # silently diverge from that single source of truth.
         signal_result.model_id = scope_model_id
-        if context_status is not None:
-            signal_result.status = context_status.status
         return signal_result
 
     _prompt_chars = len(prompt)  # type: ignore[arg-type]
@@ -815,7 +908,12 @@ def run_scope_review(
         )
 
     critical_findings, advisory_findings = _classify_scope_findings(items)
-    _log_scope_result(ctx, len(critical_findings), len(advisory_findings))
+    _log_scope_result(
+        ctx,
+        len(critical_findings),
+        len(advisory_findings),
+        prompt_chars=_prompt_chars,
+    )
 
     if critical_findings:
         from ouroboros import config as _cfg

@@ -135,13 +135,6 @@ class CommitAttemptRecord:
     triad_raw_results: List[Dict[str, Any]] = field(default_factory=list)
     scope_raw_result: Dict[str, Any] = field(default_factory=dict)
 
-    def __post_init__(self) -> None:
-        # Guard for objects created via __new__ (e.g. in legacy test helpers)
-        # that skip __init__ and leave fields unset.
-        if not hasattr(self, "triad_raw_results"):
-            object.__setattr__(self, "triad_raw_results", [])
-        if not hasattr(self, "scope_raw_result"):
-            object.__setattr__(self, "scope_raw_result", {})
 
 @dataclass
 class AdvisoryReviewState:

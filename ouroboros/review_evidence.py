@@ -150,11 +150,34 @@ def _attempt_to_dict(item: Any) -> Dict[str, Any]:
     }
 
 
+_RESPONDED_STATUSES = frozenset({"fresh", "stale"})
+
+
 def _run_to_dict(item: Any) -> Dict[str, Any]:
+    """Serialise an AdvisoryRunRecord with status-aware shape.
+
+    Different statuses carry different evidential weight:
+    - ``responded_clean`` — reviewer ran AND produced zero FAILs (a real PASS)
+    - ``responded_with_findings`` — reviewer ran AND found issues (listed in findings)
+    - ``bypassed`` — advisory gate was explicitly skipped with an audit reason
+    - ``skipped`` — advisory was skipped because there was nothing to review
+    - ``parse_failure`` — reviewer responded but output couldn't be parsed
+    - ``error`` — transport/infrastructure failure
+    - ``stale`` — was fresh but is now outdated (edits after run)
+
+    ``status_summary`` collapses this into a single token so downstream
+    consumers (task reflections, prompt injection) can distinguish
+    responded-clean from skipped without re-deriving it from raw fields.
+    ``raw_result_present`` flags whether the canonical raw text is still on
+    disk (used to decide whether a verbose ``review_status`` call would
+    actually surface anything new).
+    """
     fail_items: List[Dict[str, Any]] = []
+    total_items = 0
     for entry in list(getattr(item, "items", []) or []):
         if not isinstance(entry, dict):
             continue
+        total_items += 1
         if str(entry.get("verdict", "")).upper() != "FAIL":
             continue
         fail_items.append({
@@ -162,13 +185,39 @@ def _run_to_dict(item: Any) -> Dict[str, Any]:
             "item": str(entry.get("item", "") or ""),
             "reason": str(entry.get("reason", "") or ""),
         })
+
+    status = str(getattr(item, "status", "") or "")
+    bypass_reason = str(getattr(item, "bypass_reason", "") or "")
+    raw_result_text = str(getattr(item, "raw_result", "") or "")
+
+    if status == "bypassed":
+        status_summary = "bypassed"
+    elif status == "skipped":
+        status_summary = "skipped"
+    elif status == "parse_failure":
+        status_summary = "parse_failure"
+    elif status == "error":
+        status_summary = "error"
+    elif status in _RESPONDED_STATUSES and fail_items:
+        status_summary = "responded_with_findings"
+    elif status in _RESPONDED_STATUSES and total_items > 0 and not fail_items:
+        status_summary = "responded_clean"
+    elif status in _RESPONDED_STATUSES:
+        # Responded but no items at all — distinct from "clean" (zero FAILs)
+        status_summary = "responded_empty"
+    else:
+        status_summary = status or "unknown"
+
     return {
         "ts": str(getattr(item, "ts", "") or ""),
-        "status": str(getattr(item, "status", "") or ""),
+        "status": status,
+        "status_summary": status_summary,
         "repo_key": str(getattr(item, "repo_key", "") or ""),
-        "bypass_reason": str(getattr(item, "bypass_reason", "") or ""),
+        "bypass_reason": bypass_reason,
         "snapshot_summary": str(getattr(item, "snapshot_summary", "") or ""),
         "findings": fail_items,
+        "total_items": total_items,
+        "raw_result_present": bool(raw_result_text),
         "readiness_warnings": [str(x) for x in (getattr(item, "readiness_warnings", []) or [])],
         "prompt_chars": int(getattr(item, "prompt_chars", 0) or 0),
         "model_used": str(getattr(item, "model_used", "") or ""),

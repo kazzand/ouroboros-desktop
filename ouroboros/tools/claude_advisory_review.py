@@ -1192,17 +1192,83 @@ def _attempt_actor_summary(attempt) -> dict:
     }
 
 
+def _selected_attempt_payload(ca) -> Optional[Dict[str, Any]]:
+    """Serialise a single commit attempt for review_status output.
+
+    Returns ``None`` when there is no selected attempt (e.g. first commit on
+    a fresh repo, or the scoped filter matched nothing).
+    """
+    if ca is None:
+        return None
+    return {
+        "status": ca.status,
+        "commit_message": ca.commit_message,
+        "ts": ca.ts,
+        "duration_sec": round(ca.duration_sec, 1),
+        "block_reason": ca.block_reason or None,
+        "block_details_preview": (
+            _truncate_review_artifact(ca.block_details, limit=300)
+            if ca.block_details else None
+        ),
+        "repo_key": ca.repo_key or None,
+        "tool_name": ca.tool_name or None,
+        "task_id": ca.task_id or None,
+        "attempt": int(ca.attempt or 0) or None,
+        "phase": ca.phase or None,
+        "blocked": bool(ca.blocked),
+        "late_result_pending": bool(ca.late_result_pending),
+        "critical_findings": len(ca.critical_findings or []),
+        "advisory_findings": len(ca.advisory_findings or []),
+        "obligation_ids": list(ca.obligation_ids or []),
+        "readiness_warnings": list(ca.readiness_warnings or []),
+        "pre_review_fingerprint": ca.pre_review_fingerprint[:12] or None,
+        "post_review_fingerprint": ca.post_review_fingerprint[:12] or None,
+        "fingerprint_status": ca.fingerprint_status or None,
+        "degraded_reasons": list(ca.degraded_reasons or []),
+        **_attempt_actor_summary(ca),
+    }
+
+
+def _obligations_payload(open_obs: list) -> list:
+    """Serialise open obligations for review_status output.
+
+    Short reason previews (200-char cap via truncate_review_artifact) keep the
+    status JSON readable without clipping source timestamps or commit message
+    references that downstream tooling needs for durable forensics.
+    """
+    return [
+        {
+            "obligation_id": ob.obligation_id,
+            "item": ob.item,
+            "severity": ob.severity,
+            "reason": _truncate_review_artifact(ob.reason, limit=200),
+            "status": ob.status,
+            "source_ts": ob.source_attempt_ts,
+            "source_commit": ob.source_attempt_msg,
+        }
+        for ob in open_obs
+    ]
+
+
 def _handle_review_status(
     ctx: ToolContext,
     repo_key: str = "",
     tool_name: str = "",
     task_id: str = "",
     attempt: Optional[int] = None,
+    include_raw: bool = False,
 ) -> str:
     """Show recent advisory pre-review run history AND last commit attempt state.
 
     Includes: advisory run history, staleness from edits, open obligations from
     blocking rounds, and a concrete next-step recommendation.
+
+    When ``include_raw=True`` the output also contains the full per-actor
+    evidence for the selected commit attempt: ``triad_raw_results`` (per
+    triad model) and ``scope_raw_result`` (from the scope reviewer), with
+    their raw text, parsed items, token counts, and cost. This is a durable
+    read path for epistemic-integrity forensics — no need to open the
+    advisory_review.json state file by hand.
     """
     drive_root = pathlib.Path(ctx.drive_root)
     state = load_state(drive_root)
@@ -1300,33 +1366,7 @@ def _handle_review_status(
     selected_attempt = filtered_attempts[-1] if filtered_attempts else (
         None if (repo_filter or tool_filter or task_filter or attempt is not None) else state.last_commit_attempt
     )
-    commit_attempt_data = None
-    if selected_attempt:
-        ca = selected_attempt
-        commit_attempt_data = {
-            "status": ca.status,
-            "commit_message": ca.commit_message,  # full — no [:80] truncation
-            "ts": ca.ts,  # full ts — no [:16] truncation
-            "duration_sec": round(ca.duration_sec, 1),
-            "block_reason": ca.block_reason or None,
-            "block_details_preview": _truncate_review_artifact(ca.block_details, limit=300) if ca.block_details else None,
-            "repo_key": ca.repo_key or None,
-            "tool_name": ca.tool_name or None,
-            "task_id": ca.task_id or None,
-            "attempt": int(ca.attempt or 0) or None,
-            "phase": ca.phase or None,
-            "blocked": bool(ca.blocked),
-            "late_result_pending": bool(ca.late_result_pending),
-            "critical_findings": len(ca.critical_findings or []),
-            "advisory_findings": len(ca.advisory_findings or []),
-            "obligation_ids": list(ca.obligation_ids or []),
-            "readiness_warnings": list(ca.readiness_warnings or []),
-            "pre_review_fingerprint": ca.pre_review_fingerprint[:12] or None,
-            "post_review_fingerprint": ca.post_review_fingerprint[:12] or None,
-            "fingerprint_status": ca.fingerprint_status or None,
-            "degraded_reasons": list(ca.degraded_reasons or []),
-            **_attempt_actor_summary(ca),
-        }
+    commit_attempt_data = _selected_attempt_payload(selected_attempt)
 
     attempts_data = []
     for entry in reversed(filtered_attempts):  # full history — no [-8:] cap
@@ -1352,17 +1392,7 @@ def _handle_review_status(
         })
 
     # Open obligations (already computed above as open_obs for effective_is_fresh)
-    obligations_data = []
-    for ob in open_obs:
-        obligations_data.append({
-            "obligation_id": ob.obligation_id,
-            "item": ob.item,
-            "severity": ob.severity,
-            "reason": _truncate_review_artifact(ob.reason, limit=200),
-            "status": ob.status,
-            "source_ts": ob.source_attempt_ts,  # full ts — no [:16] truncation
-            "source_commit": ob.source_attempt_msg,  # full message — no [:60] truncation
-        })
+    obligations_data = _obligations_payload(open_obs)
 
     # Determine readiness and actionable next step (via module-level helper)
 
@@ -1420,7 +1450,7 @@ def _handle_review_status(
     else:
         status_msg = f"Current advisory: {effective_status}"
 
-    return json.dumps({
+    response_body: Dict[str, Any] = {
         "latest_advisory_status": effective_status,
         "latest_advisory_hash": effective_hash,
         "stale_from_edit": stale_from_edit,
@@ -1440,7 +1470,19 @@ def _handle_review_status(
         "status_summary": status_msg,
         "message": status_msg,  # backward-compat alias for status_summary
         "next_step": next_step_msg,
-    }, ensure_ascii=False, indent=2)
+    }
+    if include_raw and selected_attempt is not None:
+        # Per-actor durable evidence for epistemic-integrity forensics
+        # (see v4.32.0 observability contract in docs/ARCHITECTURE.md).
+        # Default false — verbose payload is opt-in since raw_text can be large.
+        response_body["raw_evidence"] = {
+            "attempt_ts": selected_attempt.ts,
+            "attempt_number": int(selected_attempt.attempt or 0) or None,
+            "tool_name": selected_attempt.tool_name or None,
+            "triad_raw_results": list(selected_attempt.triad_raw_results or []),
+            "scope_raw_result": dict(selected_attempt.scope_raw_result or {}),
+        }
+    return json.dumps(response_body, ensure_ascii=False, indent=2)
 
 
 # -- Tool registration --
@@ -1508,7 +1550,9 @@ def get_tools() -> list:
                     "(reviewing/blocked/succeeded/failed) with block reason and actionable guidance; "
                     "whether advisory is stale because of a worktree edit; "
                     "open obligations from previous blocking rounds; "
-                    "and a concrete next_step recommendation."
+                    "and a concrete next_step recommendation. "
+                    "Pass include_raw=true to surface the full per-actor evidence "
+                    "(triad_raw_results, scope_raw_result) for the targeted attempt."
                 ),
                 "parameters": {
                     "type": "object",
@@ -1528,6 +1572,16 @@ def get_tools() -> list:
                         "attempt": {
                             "type": "integer",
                             "description": "Optional attempt number filter within the selected repo/tool/task scope.",
+                        },
+                        "include_raw": {
+                            "type": "boolean",
+                            "description": (
+                                "If true, append full per-actor evidence "
+                                "(triad_raw_results, scope_raw_result) for the "
+                                "targeted commit attempt to the output. "
+                                "Without this flag the output contains only "
+                                "structured summaries. Defaults to false."
+                            ),
                         },
                     },
                     "required": [],

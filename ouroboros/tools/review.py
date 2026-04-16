@@ -16,7 +16,12 @@ from typing import Any, List, Optional
 
 from ouroboros.llm import LLMClient
 from ouroboros.pricing import infer_api_key_type, infer_model_category
-from ouroboros.utils import utc_now_iso, run_cmd, append_jsonl
+from ouroboros.utils import (
+    utc_now_iso,
+    run_cmd,
+    append_jsonl,
+    truncate_review_artifact,
+)
 from ouroboros import config as _cfg
 from ouroboros.tools.registry import ToolEntry, ToolContext
 
@@ -150,7 +155,12 @@ async def _query_model(llm_client: LLMClient, model: str, messages: list, semaph
         except asyncio.TimeoutError:
             return model, "Error: Timeout after 120s", None
         except Exception as e:
-            error_msg = str(e)[:200]
+            # DEVELOPMENT.md 2(f): review-output / cognitive artifacts MUST
+            # NOT use hardcoded [:N] truncation. Full error text (e.g.
+            # OpenRouter 404 bodies, stack traces) is preserved via the
+            # shared helper; an explicit OMISSION NOTE is appended only
+            # when the payload exceeds 4 KB.
+            error_msg = truncate_review_artifact(str(e), limit=4000)
             return model, f"Error: {error_msg}", None
 
 
@@ -217,7 +227,11 @@ def _parse_model_response(model: str, result, headers_dict) -> dict:
     try:
         choices = result.get("choices", [])
         if not choices:
-            text = f"(no choices in response: {json.dumps(result)[:200]})"
+            # Preserve full response body (DEVELOPMENT.md 2(f)) — no bare [:200].
+            text = (
+                "(no choices in response: "
+                f"{truncate_review_artifact(json.dumps(result), limit=4000)})"
+            )
             verdict = "ERROR"
         else:
             text = choices[0]["message"]["content"]
@@ -234,7 +248,11 @@ def _parse_model_response(model: str, result, headers_dict) -> dict:
                     verdict = "FAIL"
                     break
     except (KeyError, IndexError, TypeError):
-        text = f"(unexpected response format: {json.dumps(result)[:200]})"
+        # Preserve full response body (DEVELOPMENT.md 2(f)) — no bare [:200].
+        text = (
+            "(unexpected response format: "
+            f"{truncate_review_artifact(json.dumps(result), limit=4000)})"
+        )
         verdict = "ERROR"
 
     prompt_tokens = usage.get("prompt_tokens", 0)
@@ -937,11 +955,20 @@ def _build_critical_block_message(
         )
 
     soft_hint = ""
-    if ctx._review_iteration_count >= 5:
+    if ctx._review_iteration_count >= 3:
         soft_hint = (
-            "\n\nHint: You have attempted this commit 5+ times. Consider:\n"
-            "- Breaking the change into smaller, independently reviewable commits\n"
-            "- If the same critical repeats: implement what the reviewer asks, or split the change, or report the blockage to the user instead of retrying"
+            "\n\nCircuit-breaker hint (attempt "
+            f"{ctx._review_iteration_count}+):\n"
+            "Before calling repo_commit again, pause and answer honestly:\n"
+            "- Am I patching one finding at a time, or did I re-read ALL findings together?\n"
+            "  (BIBLE P2: if the same class recurs with different wording, the fix is at\n"
+            "  the wrong level — do not keep patching instances.)\n"
+            "- Is my commit message growing each attempt? Long prose creates claim surface\n"
+            "  that reviewers then fact-check. Shrink to ONE subject line.\n"
+            "- Would `plan_task` surface the missing touchpoints cheaper than another\n"
+            "  blocked commit? Use it now if yes.\n"
+            "- If the same critical persists after two concrete fixes, STOP retrying:\n"
+            "  split the diff or use `send_user_message` to escalate."
         )
 
     critical_entries = list(getattr(ctx, "_last_review_critical_findings", []) or critical_fails)

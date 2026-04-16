@@ -336,10 +336,7 @@ class TestTouchedOmissionPrecedence:
             self.mod, "build_touched_file_pack",
             return_value=("", ["some_file.py"]),
         ), patch.object(
-            self.mod, "_add_deletion_placeholders",
-            return_value="",
-        ), patch.object(
-            self.mod, "build_head_snapshot_section",
+            self.mod, "_inline_deleted_file_pack",
             return_value="",
         ), patch.object(
             self.mod, "_compute_touched_status",
@@ -374,10 +371,7 @@ class TestTouchedOmissionPrecedence:
             self.mod, "build_touched_file_pack",
             return_value=("", ["file.py"]),
         ), patch.object(
-            self.mod, "_add_deletion_placeholders",
-            return_value="",
-        ), patch.object(
-            self.mod, "build_head_snapshot_section",
+            self.mod, "_inline_deleted_file_pack",
             return_value="",
         ), patch.object(
             self.mod, "_compute_touched_status",

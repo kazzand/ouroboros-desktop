@@ -635,18 +635,44 @@ def build_full_repo_pack(
 # 4. resolve_intent
 # ---------------------------------------------------------------------------
 
+_COMMIT_SUBJECT_MAX_CHARS = 120
+
+
+def _commit_subject(commit_message: str) -> str:
+    """Return the first line of a commit message, capped at _COMMIT_SUBJECT_MAX_CHARS.
+
+    Stops at the first blank line (``\\n\\n``) or newline. Used when the caller
+    has no explicit goal/scope and the commit message is the only signal: we
+    treat the subject as the intent, and the body as narrative (see
+    ``build_goal_section``).
+    """
+    text = commit_message.strip()
+    if not text:
+        return ""
+    first_line = text.split("\n", 1)[0].strip()
+    return first_line[:_COMMIT_SUBJECT_MAX_CHARS]
+
+
 def resolve_intent(
     goal: str = "",
     scope: str = "",
     commit_message: str = "",
 ) -> tuple[str, str]:
-    """Return (resolved_text, source) with precedence goal > scope > commit_message > fallback."""
+    """Return (resolved_text, source) with precedence goal > scope > commit_subject > fallback.
+
+    When falling back to ``commit_message`` we use only its subject line
+    (first line, ``_COMMIT_SUBJECT_MAX_CHARS`` hard cap). The full commit body
+    is a narrative artifact, not a contract the reviewer should fact-check.
+    It's surfaced separately via ``build_goal_section`` as informational
+    context.
+    """
     if goal.strip():
         return goal.strip(), "goal"
     if scope.strip():
         return scope.strip(), "scope"
-    if commit_message.strip():
-        return commit_message.strip(), "commit message"
+    subject = _commit_subject(commit_message)
+    if subject:
+        return subject, "commit message (subject)"
     return (
         "No explicit goal provided. Review the diff on its own merits.",
         "fallback",
@@ -662,16 +688,35 @@ def build_goal_section(
     scope: str = "",
     commit_message: str = "",
 ) -> str:
-    """Format the 'Intended transformation' section."""
+    """Format the 'Intended transformation' section.
+
+    When there is no explicit goal or scope the reviewer's intent is the
+    commit message SUBJECT line only (see ``resolve_intent``). The full
+    commit body, if different from the subject, is included as a separate
+    ``## Informational context`` block and explicitly flagged as narrative
+    so reviewers don't fact-check commit-message wording against the code.
+    """
     resolved_text, source = resolve_intent(goal, scope, commit_message)
-    return (
-        f"## Intended transformation\n\n"
-        f"Source: {source}\n\n"
-        f"{resolved_text}\n\n"
-        f"Use this to judge whether the change actually completed the intended work,\n"
-        f"including tests, prompts, docs, architecture touchpoints, and adjacent surfaces\n"
-        f"that may have been forgotten."
-    )
+    sections = [
+        "## Intended transformation\n",
+        f"Source: {source}\n",
+        f"{resolved_text}\n",
+        "Use this to judge whether the change actually completed the intended work,\n"
+        "including tests, prompts, docs, architecture touchpoints, and adjacent surfaces\n"
+        "that may have been forgotten.",
+    ]
+
+    commit_text = commit_message.strip()
+    if commit_text and commit_text != resolved_text:
+        sections.append(
+            "\n\n## Informational context — commit message (narrative, NOT a contract)\n\n"
+            f"{commit_text}\n\n"
+            "The text above is a narrative artifact written for humans reading the\n"
+            "git log. Do NOT audit its wording as a contract against the code — use\n"
+            "the staged diff, checklists, and intent above to judge the change."
+        )
+
+    return "\n".join(sections)
 
 
 # ---------------------------------------------------------------------------

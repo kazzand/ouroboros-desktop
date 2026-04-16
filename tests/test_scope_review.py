@@ -71,9 +71,13 @@ class TestGoalScopePrecedence:
         assert "scope Y" in text
 
     def test_commit_message_when_no_goal_no_scope(self):
+        """v4.33.0: commit-message fallback returns only the subject line,
+        and source is labelled ``commit message (subject)`` to make the
+        scoping explicit for downstream readers.
+        """
         mod = _get_module("ouroboros.tools.review_helpers")
         text, source = mod.resolve_intent(goal="", scope="", commit_message="msg Z")
-        assert source == "commit message"
+        assert source == "commit message (subject)"
         assert "msg Z" in text
 
     def test_fallback_when_all_empty(self):
@@ -827,8 +831,13 @@ class TestHeadSnapshotSection:
         result = mod.build_head_snapshot_section(tmp_path, [])
         assert "no touched files" in result
 
-    def test_scope_prompt_includes_head_snapshots_section(self, tmp_path):
-        """_build_scope_prompt must include the pre-change snapshots section."""
+    def test_scope_prompt_omits_head_snapshots_section(self, tmp_path):
+        """v4.33.0: _build_scope_prompt MUST NOT include a separate 'Pre-change snapshots' section.
+
+        The staged diff already shows every removed line via `-`, and the full
+        repo pack covers cross-module context. Removing the separate section
+        saves ~164K tokens (~21% of the scope budget) on a typical repo.
+        """
         subprocess.run(["git", "init"], cwd=str(tmp_path), capture_output=True)
         (tmp_path / "docs").mkdir(exist_ok=True)
         (tmp_path / "docs" / "CHECKLISTS.md").write_text(
@@ -843,18 +852,102 @@ class TestHeadSnapshotSection:
 
         mod = _get_module("ouroboros.tools.scope_review")
         prompt, _ = mod._build_scope_prompt(tmp_path, "test commit")
-        # HEAD snapshot section header must be present
-        assert "Pre-change snapshots" in prompt
-        # Old content must appear in HEAD snapshot section
-        assert "ORIGINAL" in prompt
-        # New content must appear in current files section
+        # The dedicated HEAD snapshot section is gone in v4.33.0
+        assert "Pre-change snapshots" not in prompt
+        # New content must still appear in current files section
         assert "MODIFIED" in prompt
+        # The old (`ORIGINAL`) content is still observable through the staged
+        # diff's `-` lines — we don't assert on its presence because some
+        # helper test setups may produce minimal diff context.
 
-    def test_scope_prompt_head_snapshots_uses_helper(self):
-        """_build_scope_prompt must call build_head_snapshot_section."""
+    def test_scope_prompt_does_not_import_head_snapshot_helper(self):
+        """v4.33.0: scope_review.py no longer imports build_head_snapshot_section.
+
+        The helper itself is kept in review_helpers.py for plan_task (which
+        has no diff to draw from), but scope_review has no legitimate use
+        for it anymore — the assertion guards against accidental reintroduction.
+
+        The check looks for actual use (import or call-site), not bare
+        mentions — a comment referring to the helper by name is
+        informational cross-reference, not a regression.
+        """
         mod = _get_module("ouroboros.tools.scope_review")
-        source = inspect.getsource(mod._build_scope_prompt)
-        assert "build_head_snapshot_section" in source
+        source = inspect.getsource(mod)
+        # No import line referencing the helper
+        assert "import build_head_snapshot_section" not in source
+        assert "    build_head_snapshot_section," not in source
+        # No call-site
+        assert "build_head_snapshot_section(" not in source
+
+    def test_scope_prompt_inlines_deleted_file_content(self, tmp_path):
+        """Deleted files must still appear in 'Current touched files' with DELETED marker.
+
+        Without the separate HEAD snapshots section we'd lose visibility into
+        what was removed. _inline_deleted_file_pack restores it by embedding
+        HEAD content right inside Current touched files.
+        """
+        subprocess.run(["git", "init"], cwd=str(tmp_path), capture_output=True)
+        (tmp_path / "docs").mkdir(exist_ok=True)
+        (tmp_path / "docs" / "CHECKLISTS.md").write_text(
+            "## Intent / Scope Review Checklist\n\nplaceholder\n"
+        , encoding="utf-8")
+        (tmp_path / "docs" / "DEVELOPMENT.md").write_text("dev guide\n", encoding="utf-8")
+        (tmp_path / "removed.py").write_text("ORIGINAL_DELETED_CONTENT", encoding="utf-8")
+        (tmp_path / "keep.py").write_text("keep_me", encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=str(tmp_path), capture_output=True)
+        self._git_commit(tmp_path, "init")
+        # Delete one file, keep the other — ensure scope prompt builds & shows both
+        (tmp_path / "removed.py").unlink()
+        subprocess.run(["git", "add", "-A"], cwd=str(tmp_path), capture_output=True)
+
+        mod = _get_module("ouroboros.tools.scope_review")
+        prompt, status = mod._build_scope_prompt(tmp_path, "delete removed.py")
+        assert prompt is not None, f"scope prompt build failed with status={status}"
+        assert "DELETED" in prompt
+        assert "ORIGINAL_DELETED_CONTENT" in prompt
+
+    def test_deleted_sensitive_file_content_suppressed(self, tmp_path):
+        """Deleting a tracked `.env` must not inline its HEAD content (v4.33.0).
+
+        Defense-in-depth — the staged diff itself still shows removed lines,
+        but `_inline_deleted_file_pack` MUST NOT duplicate sensitive content
+        into the scope prompt. A `*(DELETED — sensitive ...; content
+        suppressed)*` marker replaces the fenced HEAD block.
+        """
+        subprocess.run(["git", "init"], cwd=str(tmp_path), capture_output=True)
+        (tmp_path / "docs").mkdir(exist_ok=True)
+        (tmp_path / "docs" / "CHECKLISTS.md").write_text(
+            "## Intent / Scope Review Checklist\n\nplaceholder\n",
+            encoding="utf-8",
+        )
+        (tmp_path / "docs" / "DEVELOPMENT.md").write_text("dev guide\n", encoding="utf-8")
+        (tmp_path / ".env").write_text("SECRET_TOKEN=sk-abc-DEADBEEF", encoding="utf-8")
+        (tmp_path / "keep.py").write_text("keep_me", encoding="utf-8")
+        # `-f` forces add even if a global gitignore excludes `.env`
+        subprocess.run(["git", "add", "-f", ".env", "keep.py", "docs"],
+                        cwd=str(tmp_path), capture_output=True)
+        self._git_commit(tmp_path, "init")
+
+        (tmp_path / ".env").unlink()
+        subprocess.run(["git", "add", "-A"], cwd=str(tmp_path), capture_output=True)
+
+        mod = _get_module("ouroboros.tools.scope_review")
+        prompt, status = mod._build_scope_prompt(tmp_path, "remove .env")
+        assert prompt is not None, f"scope prompt build failed with status={status}"
+        assert "DELETED" in prompt
+        assert "sensitive" in prompt.lower()
+        assert "content suppressed" in prompt.lower()
+        # _inline_deleted_file_pack must NOT echo the secret payload. Note:
+        # the staged diff below it still shows `-SECRET_TOKEN=...` through
+        # git's own output — but the inline-pack copy is the only layer we
+        # control in scope_review, and that copy must be clean.
+        inline_header = "## Current touched files"
+        diff_header = "## Staged diff"
+        inline_start = prompt.index(inline_header)
+        diff_start = prompt.index(diff_header)
+        inline_section = prompt[inline_start:diff_start]
+        assert "DEADBEEF" not in inline_section
+        assert "SECRET_TOKEN" not in inline_section
 
     def test_deletion_only_diff_not_blocked(self, tmp_path):
         """Deletion-only diffs must reach scope reviewer, not be fail-closed."""

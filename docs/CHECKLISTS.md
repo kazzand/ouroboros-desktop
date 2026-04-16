@@ -84,7 +84,7 @@ Ouroboros repository.
 | 10 | tool_registration | New tool function added but not exported in get_tools()? (PASS if no new tool.) | critical |
 | 11 | context_building | New data/memory files that should appear in LLM context (context.py) but don't? | advisory |
 | 12 | knowledge_index | Knowledge base topics changed but memory/knowledge/index-full.md not updated? | advisory |
-| 13 | self_consistency | Does this change affect behavior described in `BIBLE.md`, `prompts/`, `docs/`, or this checklist itself? Check explicitly: (a) version in `ARCHITECTURE.md` header matches `VERSION` file; (b) tool names/descriptions in `prompts/SYSTEM.md` match tools actually exported by `get_tools()`; (c) JSONL log/memory file formats described in `ARCHITECTURE.md` match all readers/writers; (d) any behavioral change reflected in `prompts/CONSCIOUSNESS.md` if it affects background loop behavior; (e) DEVELOPMENT.md rules still accurate after the change. Narrative/descriptive mismatches (for example README test counts or descriptive "N fixes" summaries) are advisory unless they change release metadata, behavioral contracts, safety guidance, or instructions a user/reviewer relies on to use the changed feature correctly. | critical |
+| 13 | self_consistency | Does this change affect behavior described in `BIBLE.md`, `prompts/`, `docs/`, or this checklist itself? Check explicitly: (a) version in `ARCHITECTURE.md` header matches `VERSION` file; (b) tool names/descriptions in `prompts/SYSTEM.md` match tools actually exported by `get_tools()`; (c) JSONL log/memory file formats described in `ARCHITECTURE.md` match all readers/writers; (d) any behavioral change reflected in `prompts/CONSCIOUSNESS.md` if it affects background loop behavior; (e) DEVELOPMENT.md rules still accurate after the change. Severity must follow the shared `Critical surface whitelist` below — release metadata, tool schema, module map, behavioural documentation, or safety contracts are critical; commentary/prose/stylistic mismatches are advisory. | critical |
 | 14 | cross_platform | Does the diff use platform-specific APIs (`os.kill`, `os.setsid`, `os.killpg`, `os.getpgid`, `fcntl`, `msvcrt`, `signal.SIGKILL`, `signal.SIGTERM`, `subprocess` with `start_new_session`/`creationflags`, hardcoded `/` or `\\` in filesystem paths) outside of `ouroboros/platform_layer.py`? Does it import Unix-only or Windows-only modules (`fcntl`, `msvcrt`, `winreg`, `resource`) at any level without a platform guard (`sys.platform`/`IS_WINDOWS` check)? | critical |
 
 ### Severity rules
@@ -94,9 +94,11 @@ Ouroboros repository.
   If the condition does not apply, write verdict PASS with a short reason
   (e.g. "Not applicable — no code logic change").
 - Items 11-12 are advisory: FAIL produces a warning but does not block.
-- Item 13 (self_consistency) is conditionally critical: FAIL only when a
-  concrete stale artifact is identified (specific file, line, or symbol).
-  If no concrete staleness is found, write verdict PASS with a short reason.
+- Item 13 (self_consistency) is conditionally critical: FAIL only when the
+  mismatch falls in the `Critical surface whitelist` below AND a concrete
+  stale artifact is named (specific file, line, or symbol). If no whitelisted
+  surface is affected, the finding is advisory. If no concrete staleness is
+  found at all, write verdict PASS with a short reason.
 
 ### Critical threshold rule (applies to ALL items)
 
@@ -109,19 +111,54 @@ Before marking any item CRITICAL you MUST be able to answer YES to ALL of:
 
 If you cannot satisfy all three, use **advisory**, not critical.
 
-Narrative or descriptive mismatches are advisory, not critical, when they do not affect
-system behavior, release/version invariants, safety guidance, or the user's ability to
-understand and use the changed feature correctly. Examples: README test counts, descriptive
-"N fixes" summaries, or marketing-style numeric claims that are not part of a real contract.
-
-These remain critical when they bear real operational or release meaning: VERSION / badge /
-changelog invariants, architecture or prompt docs that lie about actual behavior or contracts,
-security or safety guidance, or any documentation/test artifact required to validate the changed behavior.
+For any finding about narrative, prose, or cross-surface consistency, also apply
+the `Critical surface whitelist` below (same rules for every reviewer — triad,
+scope, and advisory). A mismatch outside the whitelist is advisory.
 
 One root cause = one FAIL entry. Do NOT split one underlying problem into multiple
 FAIL items that all require the same change. Do NOT hold an obligation open by
 reformulating a fixed concrete issue into a broader future-risk variant — if the
 named artifact is fixed, mark PASS; raise a new advisory if a broader concern remains.
+
+### Critical surface whitelist (binding for ALL reviewers — triad, scope, advisory)
+
+When marking a cross-surface / self-consistency / narrative / "prose-vs-code"
+mismatch as **critical**, the mismatch MUST live in one of these categories:
+
+1. **Release metadata** — `VERSION` vs `pyproject.toml` vs README badge vs
+   `docs/ARCHITECTURE.md` header vs latest git tag. Also: `VERSION` bumped
+   but no README changelog row for the new version.
+2. **Tool schema** — tool names, parameters, or descriptions in
+   `prompts/SYSTEM.md`'s command tables that disagree with what each tool's
+   `get_tools()` actually exports. Applies to user-facing CLI/tool contracts.
+3. **Module map** — `docs/ARCHITECTURE.md` naming a module / endpoint /
+   data file / UI page that does not exist (or the reverse: a new one was
+   added and the map was not updated). This is a hard P4 (Architecture
+   mirror) contract.
+4. **Behavioural documentation** — a docstring, README description, or
+   ARCHITECTURE section explaining what a changed tool/command actually
+   **does at runtime**, where the description is factually wrong after the
+   change (e.g. "sends files X, Y" when the code sends X, Y, Z). This
+   matters because operators and future reviewers rely on it to use and
+   audit the feature.
+5. **Safety guarding** — a documented safety / permission / authorization
+   contract vs. the actual guard in code (e.g. ARCHITECTURE says "panic
+   kills all subprocess trees" but the implementation misses process groups).
+
+**All OTHER mismatches are advisory, not critical.** Including:
+
+- Wording of explanatory comments that is imprecise but does not misstate
+  runtime behaviour of the feature (e.g. comment says "Claude Opus 4.6"
+  when the resolved model is `openai/gpt-5.4-pro`; the comment is stale but
+  the runtime is fine — advisory).
+- Stylistic inconsistency between changelog entries, commit-message wording
+  that doesn't literally match the code in every respect, descriptive prose
+  in README intro sections, "N fixes" narrative summaries, formatting of
+  bullet points.
+- Documentation that is merely verbose or redundant rather than wrong.
+
+Reviewers MUST apply this whitelist before escalating any prose-level
+mismatch to critical. If in doubt, advisory.
 
 ### Loop / state-machine changes
 
@@ -179,9 +216,9 @@ regressions that diff-only reviewers cannot see.
 |---|------|---------------|--------------------|
 | 1 | intent_alignment | Does the staged change actually fulfill the intended transformation, not merely touch related files? | critical if the incompleteness is concrete and evidenced; otherwise advisory |
 | 2 | forgotten_touchpoints | Are there specific coupled files, tests, prompts, docs, configs, or sibling paths that must also change? Name the exact file(s) or symbol(s). | critical if a required touchpoint is concretely omitted; otherwise advisory |
-| 3 | cross_surface_consistency | If behavior changed, are adjacent surfaces still consistent: prompts, docs, comments, tool descriptions, automation, or user-visible workflow? | critical if a concrete stale surface leaves the repo internally inconsistent; otherwise advisory |
+| 3 | cross_surface_consistency | If behavior changed, are adjacent surfaces still consistent: prompts, docs, comments, tool descriptions, automation, or user-visible workflow? Apply the shared `Critical surface whitelist` — only release metadata, tool schema, module map, behavioural documentation, or safety contracts count as critical; commentary and prose mismatches are advisory. | critical if the mismatch is in a whitelisted surface AND concrete; otherwise advisory |
 | 4 | regression_surface | Does wider repository context show a concrete sibling path, migration edge, or parallel flow that remains broken or incomplete after this change? | critical if it leaves a concrete broken/incomplete path; otherwise advisory |
-| 5 | prompt_doc_sync | If prompts or docs are relevant to the changed behavior, are they still accurate and mutually consistent? | critical if a concrete prompt/doc artifact becomes false or stale; otherwise advisory |
+| 5 | prompt_doc_sync | If prompts or docs are relevant to the changed behavior, are they still accurate and mutually consistent? Apply the shared `Critical surface whitelist` — behavioural documentation describing what a tool/command DOES at runtime is critical; wording/style of comments is advisory. | critical if a whitelisted prompt/doc artifact becomes false; otherwise advisory |
 | 6 | architecture_fit | Does the change solve the class of problem, or is it a narrow patch that leaves the underlying pattern unresolved? | advisory |
 | 7 | cross_module_bugs | Does this change break something in a different module through implicit coupling, shared state, or assumed call/return patterns? Name the exact module, symbol, or call site. | critical if a concrete cross-module breakage can be cited; otherwise advisory |
 | 8 | implicit_contracts | Are there constants, data format assumptions, expected function signatures, or protocol invariants relied upon by OTHER modules that this change violates without updating those callers? Name the exact symbol or file. | critical if a concrete violated contract can be cited; otherwise advisory |
@@ -191,5 +228,8 @@ regressions that diff-only reviewers cannot see.
 - Any critical FAIL must cite a concrete file, symbol, prompt, doc, test, config, or sibling flow.
 - If the reviewer cannot point to an exact touchpoint, the FAIL must be advisory, not critical.
 - Scope affects only unchanged code outside the diff. The diff itself remains fully reviewable.
-- Narrative or descriptive mismatches outside the changed contract surface are advisory, not critical. Examples: README test counts, descriptive "N fixes" summaries, or non-contractual numeric claims.
-- They become critical only when they misstate actual behavior, release/version invariants, safety guidance, or instructions needed to use the changed feature correctly.
+- For narrative / prose / cross-surface findings, apply the shared `Critical surface whitelist`
+  defined in the Repo Commit Checklist section above. Only release metadata, tool schema,
+  module map, behavioural documentation, and safety contracts qualify as critical. Wording
+  of explanatory comments, stylistic mismatches in changelogs, and non-contractual prose
+  are advisory regardless of how concrete the citation is.

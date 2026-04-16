@@ -880,14 +880,21 @@ def test_review_blocked_5plus_hint_suggests_split():
     from ouroboros.tools.review import _build_critical_block_message
 
     class FakeCtx:
+        # v4.33.0 lowered the threshold from 5 to 3 — 5 still triggers but
+        # the phrasing changed from "report the blockage" to "send_user_message
+        # to escalate" which carries the same semantic weight.
         _review_iteration_count = 5
         _review_history = []
 
     msg = _build_critical_block_message(
         FakeCtx(), "test commit", ["tests_affected: missing tests"], [], ""
     )
-    assert "split the change" in msg.lower() or "split" in msg.lower()
-    assert "report the blockage" in msg.lower() or "report" in msg.lower()
+    lowered = msg.lower()
+    assert "split" in lowered, f"missing split-the-diff guidance: {msg!r}"
+    assert ("send_user_message" in lowered or "escalate" in lowered
+            or "report" in lowered), (
+        f"missing escalation guidance: {msg!r}"
+    )
 
 
 def test_review_blocked_message_requires_reaudit_after_first_block():
@@ -927,8 +934,12 @@ def test_self_consistency_listed_as_critical_in_severity_rules():
             )
     # Must say item 13 is conditionally critical
     assert "item 13" in content.lower() and "critical" in content.lower()
-    # Narrative mismatches such as README test counts should be explicitly advisory
-    assert "README test counts" in content
+    # v4.33.0: the old "README test counts" example was folded into the
+    # broader Critical surface whitelist. Narrative / prose / commentary
+    # mismatches outside the whitelist must be explicitly advisory.
+    assert "Critical surface whitelist" in content
+    assert "advisory" in content.lower()
+    # And the "narrative" framing of commit-message / doc wording remains.
     assert "narrative" in content.lower()
 
 
