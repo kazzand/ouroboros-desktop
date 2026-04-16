@@ -54,12 +54,15 @@ def test_resolve_claude_code_model_returns_env_value(monkeypatch):
     assert gw.resolve_claude_code_model() == "sonnet"
 
 
-def test_resolve_claude_code_model_falls_back_to_opus(monkeypatch):
-    """resolve_claude_code_model defaults to 'opus' when env var is absent."""
+def test_resolve_claude_code_model_falls_back_to_shipped_default(monkeypatch):
+    """resolve_claude_code_model defaults to shipped SETTINGS_DEFAULTS value
+    when env var is absent. Keeping the fallback aligned with the shipped
+    default avoids cross-module drift where code reached before settings
+    are applied would resolve differently than fresh installs see in UI."""
     sys.path.insert(0, REPO)
     gw = importlib.import_module("ouroboros.gateways.claude_code")
     monkeypatch.delenv("CLAUDE_CODE_MODEL", raising=False)
-    assert gw.resolve_claude_code_model() == "opus"
+    assert gw.resolve_claude_code_model() == "claude-opus-4-7[1m]"
 
 
 def test_resolve_claude_code_model_strips_whitespace(monkeypatch):

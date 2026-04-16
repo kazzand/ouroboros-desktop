@@ -627,18 +627,20 @@ def _parse_aggregate_signal(text: str) -> str:
 def _get_review_models() -> list[str]:
     """Return exactly 3 reviewer models for the plan review.
 
-    Sources models from ``OUROBOROS_REVIEW_MODELS`` (same as commit triad).
-    Normalizes to exactly 3 reviewers in all cases so the docs' promise of
-    '3 parallel reviewers' is always honoured:
+    Delegates to ``ouroboros.config.get_review_models`` — the single source of
+    truth that the commit triad also uses. This keeps plan_review and the
+    commit triad in lockstep, including the direct-provider normalization
+    logic (OpenAI-only / Anthropic-only fallback to main model × N).
 
-    - If 3+ models are configured: use the first 3.
-    - If 1 or 2 models are configured: pad by repeating the last model.
-    - If no models are configured: use the main model repeated 3 times.
+    Normalizes to exactly 3 reviewers so the docs' promise of '3 parallel
+    reviewers' is always honoured: pads with the last model if fewer than 3
+    are configured; caps at 3 if more are configured.
     """
-    raw = os.environ.get("OUROBOROS_REVIEW_MODELS", "")
-    models = [m.strip() for m in raw.split(",") if m.strip()]
+    from ouroboros import config as _cfg
+
+    models = list(_cfg.get_review_models() or [])
     if not models:
-        main = os.environ.get("OUROBOROS_MODEL", "anthropic/claude-opus-4.6")
+        main = os.environ.get("OUROBOROS_MODEL", "anthropic/claude-opus-4.7")
         models = [main]
 
     # Pad to exactly 3 by repeating the last model if needed

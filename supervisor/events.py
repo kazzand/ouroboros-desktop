@@ -593,9 +593,10 @@ def _handle_log_event(evt: Dict[str, Any], ctx: Any) -> None:
     """Forward worker-emitted live-only timeline events to the UI.
 
     Most log events are live-only (pushed to the bridge for UI display).
-    Durable event types (task_checkpoint, task_checkpoint_reflection) are also
-    persisted to events.jsonl so they survive UI reloads and are available for
-    postmortem analysis.
+    The durable event type `task_checkpoint` is also persisted to
+    events.jsonl so self-check signals survive UI reloads and are available
+    for postmortem analysis. (v4.34.0: structured-reflection and anomaly
+    event types were retired — see ouroboros/loop.py::_maybe_inject_self_check.)
     """
     data = evt.get("data")
     if not isinstance(data, dict):
@@ -609,7 +610,7 @@ def _handle_log_event(evt: Dict[str, Any], ctx: Any) -> None:
     except Exception:
         log.debug("Failed to forward live log event", exc_info=True)
     # Persist durable checkpoint events to the event log
-    if data.get("type") in ("task_checkpoint", "task_checkpoint_reflection", "task_checkpoint_anomaly"):
+    if data.get("type") == "task_checkpoint":
         try:
             ctx.append_jsonl(ctx.DRIVE_ROOT / "logs" / "events.jsonl", payload)
         except Exception:

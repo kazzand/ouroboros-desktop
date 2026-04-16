@@ -51,11 +51,11 @@ SETTINGS_DEFAULTS = {
     "TELEGRAM_CHAT_ID": "",
 
     "OUROBOROS_NETWORK_PASSWORD": "",
-    "OUROBOROS_MODEL": "anthropic/claude-opus-4.6",
-    "OUROBOROS_MODEL_CODE": "anthropic/claude-opus-4.6",
+    "OUROBOROS_MODEL": "anthropic/claude-opus-4.7",
+    "OUROBOROS_MODEL_CODE": "anthropic/claude-opus-4.7",
     "OUROBOROS_MODEL_LIGHT": "anthropic/claude-sonnet-4.6",
     "OUROBOROS_MODEL_FALLBACK": "anthropic/claude-sonnet-4.6",
-    "CLAUDE_CODE_MODEL": "opus",
+    "CLAUDE_CODE_MODEL": "claude-opus-4-7[1m]",
     "OUROBOROS_MAX_WORKERS": 5,
     "TOTAL_BUDGET": 10.0,
     "OUROBOROS_PER_TASK_COST_USD": 20.0,
@@ -68,7 +68,7 @@ SETTINGS_DEFAULTS = {
     "OUROBOROS_EVO_COST_THRESHOLD": 0.10,
     "OUROBOROS_WEBSEARCH_MODEL": "gpt-5.2",
     # Pre-commit review: comma-separated provider-tagged model list
-    "OUROBOROS_REVIEW_MODELS": "openai/gpt-5.4,google/gemini-3.1-pro-preview,anthropic/claude-opus-4.6",
+    "OUROBOROS_REVIEW_MODELS": "openai/gpt-5.4,google/gemini-3.1-pro-preview,anthropic/claude-opus-4.7",
     # Pre-commit review enforcement: advisory | blocking
     "OUROBOROS_REVIEW_ENFORCEMENT": "advisory",
     # Scope review: single-model blocking reviewer (runs after triad review)

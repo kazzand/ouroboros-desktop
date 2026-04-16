@@ -395,7 +395,7 @@ def _run_async(coro):
 def run_edit(
     prompt: str,
     cwd: str,
-    model: str = "opus",
+    model: str = "claude-opus-4-7[1m]",
     max_turns: int = DEFAULT_CLAUDE_CODE_MAX_TURNS,
     budget: Optional[float] = None,
     system_prompt: Optional[str] = None,
@@ -415,13 +415,17 @@ def run_edit(
     ))
 
 
-def resolve_claude_code_model(default: str = "opus") -> str:
+def resolve_claude_code_model(default: str = "claude-opus-4-7[1m]") -> str:
     """Return the configured Claude Code model from env/settings.
 
     Single source of truth — used by both edit path and advisory path
     to avoid model drift.  Value comes from ``CLAUDE_CODE_MODEL`` env var
     (set by config.apply_settings_to_env).  Falls back to *default* which
-    is ``"opus"`` unless the caller overrides it.
+    matches the shipped ``SETTINGS_DEFAULTS['CLAUDE_CODE_MODEL']`` in
+    ``ouroboros/config.py``. Keeping the fallback aligned with the shipped
+    default avoids a cross-module drift where code reached before settings
+    are applied would resolve to a different model than fresh installs see
+    in the UI.
 
     Callers that need the raw string (e.g. to pass to the SDK) should use
     this function rather than reading the env var directly.
@@ -432,7 +436,7 @@ def resolve_claude_code_model(default: str = "opus") -> str:
 def run_readonly(
     prompt: str,
     cwd: str,
-    model: str = "opus",
+    model: str = "claude-opus-4-7[1m]",
     max_turns: int = DEFAULT_CLAUDE_CODE_MAX_TURNS,
     effort: Optional[str] = "high",
 ) -> ClaudeCodeResult:

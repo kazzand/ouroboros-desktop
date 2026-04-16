@@ -664,6 +664,29 @@ class TestClaudeRuntimeResolution:
         assert ClaudeRuntimeState(sdk_version="1.0", api_key_set=True, ready=False).status_label() == "degraded"
         assert ClaudeRuntimeState().status_label() == "missing"
 
+    def test_status_label_error_takes_priority_over_missing_api_key(self):
+        """Regression: v4.33.1 priority fix.
+
+        Prior to v4.33.1, ``status_label`` checked ``api_key_set`` before
+        ``error``, so a below-baseline SDK (or any other runtime error) was
+        silently shadowed as ``no_api_key`` when ``ANTHROPIC_API_KEY`` was
+        absent. Users would then set a key, retry, and only then discover the
+        real blocker. The priority is now: missing → error → no_api_key →
+        degraded → ready, so repair hints are surfaced immediately.
+        """
+        from ouroboros.platform_layer import ClaudeRuntimeState
+
+        state = ClaudeRuntimeState(
+            sdk_version="0.1.50",
+            cli_path="/fake/cli",
+            api_key_set=False,
+            error="SDK 0.1.50 below baseline 0.1.60",
+        )
+        assert state.status_label() == "error", (
+            "error must take priority over no_api_key so version-gate "
+            "failures surface even without a configured API key"
+        )
+
     def test_resolve_claude_runtime_returns_state(self, monkeypatch):
         """resolve_claude_runtime returns a ClaudeRuntimeState regardless of SDK presence."""
         from ouroboros.platform_layer import resolve_claude_runtime, ClaudeRuntimeState
@@ -671,6 +694,62 @@ class TestClaudeRuntimeResolution:
         assert isinstance(state, ClaudeRuntimeState)
         assert isinstance(state.interpreter_path, str)
         assert isinstance(state.api_key_set, bool)
+
+    def test_resolve_claude_runtime_rejects_below_baseline_sdk(self, monkeypatch):
+        """SDK below _CLAUDE_SDK_MIN_VERSION must NOT be reported as ready.
+
+        Regression guard: prior to v4.33.1, resolve_claude_runtime()
+        marked ready=True whenever the SDK was importable and the CLI
+        present, even if the installed SDK (e.g. 0.1.50) pre-dated
+        Opus 4.7 adaptive-thinking support — producing a false green
+        on /api/claude-code/status.
+        """
+        import importlib.metadata as _md
+        import ouroboros.platform_layer as pl
+
+        def fake_version(pkg: str) -> str:
+            if pkg == "claude-agent-sdk":
+                return "0.1.50"
+            return _md.version(pkg)
+
+        monkeypatch.setattr(pl, "_find_sdk_package_path", lambda: "/fake/python-standalone/site/claude_agent_sdk")
+        monkeypatch.setattr(pl, "_find_bundled_cli", lambda p: "/fake/cli/claude")
+        monkeypatch.setattr(pl, "_probe_cli_version", lambda p: "2.1.111")
+        monkeypatch.setattr(_md, "version", fake_version)
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+
+        state = pl.resolve_claude_runtime()
+
+        assert state.sdk_version == "0.1.50"
+        assert state.cli_path == "/fake/cli/claude"
+        assert state.api_key_set is True
+        assert state.ready is False, "SDK below baseline must not be ready"
+        assert "0.1.50" in state.error and "baseline" in state.error.lower()
+        assert state.status_label() == "error"
+
+    def test_resolve_claude_runtime_accepts_at_baseline_sdk(self, monkeypatch):
+        """SDK at or above _CLAUDE_SDK_MIN_VERSION passes the version gate."""
+        import importlib.metadata as _md
+        import ouroboros.platform_layer as pl
+        from ouroboros.launcher_bootstrap import _CLAUDE_SDK_MIN_VERSION
+
+        def fake_version(pkg: str) -> str:
+            if pkg == "claude-agent-sdk":
+                return _CLAUDE_SDK_MIN_VERSION
+            return _md.version(pkg)
+
+        monkeypatch.setattr(pl, "_find_sdk_package_path", lambda: "/fake/python-standalone/site/claude_agent_sdk")
+        monkeypatch.setattr(pl, "_find_bundled_cli", lambda p: "/fake/cli/claude")
+        monkeypatch.setattr(pl, "_probe_cli_version", lambda p: "2.1.111")
+        monkeypatch.setattr(_md, "version", fake_version)
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+
+        state = pl.resolve_claude_runtime()
+
+        assert state.sdk_version == _CLAUDE_SDK_MIN_VERSION
+        assert state.ready is True
+        assert state.error == ""
+        assert state.status_label() == "ready"
 
     def test_legacy_detection_non_app_path(self):
         """SDK installed outside python-standalone is classified as legacy."""
@@ -728,8 +807,8 @@ class TestGatewayStderrCapture:
 class TestVerifyClaudeRuntime:
     """verify_claude_runtime repairs missing SDK."""
 
-    def test_verify_passes_when_sdk_present(self, tmp_path, monkeypatch):
-        """When SDK check script prints 'ok', no repair is attempted."""
+    def test_verify_passes_when_sdk_present_at_baseline(self, tmp_path, monkeypatch):
+        """SDK imports, CLI exists, version meets baseline → no repair."""
         import logging
         from ouroboros.launcher_bootstrap import BootstrapContext, verify_claude_runtime
 
@@ -739,7 +818,7 @@ class TestVerifyClaudeRuntime:
             calls.append(cmd)
             from types import SimpleNamespace
             if "-c" in cmd:
-                return SimpleNamespace(returncode=0, stdout="ok", stderr="")
+                return SimpleNamespace(returncode=0, stdout="ok|0.1.60", stderr="")
             return SimpleNamespace(returncode=0, stdout="", stderr="")
 
         ctx = BootstrapContext(
@@ -757,8 +836,73 @@ class TestVerifyClaudeRuntime:
         assert result is True
         assert len(calls) == 1
 
+    def test_verify_passes_when_sdk_above_baseline(self, tmp_path):
+        """SDK 0.1.61 > baseline 0.1.60 → no repair."""
+        import logging
+        from ouroboros.launcher_bootstrap import BootstrapContext, verify_claude_runtime
+
+        calls = []
+
+        def fake_run(cmd, **kw):
+            calls.append(cmd)
+            from types import SimpleNamespace
+            if "-c" in cmd:
+                return SimpleNamespace(returncode=0, stdout="ok|0.1.61", stderr="")
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        ctx = BootstrapContext(
+            bundle_dir=tmp_path,
+            repo_dir=tmp_path,
+            data_dir=tmp_path,
+            settings_path=tmp_path / "settings.json",
+            embedded_python="/fake/python3",
+            app_version="1.0.0",
+            hidden_run=fake_run,
+            save_settings=lambda s: None,
+            log=logging.getLogger("test"),
+        )
+        result = verify_claude_runtime(ctx)
+        assert result is True
+        assert len(calls) == 1
+
+    def test_verify_triggers_repair_when_sdk_below_baseline(self, tmp_path):
+        """SDK 0.1.50 < baseline 0.1.60 → repair fires even though import + CLI work.
+
+        This guards the upgraded-install compat gap: claude_code_edit and
+        advisory_pre_review would otherwise still send thinking.type=enabled
+        to Opus 4.7 on an install with pre-0.1.60 SDK already present.
+        """
+        import logging
+        from ouroboros.launcher_bootstrap import BootstrapContext, verify_claude_runtime
+
+        calls = []
+
+        def fake_run(cmd, **kw):
+            calls.append(cmd)
+            from types import SimpleNamespace
+            if "-c" in cmd:
+                return SimpleNamespace(returncode=0, stdout="ok|0.1.50", stderr="")
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        ctx = BootstrapContext(
+            bundle_dir=tmp_path,
+            repo_dir=tmp_path,
+            data_dir=tmp_path,
+            settings_path=tmp_path / "settings.json",
+            embedded_python="/fake/python3",
+            app_version="1.0.0",
+            hidden_run=fake_run,
+            save_settings=lambda s: None,
+            log=logging.getLogger("test"),
+        )
+        result = verify_claude_runtime(ctx)
+        assert result is True
+        assert len(calls) == 2
+        assert "pip" in str(calls[1])
+        assert "0.1.60" in str(calls[1])
+
     def test_verify_triggers_repair_when_missing(self, tmp_path):
-        """When SDK check fails, repair install is attempted."""
+        """When SDK check fails (ModuleNotFoundError etc), repair install is attempted."""
         import logging
         from ouroboros.launcher_bootstrap import BootstrapContext, verify_claude_runtime
 
@@ -786,3 +930,32 @@ class TestVerifyClaudeRuntime:
         assert result is True
         assert len(calls) == 2
         assert "pip" in str(calls[1])
+
+
+class TestVersionTuple:
+    """_version_tuple parses PEP 440-ish version strings for comparison."""
+
+    def test_parses_simple_version(self):
+        from ouroboros.launcher_bootstrap import _version_tuple
+        assert _version_tuple("0.1.60") == (0, 1, 60)
+
+    def test_strips_post_suffix(self):
+        from ouroboros.launcher_bootstrap import _version_tuple
+        assert _version_tuple("0.1.60.post1") == (0, 1, 60)
+
+    def test_strips_pre_release_suffix(self):
+        from ouroboros.launcher_bootstrap import _version_tuple
+        # "0.1.60rc1" → parses "0", "1", "60" (rc1 stops at first non-digit)
+        assert _version_tuple("0.1.60rc1") == (0, 1, 60)
+
+    def test_comparison_semantics(self):
+        from ouroboros.launcher_bootstrap import _version_tuple
+        assert _version_tuple("0.1.50") < _version_tuple("0.1.60")
+        assert _version_tuple("0.1.60") >= _version_tuple("0.1.60")
+        assert _version_tuple("0.1.61") > _version_tuple("0.1.60")
+        assert _version_tuple("0.2.0") > _version_tuple("0.1.99")
+
+    def test_empty_returns_zero(self):
+        from ouroboros.launcher_bootstrap import _version_tuple
+        assert _version_tuple("") == (0,)
+        assert _version_tuple("garbage") == (0,)

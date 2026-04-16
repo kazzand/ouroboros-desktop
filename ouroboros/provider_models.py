@@ -17,14 +17,15 @@ CLOUDRU_DIRECT_DEFAULTS = {
 }
 
 ANTHROPIC_DIRECT_DEFAULTS = {
-    "main": "anthropic::claude-opus-4-6",
-    "code": "anthropic::claude-opus-4-6",
+    "main": "anthropic::claude-opus-4-7",
+    "code": "anthropic::claude-opus-4-7",
     "light": "anthropic::claude-sonnet-4-6",
     "fallback": "anthropic::claude-sonnet-4-6",
 }
 
 _ANTHROPIC_MODEL_ALIASES = {
     "claude-opus-4.6": "claude-opus-4-6",
+    "claude-opus-4.7": "claude-opus-4-7",
     "claude-sonnet-4.6": "claude-sonnet-4-6",
 }
 

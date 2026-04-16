@@ -212,6 +212,15 @@ Unlike triad reviewers who see only the diff, the scope reviewer sees the ENTIRE
 Its unique advantage is finding cross-module bugs, broken implicit contracts, and hidden
 regressions that diff-only reviewers cannot see.
 
+**Output contract (v4.34.0):** the scope reviewer returns a JSON array with one entry per
+item below (8 entries total). PASS entries are mandatory and must carry 1–2 sentences of
+justification naming a concrete artifact or code path that was actually checked — a bare
+"PASS" or single-word reason is treated as a reviewer failure. See the
+`Anti pattern-lock guard` section of the scope prompt in `ouroboros/tools/scope_review.py`
+for the second-pass requirement when a single FAIL is surfaced. The commit gate still
+forwards only `verdict == "FAIL"` entries; the PASS rows exist so that coverage and the
+reviewer's actual reasoning are auditable in `scope_raw_result`.
+
 | # | item | what to check | severity when FAIL |
 |---|------|---------------|--------------------|
 | 1 | intent_alignment | Does the staged change actually fulfill the intended transformation, not merely touch related files? | critical if the incompleteness is concrete and evidenced; otherwise advisory |

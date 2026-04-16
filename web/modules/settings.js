@@ -68,6 +68,12 @@ export function initSettings({ state }) {
     bindLocalModelControls({ state });
     let currentSettings = {};
     let claudeCodePollStarted = false;
+    // v4.33.1 status_label priority fix: even when the user has not configured
+    // ANTHROPIC_API_KEY, we still surface the runtime card when the backend
+    // reports status="error" (e.g. SDK below baseline). Otherwise a version-gate
+    // failure is silently hidden until the user adds a key, which defeats the
+    // whole point of prioritizing error over no_api_key in `status_label`.
+    let claudeRuntimeHasError = false;
 
     function anthropicKeyConfigured() {
         const input = byId('s-anthropic');
@@ -78,11 +84,18 @@ export function initSettings({ state }) {
         return Boolean(String(currentSettings.ANTHROPIC_API_KEY || '').trim());
     }
 
+    function shouldShowClaudeRuntimeCard() {
+        // Show when the user has configured an Anthropic key, OR when the
+        // backend has reported a concrete runtime error that the user needs
+        // to see and repair (e.g. SDK below baseline, bundled CLI missing).
+        return anthropicKeyConfigured() || claudeRuntimeHasError;
+    }
+
     function renderClaudeCodeUi() {
         const panel = byId('settings-claude-code-panel');
         const note = byId('settings-claude-code-copy');
         const button = byId('btn-claude-code-install');
-        const visible = anthropicKeyConfigured();
+        const visible = shouldShowClaudeRuntimeCard();
         if (panel) panel.hidden = !visible;
         if (note) note.hidden = !visible;
         if (!visible) return;
@@ -99,6 +112,9 @@ export function initSettings({ state }) {
         const installed = Boolean(payload.installed);
         const busy = Boolean(payload.busy);
         const error = String(payload.error || '').trim();
+        // Track backend error state so `shouldShowClaudeRuntimeCard` can
+        // surface the card even without a configured API key.
+        claudeRuntimeHasError = Boolean(error);
         const message = String(payload.message || '').trim()
             || (ready ? 'Claude runtime ready.' : (installed ? 'Claude runtime available but not ready.' : 'Claude runtime not available.'));
         const tone = ready ? 'ok' : (error ? 'error' : (installed ? 'muted' : 'error'));
@@ -117,10 +133,9 @@ export function initSettings({ state }) {
     }
 
     async function refreshClaudeCodeStatus() {
-        if (!anthropicKeyConfigured()) {
-            renderClaudeCodeUi();
-            return;
-        }
+        // Always poll the backend — status errors (e.g. SDK below baseline) must
+        // surface even without a configured API key. The backend distinguishes
+        // "no_api_key" from "error" via the v4.33.1 `status_label` priority fix.
         try {
             const resp = await fetch('/api/claude-code/status', { cache: 'no-store' });
             const data = await resp.json().catch(() => ({}));
@@ -142,7 +157,9 @@ export function initSettings({ state }) {
         claudeCodePollStarted = true;
         refreshClaudeCodeStatus();
         setInterval(() => {
-            if (anthropicKeyConfigured()) refreshClaudeCodeStatus();
+            // Poll unconditionally so a below-baseline SDK stays visible even
+            // after the user clears the Anthropic key.
+            refreshClaudeCodeStatus();
         }, 3000);
     }
 
@@ -200,10 +217,11 @@ export function initSettings({ state }) {
         currentSettings = data;
         applySettings(data);
         renderClaudeCodeUi();
-        if (anthropicKeyConfigured()) {
-            startClaudeCodePolling();
-            refreshClaudeCodeStatus();
-        }
+        // Always start polling so a below-baseline SDK surfaces even before
+        // the user sets ANTHROPIC_API_KEY. `refreshClaudeCodeStatus` is now
+        // unconditional, and `shouldShowClaudeRuntimeCard` uses the runtime
+        // error signal to decide visibility.
+        startClaudeCodePolling();
     }
 
     function collectBody() {
@@ -212,7 +230,7 @@ export function initSettings({ state }) {
             OUROBOROS_MODEL_CODE: byId('s-model-code').value,
             OUROBOROS_MODEL_LIGHT: byId('s-model-light').value,
             OUROBOROS_MODEL_FALLBACK: byId('s-model-fallback').value,
-            CLAUDE_CODE_MODEL: byId('s-claude-code-model').value || 'opus',
+            CLAUDE_CODE_MODEL: byId('s-claude-code-model').value || 'claude-opus-4-7[1m]',
             OUROBOROS_EFFORT_TASK: byId('s-effort-task').value,
             OUROBOROS_EFFORT_EVOLUTION: byId('s-effort-evolution').value,
             OUROBOROS_EFFORT_REVIEW: byId('s-effort-review').value,

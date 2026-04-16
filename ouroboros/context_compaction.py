@@ -71,24 +71,14 @@ def _round_has_protected_content(messages: list, start: int, end: int) -> bool:
         msg = messages[idx]
         role = msg.get("role", "")
         content = str(msg.get("content") or "")
-        # Protect tool-result messages for critical tools or error markers
+        # Protect tool-result messages for critical tools or error markers.
+        # (v4.34.0: checkpoint-marker protection removed — the structured
+        # Known/Blocker/Decision/Next reflection format was retired in favour
+        # of a plain periodic user-message self-check, so there is no longer
+        # a durable checkpoint artifact that needs to survive compaction.)
         if role == "tool":
             tool_name = _find_tool_name_for_result(msg, messages)
             if tool_name in _COMPACTION_PROTECTED_TOOLS or content.startswith("⚠️"):
-                return True
-        # Protect checkpoint rounds: assistant message with CHECKPOINT_REFLECTION
-        # or CHECKPOINT_ANOMALY text must survive compaction so the audit artifact
-        # stays visible to future rounds.
-        if role == "assistant":
-            raw = msg.get("content") or ""
-            if isinstance(raw, list):
-                plain = " ".join(
-                    b.get("text", "") for b in raw
-                    if isinstance(b, dict)
-                )
-            else:
-                plain = str(raw)
-            if "CHECKPOINT_REFLECTION" in plain or "CHECKPOINT_ANOMALY" in plain:
                 return True
     return False
 

@@ -847,10 +847,20 @@ async def api_claude_code_install(request: Request) -> JSONResponse:
         except Exception:
             pass
 
+        # Single source of truth for the SDK baseline — mirrors the launcher
+        # bootstrap probe so web/onboarding repair installs the same version
+        # that the launcher repair path installs. Imported at call time (rather
+        # than at module load) so the error raises a clean 500 from the install
+        # endpoint instead of breaking server startup; but NO defaulted literal
+        # fallback is kept — that would reintroduce the drift this SSOT was
+        # meant to eliminate (one edit to `_CLAUDE_SDK_BASELINE` and one here
+        # would diverge silently). If the import truly fails, the runtime is
+        # already unusable and the caller should see the error.
+        from ouroboros.launcher_bootstrap import _CLAUDE_SDK_BASELINE as sdk_baseline
+
         result = await asyncio.to_thread(
             lambda: _sp.run(
-                [interpreter, "-m", "pip", "install", "--upgrade",
-                 "claude-agent-sdk>=0.1.50"],
+                [interpreter, "-m", "pip", "install", "--upgrade", sdk_baseline],
                 capture_output=True, text=True, timeout=120,
             )
         )

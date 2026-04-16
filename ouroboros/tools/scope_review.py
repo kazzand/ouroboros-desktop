@@ -490,17 +490,59 @@ concrete artifact reference must be marked advisory, not critical.
 
 Output ONLY a valid JSON array.
 
+You MUST produce EXACTLY ONE entry per checklist item from the
+Intent / Scope Review Checklist below. Skipping an item is not allowed —
+a missing entry indicates the item was not actually reviewed.
+
+The eight checklist item identifiers you MUST return (exactly these strings
+in the "item" field; one entry each, no duplicates, no substitutions):
+
+    1. intent_alignment
+    2. forgotten_touchpoints
+    3. cross_surface_consistency
+    4. regression_surface
+    5. prompt_doc_sync
+    6. architecture_fit
+    7. cross_module_bugs
+    8. implicit_contracts
+
 Each element must have:
-- "item"
+- "item" (one of the eight identifiers above — verbatim, case-sensitive)
 - "verdict": "PASS" or "FAIL"
 - "severity": "critical" or "advisory"
-- "reason"
+- "reason":
+  - For FAIL: concrete artifact (file/symbol/line/contract) + what is wrong + how to fix.
+  - For PASS: 1–2 sentences stating WHY this item passes, naming a concrete
+    artifact or code path that you checked. A bare "PASS" or single-word
+    reason without justification indicates the item was not actually
+    reviewed and will be treated as a reviewer failure.
 
 Severity rules:
 - Use "critical" only when you can cite a concrete missing file, symbol, test, prompt, doc, config, or sibling path and explain why the transformation is incomplete or inconsistent.
 - If you cannot point to an exact touchpoint, use "advisory".
 - Scope affects only unchanged legacy code outside the diff. The diff itself is always fully reviewable.
 - For cross-surface / prose-vs-code mismatches apply the `Critical surface whitelist` in `docs/CHECKLISTS.md` — only release metadata, tool schema, module map, behavioural documentation, and safety contracts qualify as critical; commentary and narrative prose mismatches are advisory.
+
+## Anti pattern-lock guard
+
+If after your first reading you have found **exactly one FAIL** and all
+other items are PASS, do a deliberate SECOND pass focused on a DIFFERENT
+concern class before returning. Real diffs that have exactly one issue
+are rarer than diffs with several issues on different dimensions;
+single-FAIL outputs are the most common pattern-lock failure mode.
+
+Concrete pairings for the second pass:
+- If your FAIL was in `intent_alignment`, re-examine `forgotten_touchpoints` and `cross_module_bugs`.
+- If your FAIL was in `forgotten_touchpoints`, re-examine `cross_surface_consistency` and `implicit_contracts`.
+- If your FAIL was in `cross_surface_consistency`, re-examine `implicit_contracts` and `regression_surface`.
+- If your FAIL was in `regression_surface`, re-examine `cross_module_bugs` and `architecture_fit`.
+- If your FAIL was in `cross_module_bugs`, re-examine `implicit_contracts` and `forgotten_touchpoints`.
+- If your FAIL was in `implicit_contracts`, re-examine `cross_module_bugs` and `regression_surface`.
+- If your FAIL was in `prompt_doc_sync`, re-examine `cross_surface_consistency` and `architecture_fit`.
+- If your FAIL was in `architecture_fit`, re-examine `implicit_contracts` and `regression_surface`.
+
+Update PASS entries in-place if your second pass uncovers new FAILs.
+Return only one JSON array — not two.
 
 {critical_calibration}
 

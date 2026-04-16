@@ -432,10 +432,14 @@ class ClaudeRuntimeState:
     def status_label(self) -> str:
         if not self.sdk_version:
             return "missing"
-        if not self.api_key_set:
-            return "no_api_key"
+        # Error (e.g. below-baseline SDK) takes priority over no_api_key so a
+        # version-gate failure is surfaced even when ANTHROPIC_API_KEY is
+        # absent — otherwise the repair prompt is silently shadowed and the
+        # user only learns about the real blocker after adding a key.
         if self.error:
             return "error"
+        if not self.api_key_set:
+            return "no_api_key"
         if not self.ready:
             return "degraded"
         return "ready"
@@ -553,8 +557,32 @@ def resolve_claude_runtime() -> ClaudeRuntimeState:
     # API key
     state.api_key_set = bool(os.environ.get("ANTHROPIC_API_KEY", "").strip())
 
-    # Ready = SDK present + CLI present + API key set
-    state.ready = bool(state.sdk_version and state.cli_path and state.api_key_set)
+    # Ready = SDK present + SDK at/above minimum baseline + CLI present + API key set.
+    # The baseline gate prevents silent "ready" states on upgraded installs where
+    # an older SDK (e.g. 0.1.50) still imports and has a bundled CLI, but pre-dates
+    # Opus 4.7 adaptive thinking support — a 400 from the API would otherwise
+    # surprise the user despite a green status.
+    sdk_version_ok = False
+    if state.sdk_version:
+        try:
+            from ouroboros.launcher_bootstrap import _CLAUDE_SDK_MIN_VERSION, _version_tuple
+            sdk_version_ok = _version_tuple(state.sdk_version) >= _version_tuple(_CLAUDE_SDK_MIN_VERSION)
+        except Exception:
+            # Fail-closed: if the baseline cannot be resolved, treat as not-ready
+            # so the UI surfaces a Repair action rather than a false green.
+            sdk_version_ok = False
+    state.ready = bool(
+        state.sdk_version and sdk_version_ok and state.cli_path and state.api_key_set
+    )
+    if state.sdk_version and not sdk_version_ok and not state.error:
+        try:
+            from ouroboros.launcher_bootstrap import _CLAUDE_SDK_MIN_VERSION
+            state.error = (
+                f"Claude SDK {state.sdk_version} is below baseline {_CLAUDE_SDK_MIN_VERSION}. "
+                "Run Repair to upgrade."
+            )
+        except Exception:
+            state.error = f"Claude SDK {state.sdk_version} is below the required baseline."
 
     return state
 

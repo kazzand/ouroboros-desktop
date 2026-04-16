@@ -59,12 +59,47 @@ class TestPlanReviewInputValidation(unittest.TestCase):
 
 
 class TestPlanReviewModels(unittest.TestCase):
-    def test_falls_back_to_main_model_when_not_configured(self):
+    def test_falls_back_to_config_default_when_env_is_empty(self):
+        """Empty OUROBOROS_REVIEW_MODELS → use the shipped SETTINGS_DEFAULTS.
+
+        Post-v4.33.1: plan_task delegates to ``config.get_review_models``,
+        which returns the shipped triad default when the env is empty — the
+        same behavior as the commit triad. This keeps plan_task and commit
+        review in lockstep instead of plan_task silently collapsing to
+        ``[main] * 3`` on an unconfigured instance.
+
+        Hermetic: explicitly clears all provider env vars AND
+        ``OPENAI_BASE_URL`` so this test does not depend on shell/CI
+        environment. An ambient ANTHROPIC_API_KEY (or any direct-provider
+        key) would flip ``config.get_review_models`` into the exclusive
+        direct-provider fallback path and break the assertion, and a
+        non-empty ``OPENAI_BASE_URL`` is treated as a custom runtime
+        configuration by ``_exclusive_direct_remote_provider_env`` which
+        also alters the code path.
+        """
         from ouroboros.tools.plan_review import _get_review_models
-        with patch.dict(os.environ, {"OUROBOROS_REVIEW_MODELS": "", "OUROBOROS_MODEL": "test/model-x"}, clear=False):
+        env = {
+            "OUROBOROS_REVIEW_MODELS": "",
+            "OUROBOROS_MODEL": "test/model-x",
+            "OPENROUTER_API_KEY": "",
+            "OPENAI_API_KEY": "",
+            "OPENAI_BASE_URL": "",
+            "OPENAI_COMPATIBLE_API_KEY": "",
+            "CLOUDRU_FOUNDATION_MODELS_API_KEY": "",
+            "ANTHROPIC_API_KEY": "",
+        }
+        with patch.dict(os.environ, env, clear=False):
             models = _get_review_models()
         self.assertEqual(len(models), 3)
-        self.assertTrue(all(m == "test/model-x" for m in models))
+        # The shipped default is the 3-model OpenRouter triad (GPT-5.4,
+        # Gemini 3.1 Pro Preview, Claude Opus 4.7). Exact identities are
+        # version-tracked in config.SETTINGS_DEFAULTS; we just assert the
+        # size and that we did NOT silently collapse to [main] * 3.
+        self.assertFalse(
+            all(m == "test/model-x" for m in models),
+            f"plan_task must not silently collapse to main × 3 when the default triad "
+            f"is configured; got {models!r}",
+        )
 
     def test_returns_configured_models(self):
         from ouroboros.tools.plan_review import _get_review_models
@@ -101,6 +136,44 @@ class TestPlanReviewModels(unittest.TestCase):
         self.assertEqual(models[0], "model/a")
         self.assertEqual(models[1], "model/b")
         self.assertEqual(models[2], "model/b")  # last model padded
+
+    def test_delegates_to_config_get_review_models_for_direct_provider_fallback(self):
+        """plan_task must use the same direct-provider fallback as the commit triad.
+
+        Regression guard for v4.33.1 scope review finding
+        ``plan_task_review_model_parity``: ``_get_review_models`` previously
+        parsed ``OUROBOROS_REVIEW_MODELS`` directly, bypassing
+        ``config.get_review_models``'s OpenAI-only / Anthropic-only fallback
+        that rewrites the list to ``[main_model] * 3`` when the configured
+        reviewers don't match the exclusive direct-provider prefix. The two
+        flows must stay in lockstep.
+        """
+        from ouroboros.tools.plan_review import _get_review_models
+        # Simulate Anthropic-only direct setup: only ANTHROPIC key present,
+        # main is anthropic::..., but the reviewer list is still the default
+        # OpenRouter-style set (so none match the anthropic:: prefix).
+        # Hermetic: also clears OPENAI_BASE_URL because a non-empty value is
+        # treated as a custom-runtime signal by
+        # `_exclusive_direct_remote_provider_env` and disables the exclusive
+        # direct-provider fallback path we are testing here.
+        env = {
+            "OUROBOROS_REVIEW_MODELS": "openai/gpt-5.4,google/gemini-3.1-pro-preview,anthropic/claude-opus-4.7",
+            "OUROBOROS_MODEL": "anthropic::claude-opus-4-7",
+            "OPENROUTER_API_KEY": "",
+            "OPENAI_API_KEY": "",
+            "OPENAI_BASE_URL": "",
+            "OPENAI_COMPATIBLE_API_KEY": "",
+            "CLOUDRU_FOUNDATION_MODELS_API_KEY": "",
+            "ANTHROPIC_API_KEY": "sk-ant-test",
+        }
+        with patch.dict(os.environ, env, clear=False):
+            models = _get_review_models()
+        # Expect the Anthropic-only fallback: main model repeated.
+        self.assertEqual(len(models), 3)
+        self.assertTrue(
+            all(m == "anthropic::claude-opus-4-7" for m in models),
+            f"expected main model × 3 for Anthropic-only direct setup, got {models!r}",
+        )
 
 
 class TestPlanReviewChecklist(unittest.TestCase):

@@ -1,4 +1,4 @@
-# Ouroboros v4.33.0 — Architecture & Reference
+# Ouroboros v4.34.0 — Architecture & Reference
 
 This document describes every component, page, button, API endpoint, and data flow.
 It is the single source of truth for how the system works. Keep it updated.
@@ -283,18 +283,17 @@ The Dashboard tab has been removed. Its functionality is now distributed:
 - **Provider cards**: OpenRouter, OpenAI, OpenAI-compatible, Cloud.ru, Anthropic, plus optional Network Password. Cards are collapsible and use masked-secret inputs with show/hide toggles.
 - **API Keys**: OpenRouter, OpenAI, OpenAI-compatible, Cloud.ru, Anthropic, Telegram Bot Token, GitHub Token, and Network Password.
   Keys are displayed as masked values (e.g., `sk-or-v1...`), can be explicitly cleared, and are only overwritten on save if the user enters a new value (not containing `...`).
-- **Claude Runtime Status**: when Anthropic is configured, the Anthropic card shows app-managed Claude runtime status with `Repair Runtime` action.
-  The Claude runtime (SDK + bundled CLI) powers delegated code editing and advisory review and is managed automatically by the app.
+- **Claude Runtime Status**: the Anthropic card shows app-managed Claude runtime status with a `Repair Runtime` action. The card is visible when the user has configured `ANTHROPIC_API_KEY` **or** when the last `/api/claude-code/status` poll stored a non-empty `error` on the runtime card state (`claudeRuntimeHasError` in `web/modules/settings.js::applyClaudeCodeStatus`). Two distinct paths set that `error`: (a) backend `ouroboros/platform_layer.py::resolve_claude_runtime` marks the SDK below the `_CLAUDE_SDK_MIN_VERSION` baseline (the only backend-originated path today — other not-ready conditions such as a missing bundled CLI currently fall through to `status_label() == "no_api_key"` until a key is configured); (b) the browser-side `refreshClaudeCodeStatus` `catch` block synthesizes an error payload for any `/api/claude-code/status` transport failure, non-OK HTTP response, or JSON parse error, so loss of connectivity to the backend also surfaces the card before a key is configured. The Claude runtime (SDK + bundled CLI) powers delegated code editing and advisory review and is managed automatically by the app.
 - **Providers tab**: also contains `Legacy OpenAI Base URL` (backward-compatibility escape hatch for older installs) and `Network Gate` (optional non-localhost password) at the bottom.
 - **Models tab**: Main, Code, Light, Fallback model routing. Each card has a `Local` toggle to route through the GGUF server configured in Advanced. `Claude Code Model` field selects the Anthropic model for `claude_code_edit` / `advisory_pre_review`.
 - **Model catalog**: optional `Refresh Model Catalog` action calls `/api/model-catalog`. Failures are non-fatal and surfaced as inline warnings.
 - **Model pickers**: searchable provider-aware pickers replace legacy raw dropdowns for remote models.
 - **Provider prefixes**:
-  - OpenRouter model values stay unprefixed (`anthropic/claude-opus-4.6`).
+  - OpenRouter model values stay unprefixed (`anthropic/claude-opus-4.7`).
   - OpenAI model values use `openai::...`.
   - OpenAI-compatible model values use `openai-compatible::...`.
   - Cloud.ru model values use `cloudru::...`.
-  - Anthropic model values use `anthropic::...` (e.g. `anthropic::claude-opus-4.6`).
+  - Anthropic model values use `anthropic::...` (e.g. `anthropic::claude-opus-4-7`).
 - **Behavior tab**: agent-behavior policy settings — Reasoning Effort and Review Enforcement (the two-button advisory/blocking toggle). Review models and Web Search Model live in the Models tab alongside model routing.
 - **Reasoning Effort**: Five segmented controls for task/chat, evolution, review, scope review, and consciousness.
   Backed by `OUROBOROS_EFFORT_TASK`, `OUROBOROS_EFFORT_EVOLUTION`, `OUROBOROS_EFFORT_REVIEW`,
@@ -304,7 +303,7 @@ The Dashboard tab has been removed. Its functionality is now distributed:
   Backed by `OUROBOROS_REVIEW_MODELS`.
 - **Scope Review Model**: Single model for the blocking scope reviewer.
   Backed by `OUROBOROS_SCOPE_REVIEW_MODEL` (default `anthropic/claude-opus-4.6`).
-- **OpenAI-only review fallback**: if official OpenAI is the only configured remote runtime and the review list is invalid/underspecified, review falls back to the main model repeated three times.
+- **Direct-provider review fallback** (formerly "OpenAI-only review fallback"): if exactly one of **official OpenAI** or **Anthropic** is configured (no OpenRouter, no legacy OpenAI base URL, no OpenAI-compatible, no Cloud.ru) and the configured review list is invalid or doesn't match the exclusive provider prefix, review falls back to the main model repeated three times. Current scope is OpenAI-only and Anthropic-only — the detector (`ouroboros/config.py::_exclusive_direct_remote_provider_env`) early-returns `""` when OpenAI-compatible or Cloud.ru keys are present, so those provider-only setups do not yet receive the fallback. The fallback additionally requires the main slot `OUROBOROS_MODEL` — after `provider_models.migrate_model_value` — to already start with the exclusive provider prefix (`openai::` / `anthropic::`); if the normalized main model does not match the prefix, `get_review_models` leaves the configured reviewer list untouched and does **not** rewrite it to `[main]*3`. This covers the edge case where the Settings `#s-model` free-text input accepts a non-default cross-provider value. The same SSOT (`ouroboros/config.py::get_review_models`) powers both the commit triad and `plan_task`.
 - **Review Enforcement**: `Advisory` or `Blocking` for pre-commit review behavior. Rendered as a two-button segmented toggle (advisory = amber, blocking = crimson) rather than a dropdown.
   Backed by `OUROBOROS_REVIEW_ENFORCEMENT`. Review always runs in both modes.
 - **Advanced tab**: local model runtime, max workers, tool timeout, soft/hard timeout, and reset controls. Total budget and per-task cost cap have moved to the **Costs** page.
@@ -558,37 +557,46 @@ backward compatibility but is not the runtime authority.
   for the real result (hard ceiling: 1800s). This prevents ambiguous "tool timed out, maybe
   still running" states for commit operations.
 - Context compaction kicks in after round 8 (summarizes old tool results)
-- **Loop checkpoint** (`_maybe_inject_self_check`): every 15 rounds, an audit-only self-check message is
-  injected into the transcript. Includes: checkpoint number, round/max, token count, cost so far,
-  and a **last-15-tool-call trace** built by `_build_recent_tool_trace` (P3 LLM-First — trace is
-  provided as factual data, the LLM decides if it represents repetition). On checkpoint rounds,
-  `run_llm_loop` passes `tools=None` to `call_llm_with_retry` in both primary and fallback paths,
-  so the model cannot silently switch into tool use instead of reflection. The checkpoint prompt asks
-  the LLM to write a `CHECKPOINT_REFLECTION:` block with four structured fields: **Known** (verified
-  facts), **Blocker** (concrete obstacle or 'none'), **Decision** (approach and rationale), **Next**
-  (most important next action). The wording explicitly frames the reflection as operational rather than
-  narrative, asks the model to reconsider whether the current approach/plan is still valid, and calls
-  out narrower scope or a different line of attack as valid checkpoint outcomes while preserving the
-  exact `Known/Blocker/Decision/Next` parser contract.
-  **Audit-only invariant**: a checkpoint round can never finalize the task. `ouroboros/loop.py::_handle_checkpoint_response`
-  classifies the output as either a valid reflection or a checkpoint anomaly, persists the artifact,
-  appends a synthetic continuation user message, and continues into the next normal round.
-  Missing markers, empty output, or malformed audit text are never treated as final answers.
-  **Compaction protection**: `context_compaction.py::_round_has_protected_content` detects assistant
-  messages containing either `"CHECKPOINT_REFLECTION"` or `"CHECKPOINT_ANOMALY"` and marks the entire
-  span as protected, so audit artifacts survive `compact_tool_history_llm` and remain visible to all
-  subsequent rounds throughout the task. After the LLM responds on a checkpoint round, one of two
-  durable paths fires: (1) `_emit_checkpoint_reflection_event` emits `task_checkpoint_reflection`
-  with the full assistant content (no truncation, P1 Continuity); or (2) `_emit_checkpoint_anomaly_event`
-  emits `task_checkpoint_anomaly` with the malformed/empty output and anomaly type. In both cases,
-  a progress message is emitted via `emit_progress` so the artifact appears in the chat live card
-  timeline and survives page reload/reconnect via `progress.jsonl` replay.
-  `task_checkpoint`, `task_checkpoint_reflection`, and `task_checkpoint_anomaly` events are handled in
-  `web/modules/log_events.js::summarizeLogEvent` (Logs tab timeline with metadata) and by
-  `summarizeChatLiveEvent` (returns `visible: false` for checkpoint events — the chat live card uses
-  the emit_progress path as the single visible source to avoid duplicates). All three event types are
-  persisted to `logs/events.jsonl` by `supervisor/events.py::_handle_log_event`. When `event_queue`
-  is `None` (direct/test path), reflection and anomaly events fall back to direct `append_jsonl`.
+- **Loop checkpoint** (`_maybe_inject_self_check`): every 15 rounds, a plain `user` message is
+  inserted into the transcript (as the LAST message, AFTER `_drain_incoming_messages`, so that any
+  queued owner messages are already flushed to the transcript and the checkpoint is what the LLM
+  sees last) carrying (a) checkpoint number, round/max, context-token estimate,
+  cost so far; (b) a `_build_recent_tool_trace` listing the last 15 tool calls with argument
+  summaries (P3 LLM-First — the trace is factual data, the LLM decides what it means);
+  (c) a short directed self-check prompt asking the model to consider whether it is still
+  making progress, whether the current approach is still right or scope should narrow,
+  and whether the task is effectively done and should wrap up. Not a special round —
+  tools remain enabled, reasoning effort is unchanged. On subsequent (non-checkpoint)
+  rounds the message flows through normal `compact_tool_history_llm` like any other user
+  turn; the checkpoint round itself skips compaction (guard: `if not _checkpoint_injected`
+  around the compactor call in `run_llm_loop`) because running the light-model compactor
+  on the same turn we just appended the self-check would double the LLM cost for no
+  behavioural gain (the fresh message is inside `keep_recent=50` anyway).
+  **Consecutive-user-message safety**: if the transcript already ended with a `user` turn
+  at injection time (for example: an owner message drained by `_drain_incoming_messages`
+  between rounds), the checkpoint text is **merged into that existing turn** with a
+  `\n\n---\n\n` separator instead of being appended as a second user message. Anthropic's
+  Messages API rejects consecutive same-role messages with a 400, and OpenRouter routes
+  Anthropic models through that path — a naive append could silently drop the
+  checkpoint round's LLM call on Claude models. Observability: a single `task_checkpoint`
+  event is emitted via the supervisor event queue (or direct file append when the
+  queue is absent), surfaced in the Logs tab and chat live card via
+  `web/modules/log_events.js::summarizeLogEvent` and `summarizeChatLiveEvent`
+  (chat live card returns `visible: false` so the `emit_progress` path remains the
+  single visible chat source). The event is persisted to `logs/events.jsonl` by
+  `supervisor/events.py::_handle_log_event` for postmortem analysis.
+  **Rationale for the minimalist design**: the previous structured-reflection
+  mechanism (`Known/Blocker/Decision/Next` four-field contract, tools disabled,
+  `effort=xhigh`, audit-only invariant with reflection/anomaly classification)
+  produced **0 valid reflections and 37 `task_checkpoint_anomaly` records** in
+  production logs before this rewrite. Root causes: (1) `role=system` injection
+  was absorbed into the top-level system prompt on Anthropic-via-OpenRouter,
+  so the last message in the conversation was still the previous `tool_result`
+  and the model continued by inertia; (2) `effort=xhigh` plus `tools=None` invalidated
+  the prompt cache on every checkpoint; (3) the strict four-field parser rejected
+  almost every real answer the model tried to give. The ceremony competed with
+  the model's actual work without adding usable signal, so it was retired in favour
+  of this single-message self-check.
 
 ### Claude runtime (gateways/claude_code.py + platform_layer.py)
 
@@ -876,8 +884,14 @@ the constitutional guard is that the file itself must remain non-deletable.
 - **Purpose**: review a proposed implementation plan BEFORE writing any code. Call this
   for non-trivial tasks (>2 files or >50 lines of changes) to surface forgotten touchpoints,
   implicit contract violations, and simpler alternatives before the first edit.
-- **Models**: uses the same 3 models from `OUROBOROS_REVIEW_MODELS` (same as commit triad).
-  Falls back to repeating `OUROBOROS_MODEL` three times if unconfigured.
+- **Models**: delegated to `ouroboros.config.get_review_models()` — the same SSOT
+  that powers `repo_commit`'s triad, so plan_task and commit review stay in
+  lockstep. Empty `OUROBOROS_REVIEW_MODELS` uses the shipped `SETTINGS_DEFAULTS`
+  triad. In OpenAI-only or Anthropic-only direct-provider setups, if the
+  configured triad doesn't match the exclusive provider prefix, the reviewer
+  list is rewritten to `[main_model] * 3` so plan_task never strands on a
+  wrong-provider reviewer list. `plan_task` then pads to exactly 3 reviewers
+  if fewer are configured.
 - **Inputs**: `plan` (description of what to change), `goal` (problem being solved), and
   optional `files_to_touch` (repo-relative paths whose HEAD content is injected for context).
 - **Context per reviewer**: full repo pack (same as scope review — no char cap, binary/sensitive
@@ -944,8 +958,10 @@ errors surface via the same observability path.
   This converts `parse_failure` → `fresh` run on the vast majority of real advisory outputs,
   saving $32–64 per bypass cycle.
   Model resolved via `resolve_claude_code_model()` — respects `CLAUDE_CODE_MODEL` setting,
-  defaults to `opus` (same helper used by `claude_code_edit`). Shared Claude Code turn budget:
-  50 turns for both advisory and edit paths. Per-tool timeout floor: 1200s (20 min).
+  defaults to `claude-opus-4-7[1m]` (same helper used by `claude_code_edit`; the `[1m]` suffix
+  is a Claude Code selector requesting the 1M-context extended mode on Opus 4.7). Shared
+  Claude Code turn budget: 50 turns for both advisory and edit paths. Per-tool timeout
+  floor: 1200s (20 min).
   Prompt includes the "Repo Commit Checklist" section from
   CHECKLISTS.md (precise section loader), plus BIBLE.md, DEVELOPMENT.md, ARCHITECTURE.md,
   touched-file pack, goal/scope sections, git status, and worktree diff.
@@ -1118,6 +1134,14 @@ errors surface via the same observability path.
   `CRITICAL_FINDING_CALIBRATION` text from `review_helpers.py`, so severity tuning (for example,
   keeping narrative README/count mismatches advisory while preserving release/safety invariants as
   critical) stays consistent across all three review surfaces.
+- **Anti pattern-lock guard** (v4.34.0): the triad prompt includes an explicit instruction that
+  if the first pass surfaces exactly one FAIL across the 14 items, the reviewer must do a
+  deliberate second pass focused on a different concern class (examples: `code_quality` → re-examine
+  `tests_affected` and `self_consistency`; `cross_platform` → re-examine `security_issues` and
+  `architecture_doc`; `version_bump` → re-examine `changelog_and_badge` and `self_consistency`)
+  and update PASS entries in-place if the second pass uncovers new FAILs. Rationale: real diffs
+  with exactly one issue are rarer than diffs with several issues on different dimensions, so
+  single-FAIL outputs are the most common pattern-lock failure mode of single-pass review.
 - Enforcement configurable: `blocking` or `advisory`.
 
 #### Blocking scope review
@@ -1156,6 +1180,8 @@ errors surface via the same observability path.
   oversized (>1MB), and directory prefixes `.cursor/`, `.github/`, `.vscode/`, `.idea/`, `assets/`,
   `webview/`. Explicit omission count appended when files are skipped.
 - Checklist items (v4.14.1): 8 items including `cross_module_bugs` (does the change break something in a different module through implicit coupling?) and `implicit_contracts` (are there constants, data format assumptions, or expected signatures relied upon by other modules that this change violates?).
+- **Full 8-item matrix output** (v4.34.0): the scope prompt now requires the reviewer to emit one JSON entry per Intent/Scope checklist item (8 entries total) rather than only FAILs. PASS entries are mandatory and must carry 1–2 sentences of justification naming a concrete artifact or code path that was checked — a bare "PASS" or single-word reason is explicitly called out as a reviewer failure. Rationale: before v4.34.0, scope returned only 1–2 FAILs while triad returned the full 14-item matrix, so scope coverage silently collapsed whenever the reviewer locked onto one concern class. The matrix contract makes skipped items visible and makes shallow PASS reasoning auditable in `scope_raw_result`. `_classify_scope_findings` continues to forward only `verdict == "FAIL"` entries to the commit gate, so the added PASS rows do not change blocking behaviour — they only make the reviewer's actual coverage visible.
+- **Anti pattern-lock guard** (v4.34.0): the scope prompt now explicitly instructs the reviewer that if the first pass surfaces exactly one FAIL (and all other items are PASS), it must run a deliberate second pass focused on a different concern class before returning. Concrete pairings are listed in the prompt: `intent_alignment` → `forgotten_touchpoints`/`cross_module_bugs`; `forgotten_touchpoints` → `cross_surface_consistency`/`implicit_contracts`; etc. The reviewer updates PASS entries in-place if the second pass uncovers new FAILs and returns a single JSON array. Mirrors the same guard added to triad prompts in v4.34.0 — single-FAIL outputs are the most common pattern-lock failure mode of single-pass review.
 - **Budget gate**: after assembling the full scope-review prompt, token count is estimated via `estimate_tokens` (chars/4 heuristic). If the estimate exceeds `_SCOPE_BUDGET_TOKEN_LIMIT` (850K tokens), scope review is **skipped with a non-blocking warning** rather than crashing or sending an oversized request. The commit is not blocked in this case. Context math: 1M window is shared input+output; chars/4 under-counts by ~15%, so actual input at gate=850K is ≈1M tokens and output max_tokens draws from the same 1M ceiling — the skip path is best-effort.
 - **`_TouchedContextStatus` dataclass** (v4.14.1): structured signal object used by `_build_scope_prompt()` to replace the old magic-string channel. `_compute_touched_status()` produces the touched-file statuses; `_build_scope_prompt()` creates `budget_exceeded` after estimating the assembled prompt. Fields: `status` ("empty"|"omitted"|"budget_exceeded"), `omitted_paths`, `token_count`. Success is represented by `context_status is None`, not a separate `"ok"` status. This prevents filename–sentinel collision (a real file named `__empty__` cannot be misclassified as a control sentinel).
 - **`ScopeReviewResult` epistemic fields** (v4.32.0): `raw_text` (full untruncated LLM response), `model_id`, `status` (`"responded"` | `"error"` | `"parse_failure"` | `"empty_response"` | `"budget_exceeded"` | `"omitted"` | `"empty"`), `prompt_chars`, `tokens_in`, `tokens_out`, `cost_usd`. `_handle_prompt_signals` explicitly sets `status` on all early-exit paths so budget-exceeded and empty-context skips are distinguishable from a real PASS; `budget_exceeded` path now also sets `prompt_chars = token_count * 4` so the forensic size fact is preserved. Empty LLM response uses `status="empty_response"` (distinct from `status="error"` transport failures). `run_scope_review` populates these from the LLM call response and propagates them via `parallel_review.py` into `ctx._last_scope_raw_result`, which `_record_commit_attempt` persists on every attempt record. `_run_unified_review` quorum check counts only `status=="responded"` triad actors — `parse_failure` actors are treated the same as transport errors for quorum purposes (both represent unusable evidence).
@@ -1224,17 +1250,17 @@ Settings file: `~/Ouroboros/data/settings.json`. File-locked for concurrent acce
 | TELEGRAM_BOT_TOKEN | "" | Optional. Enables Telegram bridge polling/sending |
 | TELEGRAM_CHAT_ID | "" | Optional. Pin replies to a specific Telegram chat |
 | OUROBOROS_NETWORK_PASSWORD | "" | Optional. Enables the non-loopback auth gate when set; empty still allows open bind, but startup logs a warning |
-| OUROBOROS_MODEL | anthropic/claude-opus-4.6 | Main reasoning model |
-| OUROBOROS_MODEL_CODE | anthropic/claude-opus-4.6 | Code editing model |
+| OUROBOROS_MODEL | anthropic/claude-opus-4.7 | Main reasoning model |
+| OUROBOROS_MODEL_CODE | anthropic/claude-opus-4.7 | Code editing model |
 | OUROBOROS_MODEL_LIGHT | anthropic/claude-sonnet-4.6 | Fast/cheap model (safety, consciousness) |
 | OUROBOROS_MODEL_FALLBACK | anthropic/claude-sonnet-4.6 | Fallback when primary fails |
-| CLAUDE_CODE_MODEL | opus | Anthropic model for Claude Agent SDK tools (`claude_code_edit`, `advisory_pre_review`; values: sonnet, opus, or full model name) |
+| CLAUDE_CODE_MODEL | claude-opus-4-7[1m] | Anthropic model for Claude Agent SDK tools (`claude_code_edit`, `advisory_pre_review`; values: sonnet, opus, `claude-opus-4-7[1m]`, or full model name; the `[1m]` suffix is a Claude Code selector that requests the 1M-context extended mode) |
 | OUROBOROS_MAX_WORKERS | 5 | Worker process pool size |
 | TOTAL_BUDGET | 10.0 | Total budget in USD |
 | OUROBOROS_PER_TASK_COST_USD | 20.0 | Per-task soft threshold in USD |
 | OUROBOROS_TOOL_TIMEOUT_SEC | 600 | Global tool timeout override (read live from settings.json on each tool call) |
 | OUROBOROS_WEBSEARCH_MODEL | gpt-5.2 | Official OpenAI Responses model for `web_search` when `OPENAI_BASE_URL` is empty |
-| OUROBOROS_REVIEW_MODELS | openai/gpt-5.4,google/gemini-3.1-pro-preview,anthropic/claude-opus-4.6 | Comma-separated OpenRouter model IDs for pre-commit review (min 2 for quorum) |
+| OUROBOROS_REVIEW_MODELS | openai/gpt-5.4,google/gemini-3.1-pro-preview,anthropic/claude-opus-4.7 | Comma-separated OpenRouter model IDs for pre-commit review (min 2 for quorum) |
 | OUROBOROS_REVIEW_ENFORCEMENT | advisory | Pre-commit review enforcement: `advisory` or `blocking` |
 | OUROBOROS_SCOPE_REVIEW_MODEL | anthropic/claude-opus-4.6 | Single model for the blocking scope reviewer |
 | OUROBOROS_EFFORT_TASK | medium | Reasoning effort for task/chat: none, low, medium, high |

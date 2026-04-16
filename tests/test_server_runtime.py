@@ -26,8 +26,8 @@ def test_has_supervisor_provider_requires_remote_credentials_or_local_routing():
 def test_apply_runtime_provider_defaults_autofills_official_openai_models():
     normalized, changed, changed_keys = apply_runtime_provider_defaults({
         "OPENAI_API_KEY": "sk-openai",
-        "OUROBOROS_MODEL": "anthropic/claude-opus-4.6",
-        "OUROBOROS_MODEL_CODE": "anthropic/claude-opus-4.6",
+        "OUROBOROS_MODEL": "anthropic/claude-opus-4.7",
+        "OUROBOROS_MODEL_CODE": "anthropic/claude-opus-4.7",
         "OUROBOROS_MODEL_LIGHT": "anthropic/claude-sonnet-4.6",
         "OUROBOROS_MODEL_FALLBACK": "anthropic/claude-sonnet-4.6",
     })
@@ -88,6 +88,9 @@ def test_apply_runtime_provider_defaults_keeps_explicit_official_openai_review_m
 
 
 def test_apply_runtime_provider_defaults_normalizes_anthropic_only_setup():
+    """Legacy path: saved settings.json from older versions had claude-opus-4.6 —
+    must still normalize to the Anthropic direct-provider prefix form.
+    This guards backward compatibility for existing user installs."""
     normalized, changed, changed_keys = apply_runtime_provider_defaults({
         "ANTHROPIC_API_KEY": "sk-ant",
         "OUROBOROS_MODEL": "anthropic/claude-opus-4.6",
@@ -109,6 +112,34 @@ def test_apply_runtime_provider_defaults_normalizes_anthropic_only_setup():
     assert normalized["OUROBOROS_MODEL_LIGHT"] == "anthropic::claude-sonnet-4-6"
     assert normalized["OUROBOROS_MODEL_FALLBACK"] == "anthropic::claude-sonnet-4-6"
     assert normalized["OUROBOROS_REVIEW_MODELS"] == ",".join(["anthropic::claude-opus-4-6"] * 3)
+
+
+def test_apply_runtime_provider_defaults_normalizes_anthropic_only_setup_with_shipped_defaults():
+    """Fresh-install path: user starts with shipped SETTINGS_DEFAULTS (claude-opus-4.7)
+    and adds only an Anthropic key. Main/code must normalize to anthropic::claude-opus-4-7
+    (the dash form), and REVIEW_MODELS must fall back to main × 3 for the missing triad.
+    This regression-pins the post-v4.33.1 default migration path."""
+    normalized, changed, changed_keys = apply_runtime_provider_defaults({
+        "ANTHROPIC_API_KEY": "sk-ant",
+        "OUROBOROS_MODEL": "anthropic/claude-opus-4.7",
+        "OUROBOROS_MODEL_CODE": "anthropic/claude-opus-4.7",
+        "OUROBOROS_MODEL_LIGHT": "anthropic/claude-sonnet-4.6",
+        "OUROBOROS_MODEL_FALLBACK": "anthropic/claude-sonnet-4.6",
+    })
+
+    assert changed
+    assert set(changed_keys) == {
+        "OUROBOROS_MODEL",
+        "OUROBOROS_MODEL_CODE",
+        "OUROBOROS_MODEL_LIGHT",
+        "OUROBOROS_MODEL_FALLBACK",
+        "OUROBOROS_REVIEW_MODELS",
+    }
+    assert normalized["OUROBOROS_MODEL"] == "anthropic::claude-opus-4-7"
+    assert normalized["OUROBOROS_MODEL_CODE"] == "anthropic::claude-opus-4-7"
+    assert normalized["OUROBOROS_MODEL_LIGHT"] == "anthropic::claude-sonnet-4-6"
+    assert normalized["OUROBOROS_MODEL_FALLBACK"] == "anthropic::claude-sonnet-4-6"
+    assert normalized["OUROBOROS_REVIEW_MODELS"] == ",".join(["anthropic::claude-opus-4-7"] * 3)
 
 
 def test_apply_runtime_provider_defaults_skips_non_official_or_custom_configs():

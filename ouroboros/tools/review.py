@@ -371,6 +371,19 @@ You must produce a JSON array. Each element has:
 - "severity": "critical" or "advisory"
 - "reason": for FAIL — specific file/line, what is wrong, how to fix it
 
+## Anti pattern-lock guard
+
+If your first reading surfaces **exactly one FAIL** across all checklist
+items, do a deliberate SECOND pass focused on a DIFFERENT concern class
+before returning. Real diffs with exactly one issue are rarer than diffs
+with several issues on different dimensions; single-FAIL outputs are the
+most common pattern-lock failure mode of single-pass review. For example:
+if your FAIL is `code_quality`, re-examine `tests_affected` and
+`self_consistency`; if `cross_platform`, re-examine `security_issues` and
+`architecture_doc`; if `version_bump`, re-examine `changelog_and_badge`
+and `self_consistency`. Update PASS entries in-place if your second pass
+uncovers new FAILs — return only one JSON array, not two.
+
 {checklist_section}
 
 - Output ONLY a valid JSON array.  No markdown fences, no text outside the JSON.

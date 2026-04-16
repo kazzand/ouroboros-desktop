@@ -1076,3 +1076,105 @@ class TestAdvisorySchemaEnriched:
         source = inspect.getsource(adv._handle_advisory_pre_review)
         assert "raw_result[:4000]" not in source
 
+
+class TestScopePromptMatrixContract:
+    """v4.34.0: scope prompt requires full 8-item matrix + anti-pattern-lock guard.
+
+    Regression-pins two behavioural contracts added in v4.34.0:
+    (1) scope reviewer must emit one entry per Intent/Scope checklist item
+        (not only FAILs as before), with mandatory PASS justification;
+    (2) scope prompt carries an explicit Anti pattern-lock guard asking
+        the reviewer to do a second focused pass on a different concern
+        class whenever exactly one FAIL is surfaced.
+    """
+
+    def _get_scope_prompt(self, tmp_path):
+        import subprocess
+        subprocess.run(["git", "init"], cwd=str(tmp_path), capture_output=True)
+        (tmp_path / "docs").mkdir(exist_ok=True)
+        (tmp_path / "docs" / "CHECKLISTS.md").write_text(
+            "## Intent / Scope Review Checklist\n\nplaceholder\n", encoding="utf-8"
+        )
+        (tmp_path / "docs" / "DEVELOPMENT.md").write_text("dev guide\n", encoding="utf-8")
+        (tmp_path / "a.py").write_text("aaa", encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=str(tmp_path), capture_output=True)
+        subprocess.run(
+            ["git", "-c", "user.email=t@o", "-c", "user.name=T", "commit", "-m", "init"],
+            cwd=str(tmp_path), capture_output=True,
+        )
+        (tmp_path / "a.py").write_text("bbb", encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=str(tmp_path), capture_output=True)
+        mod = _get_module("ouroboros.tools.scope_review")
+        prompt, status = mod._build_scope_prompt(tmp_path, "test")
+        assert prompt is not None, f"unexpected non-None status: {status}"
+        return prompt
+
+    def test_full_matrix_contract_is_present(self, tmp_path):
+        """Scope prompt must require one entry per checklist item."""
+        prompt = self._get_scope_prompt(tmp_path)
+        assert "EXACTLY ONE entry per checklist item" in prompt
+        assert "Skipping an item is not allowed" in prompt
+
+    def test_pass_justification_is_mandatory(self, tmp_path):
+        """PASS entries must require 1-2 sentences of justification.
+
+        Guard: without this, reviewers can return bare `PASS` for items
+        they never actually reviewed, defeating the matrix contract.
+        """
+        prompt = self._get_scope_prompt(tmp_path)
+        # Some form of mandatory justification language must be present.
+        assert "stating WHY this item passes" in prompt
+        # And the bare-PASS anti-pattern must be called out explicitly.
+        assert "bare" in prompt.lower()
+        assert "reviewer failure" in prompt.lower()
+
+    def test_anti_pattern_lock_guard_is_present(self, tmp_path):
+        """Scope prompt must carry the Anti pattern-lock guard section."""
+        prompt = self._get_scope_prompt(tmp_path)
+        assert "Anti pattern-lock guard" in prompt
+        assert "exactly one FAIL" in prompt
+        # The guard must instruct a second pass on a different concern class.
+        # Normalize whitespace before checking so a reflow of the prompt
+        # wrapping doesn't break the contract.
+        import re
+        flat = re.sub(r"\s+", " ", prompt)
+        assert "SECOND pass" in flat
+        assert "DIFFERENT concern class" in flat
+
+    def test_anti_pattern_lock_pairings_cover_checklist_items(self, tmp_path):
+        """Concrete pairings must reference real Intent/Scope checklist item names.
+
+        Without real item names the guidance is generic and models fall
+        back to pattern-locking; the prompt has to name pairings by
+        actual checklist identifiers.
+        """
+        prompt = self._get_scope_prompt(tmp_path)
+        # At least the four most common concern classes must appear as
+        # "if FAIL was in X, re-examine Y" pairings.
+        for item in (
+            "intent_alignment",
+            "forgotten_touchpoints",
+            "cross_surface_consistency",
+            "regression_surface",
+        ):
+            assert item in prompt, f"Anti-pattern-lock pairing for `{item}` missing"
+
+
+class TestTriadPromptAntiPatternLock:
+    """v4.34.0: triad pre-commit review prompt now also carries the
+    Anti pattern-lock guard. Scope and triad must stay symmetric so
+    single-FAIL pattern-lock is guarded on both review surfaces.
+    """
+
+    def test_triad_template_has_anti_pattern_lock_guard(self):
+        mod = _get_module("ouroboros.tools.review")
+        tpl = mod._REVIEW_PROMPT_TEMPLATE
+        assert "Anti pattern-lock guard" in tpl
+        assert "exactly one FAIL" in tpl
+        # Normalize whitespace so prompt reflow doesn't break the contract.
+        import re
+        flat = re.sub(r"\s+", " ", tpl)
+        # Accept any casing — "different concern class" / "DIFFERENT concern class"
+        assert "concern class" in flat.lower()
+        assert "second pass" in flat.lower()
+

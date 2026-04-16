@@ -65,8 +65,16 @@ def test_live_card_recovery_keeps_step_failures_non_terminal():
     assert "phase: 'warn'" in log_source
     assert "A command returned" in log_source
     assert "commandText.full || errorResult.full" in log_source
-    assert "task_checkpoint_anomaly" in log_source
-    assert "Checkpoint anomaly" in log_source
+    # v4.34.0: the structured-reflection checkpoint ceremony was retired
+    # (see ouroboros/loop.py::_maybe_inject_self_check). Both
+    # `task_checkpoint_reflection` and `task_checkpoint_anomaly` event types
+    # and their UI handlers were removed. The remaining `task_checkpoint`
+    # event stays as the single observability signal.
+    assert "task_checkpoint_reflection" not in log_source
+    assert "task_checkpoint_anomaly" not in log_source
+    assert "Checkpoint anomaly" not in log_source
+    assert "task_checkpoint" in log_source
+    assert "periodic self-check" in log_source
 
 
 def test_logs_use_shared_log_event_helpers_and_group_task_cards():

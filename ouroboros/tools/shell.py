@@ -359,7 +359,7 @@ def _run_validation(repo_dir: pathlib.Path) -> str:
 # ---------------------------------------------------------------------------
 
 def _claude_code_edit(ctx: ToolContext, prompt: str, cwd: str = "",
-                      budget: float = 1.0, validate: bool = False) -> str:
+                      budget: float = 5.0, validate: bool = False) -> str:
     """Delegate code edits via the Claude Agent SDK gateway.
 
     Uses the claude-agent-sdk Python package with PreToolUse safety hooks
@@ -486,7 +486,7 @@ def get_tools() -> List[ToolEntry]:
                 "prompt": {"type": "string"},
                 "cwd": {"type": "string", "default": ""},
                 "budget": {"type": "number",
-                           "description": "Max USD for this Claude Code call. Default: 1.0"},
+                           "description": "Max USD for this Claude Code call. Default: 5.0"},
                 "validate": {"type": "boolean", "default": False,
                              "description": "Run post-edit validation (tests). Returns summary in result."},
             }, "required": ["prompt"]},

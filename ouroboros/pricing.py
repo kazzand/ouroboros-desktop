@@ -21,6 +21,8 @@ log = logging.getLogger(__name__)
 
 # Pricing from OpenRouter API (2026-02-17). Update periodically via /api/v1/models.
 MODEL_PRICING_STATIC = {
+    "anthropic/claude-opus-4.7": (5.0, 0.5, 25.0),
+    "anthropic/claude-opus-4-7": (5.0, 0.5, 25.0),
     "anthropic/claude-opus-4.6": (5.0, 0.5, 25.0),
     "anthropic/claude-opus-4-6": (5.0, 0.5, 25.0),
     "anthropic/claude-opus-4": (15.0, 1.5, 75.0),

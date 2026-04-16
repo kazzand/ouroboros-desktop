@@ -85,90 +85,23 @@ def test_old_assistant_tool_payloads_are_compacted():
     assert len(compacted_assistants) >= 4, "Old oversized assistant tool-call payloads should be compacted"
 
 
-# ── Checkpoint reflection protection ─────────────────────────────────────────
+# ── Protected-content detection ──────────────────────────────────────────────
+#
+# v4.34.0: the structured-reflection checkpoint ceremony was retired, so
+# assistant messages with `CHECKPOINT_REFLECTION` / `CHECKPOINT_ANOMALY`
+# text no longer need compaction protection — they no longer exist. The
+# remaining protected-content rule covers tool-result messages for
+# critical tools and explicit error markers (`⚠️`-prefixed tool output).
 
 
-def _make_messages_with_checkpoint(num_rounds: int = 8, checkpoint_round: int = 2, *, anomaly: bool = False):
-    """Build a message list where one assistant message contains checkpoint text."""
-    messages = [{"role": "system", "content": "system"}]
-    for i in range(num_rounds):
-        tc_id = f"call_{i}"
-        if i == checkpoint_round:
-            content = (
-                "CHECKPOINT_ANOMALY:\n"
-                "malformed checkpoint output"
-            ) if anomaly else (
-                "CHECKPOINT_REFLECTION:\n"
-                "- Known: the file exists\n"
-                "- Blocker: none\n"
-                "- Decision: proceed\n"
-                "- Next: repo_read the target file"
-            )
-        else:
-            content = f"Round {i} reasoning"
-        messages.append({
-            "role": "assistant",
-            "content": content,
-            "tool_calls": [{
-                "id": tc_id,
-                "function": {"name": "repo_read", "arguments": '{"path": "a.py"}'},
-            }],
-        })
-        messages.append({
-            "role": "tool",
-            "tool_call_id": tc_id,
-            "content": "file content here",
-        })
-    return messages
+def test_round_has_protected_content_ignores_normal_assistant_text():
+    """Normal assistant messages (no tool role, no error marker) must not be protected.
 
-
-def test_checkpoint_reflection_round_survives_compaction():
-    """Rounds whose assistant content contains CHECKPOINT_REFLECTION must not be compacted."""
-    from ouroboros.context_compaction import compact_tool_history_llm
-    msgs = _make_messages_with_checkpoint(num_rounds=10, checkpoint_round=2)
-
-    # Patch the LLM summarizer so compaction runs without a real API call
-    import unittest.mock as mock
-    fake_summary = {i: f"[summary of round {i}]" for i in range(len(msgs))}
-
-    with mock.patch(
-        "ouroboros.context_compaction._summarize_round_batch",
-        return_value=(fake_summary, {}),
-    ):
-        compacted, _ = compact_tool_history_llm(msgs, keep_recent=3)
-
-    # The checkpoint round's assistant content must be present verbatim
-    checkpoint_texts = [
-        m["content"] for m in compacted
-        if m.get("role") == "assistant" and "CHECKPOINT_REFLECTION" in str(m.get("content", ""))
-    ]
-    assert len(checkpoint_texts) >= 1, (
-        "Checkpoint reflection round must survive compact_tool_history_llm"
-    )
-
-
-def test_round_has_protected_content_detects_checkpoint():
-    """_round_has_protected_content returns True when assistant content has CHECKPOINT_REFLECTION."""
-    from ouroboros.context_compaction import _round_has_protected_content
-
-    # Build a minimal span: [assistant, tool]
-    messages = [
-        {
-            "role": "assistant",
-            "content": "CHECKPOINT_REFLECTION:\n- Known: x\n- Blocker: none",
-            "tool_calls": [{"id": "c1", "function": {"name": "repo_read", "arguments": "{}"}}],
-        },
-        {
-            "role": "tool",
-            "tool_call_id": "c1",
-            "content": "ok",
-        },
-    ]
-    assert _round_has_protected_content(messages, 0, 1) is True
-
-
-def test_round_has_protected_content_ignores_non_checkpoint():
-    """_round_has_protected_content returns False for normal rounds without checkpoint text."""
+    Previously the function also protected `CHECKPOINT_REFLECTION` /
+    `CHECKPOINT_ANOMALY` markers; that branch was removed in v4.34.0 along
+    with the audit-only checkpoint ceremony. This test guards against a
+    regression that would re-introduce any checkpoint-text protection.
+    """
     from ouroboros.context_compaction import _round_has_protected_content
 
     messages = [
@@ -186,67 +119,41 @@ def test_round_has_protected_content_ignores_non_checkpoint():
     assert _round_has_protected_content(messages, 0, 1) is False
 
 
-def test_round_has_protected_content_handles_list_content():
-    """_round_has_protected_content must detect CHECKPOINT_REFLECTION in multipart
-    Anthropic content blocks (list of {type, text} dicts), not just plain strings.
-    Previously this relied on Python's repr() of the list, which worked accidentally;
-    now we use explicit plain-text extraction so the detection is robust."""
+def test_round_has_protected_content_does_not_protect_checkpoint_text():
+    """v4.34.0 regression guard: legacy CHECKPOINT_REFLECTION text is no longer
+    protected. A future edit that accidentally re-adds the assistant-content
+    detection would silently bloat transcripts with stale audit artifacts.
+    """
     from ouroboros.context_compaction import _round_has_protected_content
 
     messages = [
         {
             "role": "assistant",
-            "content": [
-                {"type": "text", "text": "CHECKPOINT_REFLECTION:\n- Known: x\n- Blocker: none\n- Decision: proceed\n- Next: done"}
-            ],
+            "content": "CHECKPOINT_REFLECTION:\n- Known: x\n- Blocker: none",
             "tool_calls": [{"id": "c1", "function": {"name": "repo_read", "arguments": "{}"}}],
         },
-        {
-            "role": "tool",
-            "tool_call_id": "c1",
-            "content": "result",
-        },
-    ]
-    assert _round_has_protected_content(messages, 0, 1) is True
-
-
-def test_round_has_protected_content_list_without_marker():
-    """List content without CHECKPOINT_REFLECTION should not be protected."""
-    from ouroboros.context_compaction import _round_has_protected_content
-
-    messages = [
-        {
-            "role": "assistant",
-            "content": [
-                {"type": "text", "text": "Just reasoning, nothing special here."}
-            ],
-            "tool_calls": [{"id": "c1", "function": {"name": "repo_read", "arguments": "{}"}}],
-        },
-        {
-            "role": "tool",
-            "tool_call_id": "c1",
-            "content": "result",
-        },
+        {"role": "tool", "tool_call_id": "c1", "content": "ok"},
     ]
     assert _round_has_protected_content(messages, 0, 1) is False
 
 
-def test_checkpoint_anomaly_round_survives_compaction():
-    """Rounds whose assistant content contains CHECKPOINT_ANOMALY must also be protected."""
-    from ouroboros.context_compaction import compact_tool_history_llm
-    import unittest.mock as mock
+def test_round_has_protected_content_protects_error_tool_results():
+    """Tool-result messages prefixed with ⚠️ remain protected from compaction —
+    this was the other half of the pre-v4.34.0 rule and is unaffected by the
+    checkpoint refactor.
+    """
+    from ouroboros.context_compaction import _round_has_protected_content
 
-    msgs = _make_messages_with_checkpoint(num_rounds=10, checkpoint_round=2, anomaly=True)
-    fake_summary = {i: f"[summary of round {i}]" for i in range(len(msgs))}
-
-    with mock.patch(
-        "ouroboros.context_compaction._summarize_round_batch",
-        return_value=(fake_summary, {}),
-    ):
-        compacted, _ = compact_tool_history_llm(msgs, keep_recent=3)
-
-    anomaly_texts = [
-        m["content"] for m in compacted
-        if m.get("role") == "assistant" and "CHECKPOINT_ANOMALY" in str(m.get("content", ""))
+    messages = [
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{"id": "c1", "function": {"name": "repo_read", "arguments": "{}"}}],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "c1",
+            "content": "⚠️ failed to read path: permission denied",
+        },
     ]
-    assert len(anomaly_texts) >= 1
+    assert _round_has_protected_content(messages, 0, 1) is True
