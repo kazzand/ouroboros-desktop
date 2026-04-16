@@ -145,6 +145,8 @@ def _attempt_to_dict(item: Any) -> Dict[str, Any]:
         "triad_models": [str(x) for x in (getattr(item, "triad_models", []) or [])],
         "scope_model": str(getattr(item, "scope_model", "") or ""),
         "duration_sec": float(getattr(item, "duration_sec", 0.0) or 0.0),
+        "triad_raw_results": list(getattr(item, "triad_raw_results", []) or []),
+        "scope_raw_result": dict(getattr(item, "scope_raw_result", {}) or {}),
     }
 
 

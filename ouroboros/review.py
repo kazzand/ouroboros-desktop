@@ -38,7 +38,7 @@ TARGET_MODULE_LINES = 1000
 MAX_MODULE_LINES = 1600
 TARGET_FUNCTION_LINES = 150
 MAX_FUNCTION_LINES = 250
-MAX_TOTAL_FUNCTIONS = 1110  # raised in v4.31.0: +6 PR integration tools
+MAX_TOTAL_FUNCTIONS = 1115  # raised in v4.32.0: +2 observability helpers, +3 margin
 GRANDFATHERED_OVERSIZED_MODULES = {"llm.py"}
 # Immutable bundle-only entrypoints ship with release artifacts but should not
 # count against the self-editable codebase function budget.

@@ -1173,6 +1173,25 @@ def _handle_advisory_pre_review(
     return json.dumps(result, ensure_ascii=False, indent=2)
 
 
+def _attempt_actor_summary(attempt) -> dict:
+    """Return compact triad_actors / scope_actor fields for a CommitAttemptRecord.
+
+    Surfaces model_id + status only — raw text is never injected into context.
+    """
+    triad_raw = getattr(attempt, "triad_raw_results", None) or []
+    scope_raw = getattr(attempt, "scope_raw_result", None) or {}
+    return {
+        "triad_actors": [
+            {"model_id": r.get("model_id", "?"), "status": r.get("status", "?")}
+            for r in triad_raw
+        ],
+        "scope_actor": (
+            {"model_id": scope_raw.get("model_id", "?"), "status": scope_raw.get("status", "?")}
+            if scope_raw.get("status") else None
+        ),
+    }
+
+
 def _handle_review_status(
     ctx: ToolContext,
     repo_key: str = "",
@@ -1306,6 +1325,7 @@ def _handle_review_status(
             "post_review_fingerprint": ca.post_review_fingerprint[:12] or None,
             "fingerprint_status": ca.fingerprint_status or None,
             "degraded_reasons": list(ca.degraded_reasons or []),
+            **_attempt_actor_summary(ca),
         }
 
     attempts_data = []
@@ -1327,6 +1347,7 @@ def _handle_review_status(
             "post_review_fingerprint": entry.post_review_fingerprint[:12] or None,
             "fingerprint_status": entry.fingerprint_status or None,
             "degraded_reasons": list(entry.degraded_reasons or []),
+            **_attempt_actor_summary(entry),
             "ts": entry.ts,  # full ts — no [:16] truncation
         })
 

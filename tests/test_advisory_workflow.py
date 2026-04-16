@@ -486,7 +486,7 @@ def test_collect_review_findings_stores_structured_findings():
     ]
 
     with patch("ouroboros.tools.review.append_jsonl"):
-        critical_fails, advisory_warns, errored = _collect_review_findings(ctx, model_results)
+        critical_fails, advisory_warns, errored, _raw = _collect_review_findings(ctx, model_results)
 
     assert len(critical_fails) == 1
     assert "tests_affected" in critical_fails[0]
@@ -517,7 +517,7 @@ def test_collect_review_findings_advisory_not_in_structured():
     ]
 
     with patch("ouroboros.tools.review.append_jsonl"):
-        critical_fails, advisory_warns, _ = _collect_review_findings(ctx, model_results)
+        critical_fails, advisory_warns, _, _raw = _collect_review_findings(ctx, model_results)
 
     assert len(critical_fails) == 0
     assert len(advisory_warns) == 1

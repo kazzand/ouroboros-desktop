@@ -33,20 +33,43 @@ class _FallbackScopeResult:
     block_message: str = ""
     critical_findings: list = field(default_factory=list)
     advisory_findings: list = field(default_factory=list)
+    # Epistemic fields — always "error" for fallback path
+    raw_text: str = ""
+    model_id: str = ""
+    status: str = "error"
+    prompt_chars: int = 0
+    tokens_in: int = 0
+    tokens_out: int = 0
+    cost_usd: float = 0.0
 
 
 # ── Scope-history helpers ────────────────────────────────────────────────────
 
 def _scope_history_entry(scope_result) -> dict:
-    """Build a compact scope-history entry from a ScopeReviewResult."""
+    """Build a compact scope-history entry from a ScopeReviewResult.
+
+    Preserves the epistemic ``status`` field (e.g. ``parse_failure``,
+    ``budget_exceeded``, ``empty``) so that the retry / history path in
+    ``_build_scope_history_section`` can distinguish a genuine clean PASS
+    from a dropped-findings failure — the core requirement of the
+    observability / epistemic-integrity fix (v4.32.0).
+    """
     parts = []
     if scope_result.critical_findings:
         parts.append("Critical: " + "; ".join(f["item"] for f in scope_result.critical_findings))
     if scope_result.advisory_findings:
         parts.append("Advisory: " + "; ".join(f["item"] for f in scope_result.advisory_findings))
+    status = getattr(scope_result, "status", None) or "responded"
+    # Build summary: for non-responded statuses, lead with the status signal
+    # so empty finding lists are not misread as clean PASS on retry.
+    if not parts and status not in ("responded",):
+        summary = f"({status})"
+    else:
+        summary = " | ".join(parts) if parts else "(no findings)"
     return {
         "blocked": scope_result.blocked,
-        "summary": " | ".join(parts) if parts else "(no findings)",
+        "status": status,
+        "summary": summary,
         "critical_findings": scope_result.critical_findings or [],
         "advisory_findings": scope_result.advisory_findings or [],
     }
@@ -92,10 +115,13 @@ def run_parallel_review(ctx, commit_message, *, goal="", scope="", review_rebutt
     prior blocked attempt on a different diff are not shown to the reviewer.
     """
     from ouroboros.tools.review import _run_unified_review
+    from ouroboros.tools.scope_review import _trim_with_omission
 
-    # Reset forensic field at the start of each parallel review attempt
+    # Reset forensic fields at the start of each parallel review attempt
     # so stale values from a previous attempt are never persisted on early exit.
     ctx._last_scope_model = ""
+    ctx._last_triad_raw_results = []
+    ctx._last_scope_raw_result = {}
 
     try:
         diff_bytes = run_cmd(["git", "diff", "--cached"], cwd=ctx.repo_dir).encode()
@@ -163,8 +189,44 @@ def run_parallel_review(ctx, commit_message, *, goal="", scope="", review_rebutt
         existing = getattr(ctx, '_scope_review_history', None) or {}
         if not isinstance(existing, dict):
             existing = {}
-        existing[snapshot_key] = updated[-5:]
+        _SCOPE_HISTORY_LIMIT = 5  # max retained scope history entries per snapshot key
+        # _trim_with_omission is imported alongside run_scope_review above
+        trimmed, omission_note = _trim_with_omission(
+            updated, _SCOPE_HISTORY_LIMIT, "earlier scope-review round(s)"
+        )
+        if omission_note:
+            # Prepend a visible sentinel so _build_scope_history_section renders
+            # the omission note — a debug-only log is not visible to the scope reviewer.
+            sentinel = {
+                "status": "omitted",
+                "blocked": False,
+                "summary": omission_note,
+                "critical_findings": [],
+                "advisory_findings": [],
+            }
+            existing[snapshot_key] = [sentinel] + trimmed
+        else:
+            existing[snapshot_key] = trimmed
         ctx._scope_review_history = existing
+        # Store canonical scope actor record for durable persistence in CommitAttemptRecord
+        ctx._last_scope_raw_result = {
+            "model_id": getattr(scope_result, "model_id", "") or getattr(ctx, "_last_scope_model", ""),
+            "status": getattr(scope_result, "status", "responded"),
+            "raw_text": getattr(scope_result, "raw_text", ""),
+            "prompt_chars": getattr(scope_result, "prompt_chars", 0),
+            "tokens_in": getattr(scope_result, "tokens_in", 0),
+            "tokens_out": getattr(scope_result, "tokens_out", 0),
+            "cost_usd": getattr(scope_result, "cost_usd", 0.0),
+            # parsed_items: same field name as triad actor records; scope has one reviewer
+            # so this holds all structured findings from the scope model (or [] on skip/error)
+            "parsed_items": list(
+                (scope_result.critical_findings or []) + (scope_result.advisory_findings or [])
+            ),
+            "critical_findings": list(scope_result.critical_findings or []),
+            "advisory_findings": list(scope_result.advisory_findings or []),
+        }
+    else:
+        ctx._last_scope_raw_result = {}
 
     return review_err, scope_result, triad_block_reason, triad_advisory
 
@@ -237,10 +299,17 @@ def aggregate_review_verdict(review_err, scope_result, triad_block_reason, triad
         combined_msg = _combined_messages[0]
 
     if triad_advisory and not review_err:
+        from ouroboros.tools.scope_review import _trim_with_omission
+        _ADVISORY_DISPLAY_LIMIT = 5
+        shown_adv, adv_omission_note = _trim_with_omission(
+            triad_advisory, _ADVISORY_DISPLAY_LIMIT, "advisory finding(s)"
+        )
         adv_text = "\n".join(
             f"  ⚠️ Advisory: {_format_advisory_entry(a)}"
-            for a in triad_advisory[:5]
+            for a in shown_adv
         )
+        if adv_omission_note:
+            adv_text += f"\n  {adv_omission_note} All findings stored in review state."
         combined_msg += f"\n\n---\nTriad advisory findings:\n{adv_text}"
 
     return True, combined_msg, block_reason, _combined_findings, _scope_advisory_items

@@ -68,6 +68,14 @@ class ScopeReviewResult:
     block_message: str = ""
     critical_findings: List[dict] = field(default_factory=list)
     advisory_findings: List[dict] = field(default_factory=list)
+    # Canonical per-actor evidence (epistemic integrity)
+    raw_text: str = ""
+    model_id: str = ""
+    status: str = "responded"  # "responded"|"error"|"parse_failure"|"empty_response"|"budget_exceeded"|"omitted"|"empty"
+    prompt_chars: int = 0
+    tokens_in: int = 0
+    tokens_out: int = 0
+    cost_usd: float = 0.0
 
 
 @dataclass
@@ -115,18 +123,43 @@ def _load_dev_guide(repo_dir: pathlib.Path) -> str:
     return "(DEVELOPMENT.md not found)"
 
 
+def _trim_with_omission(items: list, limit: int, label: str) -> tuple:
+    """Return (shown_items, omission_note_or_None) with explicit OMISSION NOTE when truncated.
+
+    Replaces bare `items[:N]` slices in review-output paths so all shortening
+    is named and visible (DEVELOPMENT.md: no hardcoded [:N] truncation for review artifacts).
+    """
+    if len(items) <= limit:
+        return items, None
+    omitted = len(items) - limit
+    note = f"⚠️ OMISSION NOTE: {omitted} {label} omitted (showing last {limit})."
+    return items[-limit:], note
+
+
+_HISTORY_ROUNDS_LIMIT = 3  # max previous rounds shown to scope reviewer
+_HISTORY_ADVISORY_LIMIT = 5  # max advisory findings shown per round
+
+
 def _build_review_history_section(history: list) -> str:
     if not history:
         return ""
     lines = ["## Previous triad review rounds\n"]
-    for entry in history[-3:]:
+    shown_rounds, rounds_note = _trim_with_omission(history, _HISTORY_ROUNDS_LIMIT, "earlier round(s)")
+    if rounds_note:
+        lines.append(rounds_note + "\n")
+    for entry in shown_rounds:
         lines.append(f"### Round {entry.get('attempt', '?')}")
         if entry.get("critical"):
             for f in entry["critical"]:
                 lines.append(f"- CRITICAL: {f}")
         if entry.get("advisory"):
-            for f in entry["advisory"][:5]:
+            shown_adv, adv_note = _trim_with_omission(
+                entry["advisory"], _HISTORY_ADVISORY_LIMIT, "advisory finding(s)"
+            )
+            for f in shown_adv:
                 lines.append(f"- Advisory: {f}")
+            if adv_note:
+                lines.append(f"  {adv_note}")
         lines.append("")
     return "\n".join(lines)
 
@@ -236,15 +269,35 @@ def _gather_scope_packs(repo_dir: pathlib.Path, all_touched_paths: list) -> str:
     return repo_pack_section
 
 
+def _scope_round_label(entry: dict) -> str:
+    """Derive a round label from a scope history entry.
+
+    Epistemic-integrity rule (v4.32.0): a round that was degraded, omitted,
+    budget-exceeded, or failed to parse MUST NOT be labelled ``PASSED``.
+    Only a genuine responded-no-findings round gets ``PASSED``.
+
+    Label priority:
+      1. ``blocked=True``        → ``BLOCKED``
+      2. status != "responded"   → uppercase status (``BUDGET_EXCEEDED`` etc.)
+      3. otherwise                → ``PASSED``
+    """
+    if entry.get("blocked"):
+        return "BLOCKED"
+    status = str(entry.get("status") or "responded").strip()
+    if status and status != "responded":
+        return status.upper()
+    return "PASSED"
+
+
 def _build_scope_history_section(scope_review_history: Optional[list]) -> str:
     """Format prior scope review rounds into a prompt section."""
     if not scope_review_history:
         return ""
     rounds = []
     for i, entry in enumerate(scope_review_history, 1):
-        blocked = "BLOCKED" if entry.get("blocked") else "PASSED"
+        label = _scope_round_label(entry)
         summary = entry.get("summary") or "(no summary)"
-        rounds.append(f"Round {i}: {blocked}\n{summary}")
+        rounds.append(f"Round {i}: {label}\n{summary}")
     return (
         "\n## Prior scope review rounds (your previous findings for this commit)\n\n"
         + "\n\n---\n".join(rounds)
@@ -571,6 +624,10 @@ def _handle_prompt_signals(
 
     if context_status.status == "budget_exceeded":
         token_count = context_status.token_count
+        # prompt_chars: back-compute from the token estimate used in the budget gate.
+        # estimate_tokens uses chars/4, so chars ≈ token_count * 4.  This is the same
+        # assembled prompt size that triggered the gate — the most useful forensic fact.
+        _prompt_chars_est = token_count * 4
         log.warning(
             "Scope review skipped: full scope-review prompt (~%d tokens) exceeds budget limit (%d). "
             "Scope review downgraded to non-blocking warning.",
@@ -579,6 +636,8 @@ def _handle_prompt_signals(
         return ScopeReviewResult(
             blocked=False,
             block_message="",
+            status="budget_exceeded",
+            prompt_chars=_prompt_chars_est,
             advisory_findings=[{
                 "verdict": "FAIL",
                 "severity": "advisory",
@@ -596,6 +655,7 @@ def _handle_prompt_signals(
     if context_status.status == "empty":
         return ScopeReviewResult(
             blocked=True,
+            status="empty",
             block_message=(
                 "⚠️ SCOPE_REVIEW_BLOCKED: Could not read any touched files — "
                 "scope review requires direct file context. Commit blocked."
@@ -606,6 +666,7 @@ def _handle_prompt_signals(
         omitted_names = ", ".join(context_status.omitted_paths) or "(unknown)"
         return ScopeReviewResult(
             blocked=True,
+            status="omitted",
             block_message=(
                 f"⚠️ SCOPE_REVIEW_BLOCKED: Some touched file(s) could not be included "
                 f"in direct context (binary/oversize/unreadable): {omitted_names}.\n"
@@ -624,6 +685,7 @@ def _handle_prompt_signals(
     )
     return ScopeReviewResult(
         blocked=True,
+        status="error",
         block_message=(
             f"⚠️ SCOPE_REVIEW_BLOCKED: Unexpected context status '{context_status.status}' — "
             "commit blocked (fail-closed). This is a programming error; please report it."
@@ -668,6 +730,7 @@ def run_scope_review(
     obligation tracking without any string parsing.
     """
     repo_dir = pathlib.Path(ctx.repo_dir)
+    scope_model_id = _get_scope_model()
 
     try:
         prompt, context_status = _build_scope_prompt(
@@ -685,25 +748,49 @@ def run_scope_review(
                 f"Error: {exc}\n"
                 "Ensure git is available and the repository is in a valid state."
             ),
+            model_id=scope_model_id,
+            status="error",
         )
 
     signal_result = _handle_prompt_signals(prompt, context_status)
     if signal_result is not None:
+        # Populate model_id and status from context_status for epistemic traceability
+        signal_result.model_id = scope_model_id
+        if context_status is not None:
+            signal_result.status = context_status.status
         return signal_result
 
+    _prompt_chars = len(prompt)  # type: ignore[arg-type]
     raw_text, usage, llm_error = _call_scope_llm(prompt)  # type: ignore[arg-type]
+    _tokens_in = int((usage or {}).get("prompt_tokens", 0) or 0)
+    _tokens_out = int((usage or {}).get("completion_tokens", 0) or 0)
+    _cost_usd = float((usage or {}).get("cost", 0.0) or 0.0)
     if llm_error:
-        return ScopeReviewResult(blocked=True, block_message=llm_error)
+        return ScopeReviewResult(
+            blocked=True,
+            block_message=llm_error,
+            model_id=scope_model_id,
+            status="error",
+            prompt_chars=_prompt_chars,
+        )
     if usage:
-        _emit_usage(ctx, _get_scope_model(), usage or {})
+        _emit_usage(ctx, scope_model_id, usage or {})
 
     if not raw_text.strip():
+        # Distinct status: model responded (no transport error) but returned empty text.
+        # "error" would make this path indistinguishable from API/transport failures.
         return ScopeReviewResult(
             blocked=True,
             block_message=(
                 "⚠️ SCOPE_REVIEW_BLOCKED: Scope reviewer returned empty response — commit blocked.\n"
                 "Retry the commit."
             ),
+            model_id=scope_model_id,
+            status="empty_response",
+            prompt_chars=_prompt_chars,
+            tokens_in=_tokens_in,
+            tokens_out=_tokens_out,
+            cost_usd=_cost_usd,
         )
 
     items = _parse_scope_json(raw_text)
@@ -712,8 +799,15 @@ def run_scope_review(
             blocked=True,
             block_message=(
                 "⚠️ SCOPE_REVIEW_BLOCKED: Could not parse scope reviewer output as JSON — commit blocked.\n"
-                f"Raw preview: {raw_text[:500]}"
+                "Full raw response preserved in scope_raw_result (status='parse_failure')."
             ),
+            model_id=scope_model_id,
+            status="parse_failure",
+            raw_text=raw_text,
+            prompt_chars=_prompt_chars,
+            tokens_in=_tokens_in,
+            tokens_out=_tokens_out,
+            cost_usd=_cost_usd,
         )
 
     critical_findings, advisory_findings = _classify_scope_findings(items)
@@ -727,6 +821,13 @@ def run_scope_review(
                 block_message=_build_block_message(critical_findings, advisory_findings),
                 critical_findings=critical_findings,
                 advisory_findings=advisory_findings,
+                model_id=scope_model_id,
+                status="responded",
+                raw_text=raw_text,
+                prompt_chars=_prompt_chars,
+                tokens_in=_tokens_in,
+                tokens_out=_tokens_out,
+                cost_usd=_cost_usd,
             )
         # Advisory mode: findings returned but commit not blocked.
         # (do NOT mutate ctx._review_advisory here; parallel_review.py aggregates
@@ -736,4 +837,11 @@ def run_scope_review(
         blocked=False,
         critical_findings=critical_findings,
         advisory_findings=advisory_findings,
+        model_id=scope_model_id,
+        status="responded",
+        raw_text=raw_text,
+        prompt_chars=_prompt_chars,
+        tokens_in=_tokens_in,
+        tokens_out=_tokens_out,
+        cost_usd=_cost_usd,
     )

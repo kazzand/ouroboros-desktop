@@ -756,34 +756,54 @@ def _load_architecture_text(repo_dir: pathlib.Path) -> str:
     return ""
 
 
-def _collect_review_findings(ctx: ToolContext, model_results: list) -> tuple[list[str], list[str], list[str]]:
+def _collect_review_findings(ctx: ToolContext, model_results: list) -> tuple[list[str], list[str], list[str], list[dict]]:
     critical_fails: List[str] = []
     advisory_warns: List[str] = []
     errored_models: List[str] = []
     # Structured critical findings for obligation tracking (list of dicts)
     structured_critical: List[dict] = []
     structured_advisory: List[dict] = []
+    # Per-model actor records for epistemic traceability
+    triad_raw_results: List[dict] = []
 
     for mr in model_results:
         model_name = mr.get("model", "?")
         raw_text = str(mr.get("text", ""))
         verdict_upper = str(mr.get("verdict", "")).upper()
+        tokens_in = int(mr.get("tokens_in", 0) or 0)
+        tokens_out = int(mr.get("tokens_out", 0) or 0)
+        cost_usd = float(mr.get("cost_estimate", 0.0) or 0.0)
 
         if verdict_upper == "ERROR":
             errored_models.append(model_name)
             advisory_warns.append(
-                f"[{model_name}] Model unavailable this round: {raw_text[:200]}"
+                f"[{model_name}] Model unavailable this round (transport error). "
+                "Full raw response preserved in triad_raw_results (status='error')."
             )
             structured_advisory.append(_review_entry(
                 severity="advisory",
                 item="review_model_unavailable",
-                reason=f"Model unavailable this round: {raw_text[:200]}",
+                reason=(
+                    f"Model unavailable this round (transport error): {model_name}. "
+                    "Full raw response preserved in triad_raw_results actor record."
+                ),
                 model=model_name,
             ))
+            triad_raw_results.append({
+                "model_id": model_name,
+                "status": "error",
+                "raw_text": raw_text,
+                "parsed_items": [],
+                "tokens_in": tokens_in,
+                "tokens_out": tokens_out,
+                "cost_usd": cost_usd,
+            })
             try:
                 append_jsonl(ctx.drive_logs() / "events.jsonl", {
                     "ts": utc_now_iso(), "type": "review_model_error",
-                    "model": model_name, "error_preview": raw_text[:200],
+                    "model": model_name,
+                    # full raw_text preserved in triad_raw_results actor record (status='error')
+                    "error_note": "Full raw response preserved in triad_raw_results.",
                 })
             except Exception:
                 pass
@@ -791,11 +811,45 @@ def _collect_review_findings(ctx: ToolContext, model_results: list) -> tuple[lis
 
         items = _parse_review_json(raw_text)
         if items is None:
-            critical_fails.append(
-                f"[{model_name}] Could not parse structured review output. "
-                f"Raw preview: {raw_text[:300]}"
+            # parse_failure is recorded via triad_raw_results (status="parse_failure") for
+            # durable epistemic tracking. The quorum check in _run_unified_review blocks the
+            # commit when fewer than 2 reviewers produced parseable output. When quorum is met
+            # (≥2 responded), a parse_failure is degraded-but-not-blocking — surface it as an
+            # advisory note only. Do NOT add to critical_fails here: that would cause a 2-
+            # responded + 1-parse_failure triad to block even though usable quorum is present.
+            advisory_warns.append(
+                f"[{model_name}] Could not parse structured review output (parse_failure). "
+                f"Full raw response preserved in triad_raw_results (status='parse_failure')."
             )
+            structured_advisory.append(_review_entry(
+                severity="advisory",
+                item="review_model_parse_failure",
+                reason=(
+                    f"Could not parse structured review output from {model_name}. "
+                    "Full raw response preserved in triad_raw_results actor record."
+                ),
+                model=model_name,
+            ))
+            triad_raw_results.append({
+                "model_id": model_name,
+                "status": "parse_failure",
+                "raw_text": raw_text,
+                "parsed_items": [],
+                "tokens_in": tokens_in,
+                "tokens_out": tokens_out,
+                "cost_usd": cost_usd,
+            })
             continue
+
+        triad_raw_results.append({
+            "model_id": model_name,
+            "status": "responded",
+            "raw_text": raw_text,
+            "parsed_items": list(items),
+            "tokens_in": tokens_in,
+            "tokens_out": tokens_out,
+            "cost_usd": cost_usd,
+        })
 
         for item in items:
             if not isinstance(item, dict):
@@ -827,8 +881,19 @@ def _collect_review_findings(ctx: ToolContext, model_results: list) -> tuple[lis
     # Store structured findings on ctx for obligation tracking
     ctx._last_review_critical_findings = structured_critical
     ctx._last_review_advisory_findings = structured_advisory
+    ctx._last_triad_raw_results = triad_raw_results
 
-    return critical_fails, advisory_warns, errored_models
+    # Record degraded participation when some models failed but quorum met
+    degraded = [r for r in triad_raw_results if r["status"] in ("error", "parse_failure")]
+    if degraded and len(triad_raw_results) - len(degraded) >= 2:
+        reasons = [f"{r['model_id']}={r['status']}" for r in degraded]
+        if not hasattr(ctx, "_review_degraded_reasons"):
+            ctx._review_degraded_reasons = []
+        ctx._review_degraded_reasons.extend(
+            [f"DEGRADED: {', '.join(reasons)} (quorum still met)"]
+        )
+
+    return critical_fails, advisory_warns, errored_models, triad_raw_results
 
 
 def _build_critical_block_message(
@@ -901,6 +966,42 @@ def _build_critical_block_message(
     )
 
 
+def _build_preflight_staged(target_repo: str, fallback: str = "") -> str:
+    """Convert git --name-status output to a two-char porcelain-like prefix format.
+
+    Needed so _preflight_check can detect added/deleted/renamed files with the
+    correct status letter. Falls back to the name-only list on any error.
+    """
+    try:
+        name_status = run_cmd(
+            ["git", "diff", "--cached", "--name-status"], cwd=target_repo
+        )
+        preflight_input_lines = []
+        for line in name_status.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            parts = line.split("\t")
+            if not parts:
+                continue
+            status_char = parts[0][0].upper()  # strips similarity % from R100/C100
+            if status_char in ("R", "C") and len(parts) >= 3:
+                src_path, dst_path = parts[1], parts[-1]
+                if status_char == "R":
+                    preflight_input_lines.append(f"D  {src_path}")
+                    preflight_input_lines.append(f"A  {dst_path}")
+                else:
+                    # Copy: source unchanged, only destination counts as new
+                    preflight_input_lines.append(f"A  {dst_path}")
+            elif len(parts) >= 2:
+                preflight_input_lines.append(f"{status_char}  {parts[1]}")
+            else:
+                preflight_input_lines.append(f"M  {parts[0]}")
+        return "\n".join(preflight_input_lines) if preflight_input_lines else fallback
+    except Exception:
+        return fallback  # check 4 may not fire, but checks 1-3 still work
+
+
 def _run_unified_review(ctx: ToolContext, commit_message: str,
                         review_rebuttal: str = "",
                         repo_dir=None,
@@ -916,6 +1017,8 @@ def _run_unified_review(ctx: ToolContext, commit_message: str,
     ctx._last_review_block_reason = ""  # reset per attempt
     ctx._last_triad_models = []  # reset forensic field so stale values never persist on early exit
     ctx._last_review_critical_findings = []  # reset to avoid stale findings from previous attempts
+    ctx._last_triad_raw_results = []  # reset per-model actor records
+    ctx._review_degraded_reasons = []  # reset degraded participation markers
     review_enforcement = _cfg.get_review_enforcement()
     blocking_review = review_enforcement == "blocking"
 
@@ -932,50 +1035,7 @@ def _run_unified_review(ctx: ToolContext, commit_message: str,
     except Exception:
         changed = ""
 
-    # Build a status-bearing string for preflight (uses porcelain "XY path" format).
-    # We use --name-status (tab-separated "STATUS\tpath") and convert to
-    # a two-char porcelain-like prefix so _preflight_check can detect added files.
-    try:
-        name_status = run_cmd(
-            ["git", "diff", "--cached", "--name-status"], cwd=target_repo
-        )
-        # Convert git --name-status tab-separated lines to "X  path" format.
-        # Formats emitted by git:
-        #   "A\tpath"          → added
-        #   "M\tpath"          → modified
-        #   "D\tpath"          → deleted
-        #   "R100\told\tnew"   → renamed (similarity score prefix, two paths)
-        #   "C100\told\tnew"   → copied  (similarity score prefix, two paths)
-        preflight_input_lines = []
-        for line in name_status.splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            parts = line.split("\t")
-            if not parts:
-                continue
-            status_char = parts[0][0].upper()  # first char of status code (strips similarity %)
-            if status_char in ("R", "C") and len(parts) >= 3:
-                src_path, dst_path = parts[1], parts[-1]
-                if status_char == "R":
-                    # Rename: source was deleted, destination is a new file.
-                    #   "D src" — triggers check 3 if src was in a guarded dir
-                    #   "A dst" — triggers check 3 and check 4 if dst is in a guarded dir
-                    preflight_input_lines.append(f"D  {src_path}")
-                    preflight_input_lines.append(f"A  {dst_path}")
-                else:
-                    # Copy (C): source is unchanged — only emit the new destination.
-                    # Do NOT emit "D src" here; the source file was NOT deleted or modified.
-                    # A copy into a guarded dir still constitutes a new module (check 4).
-                    preflight_input_lines.append(f"A  {dst_path}")
-            elif len(parts) >= 2:
-                path = parts[1]
-                preflight_input_lines.append(f"{status_char}  {path}")
-            else:
-                preflight_input_lines.append(f"M  {parts[0]}")
-        preflight_staged = "\n".join(preflight_input_lines) if preflight_input_lines else changed
-    except Exception:
-        preflight_staged = changed  # fallback to name-only (check 4 may not fire, but checks 1-3 still work)
+    preflight_staged = _build_preflight_staged(target_repo, fallback=changed)
 
     preflight_err = _preflight_check(commit_message, preflight_staged, target_repo)
     if preflight_err:
@@ -1093,18 +1153,27 @@ def _run_unified_review(ctx: ToolContext, commit_message: str,
             "Review enforcement=Advisory: review returned no model results; commit proceeding anyway. ",
         )
 
-    critical_fails, advisory_warns, errored_models = _collect_review_findings(ctx, model_results)
+    critical_fails, advisory_warns, errored_models, _triad_raw = _collect_review_findings(ctx, model_results)
+    # _triad_raw already stored on ctx._last_triad_raw_results inside _collect_review_findings
 
     models_total = len(model_results)
 
-    # Quorum: at least 2 of N reviewers must succeed
-    successful_reviewers = models_total - len(errored_models)
+    # Quorum: at least 2 of N reviewers must produce parseable structured output.
+    # Count only status=="responded" actors — parse_failure and error both represent
+    # unusable evidence and must NOT count toward quorum.
+    triad_raw = getattr(ctx, "_last_triad_raw_results", []) or []
+    successful_reviewers = sum(1 for r in triad_raw if r.get("status") == "responded")
+    # Build the non-successful list for display (transport errors + parse failures)
+    failed_actors = [
+        r["model_id"] for r in triad_raw if r.get("status") != "responded"
+    ]
     if successful_reviewers < 2:
         ctx._last_review_block_reason = "review_quorum"
+        unavailable_str = ", ".join(failed_actors) if failed_actors else ", ".join(errored_models)
         blocked_msg = (
             f"⚠️ REVIEW_BLOCKED: Only {successful_reviewers} of {models_total} review "
             f"models responded successfully (minimum 2 required). "
-            f"Unavailable: {', '.join(errored_models)}.\n"
+            f"Unavailable/failed: {unavailable_str}.\n"
             "Retry the commit — transient model failures usually resolve quickly."
         )
         return _handle_review_block_or_warning(
@@ -1113,10 +1182,11 @@ def _run_unified_review(ctx: ToolContext, commit_message: str,
         )
 
     errored_note = ""
-    if errored_models:
+    all_non_responded = failed_actors or errored_models
+    if all_non_responded:
         errored_note = (
-            f"\n\nNote: {len(errored_models)} of {models_total} review models "
-            f"were unavailable ({', '.join(errored_models)}). "
+            f"\n\nNote: {len(all_non_responded)} of {models_total} review models "
+            f"were unavailable or failed to parse ({', '.join(all_non_responded)}). "
             "Target is 3 working reviewers."
         )
 

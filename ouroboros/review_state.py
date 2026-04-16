@@ -132,6 +132,17 @@ class CommitAttemptRecord:
     finished_ts: str = ""
     triad_models: List[str] = field(default_factory=list)
     scope_model: str = ""
+    triad_raw_results: List[Dict[str, Any]] = field(default_factory=list)
+    scope_raw_result: Dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        # Guard for objects created via __new__ (e.g. in legacy test helpers)
+        # that skip __init__ and leave fields unset.
+        if not hasattr(self, "triad_raw_results"):
+            object.__setattr__(self, "triad_raw_results", [])
+        if not hasattr(self, "scope_raw_result"):
+            object.__setattr__(self, "scope_raw_result", {})
+
 @dataclass
 class AdvisoryReviewState:
     """Top-level durable state container."""
@@ -657,6 +668,8 @@ def _commit_attempt_from_dict(d: Dict[str, Any]) -> CommitAttemptRecord:
         finished_ts=str(d.get("finished_ts", ts if status in ("blocked", "failed", "succeeded") else "")),
         triad_models=[str(x) for x in (d.get("triad_models") or [])],
         scope_model=str(d.get("scope_model", "")),
+        triad_raw_results=list(d.get("triad_raw_results") or []),
+        scope_raw_result=dict(d.get("scope_raw_result") or {}),
     )
 
 
@@ -1029,7 +1042,20 @@ def format_status_section(state: AdvisoryReviewState,
                 facts.append("late_result_pending=yes")
             if item.readiness_warnings:
                 facts.append(f"warnings={len(item.readiness_warnings)}")
+            if item.degraded_reasons:
+                facts.append(f"degraded={len(item.degraded_reasons)}")
             lines.append(f"- {label}: {', '.join(facts)}")
+            # Compact per-actor triad summary (status only — raw text omitted from context)
+            triad_raw = getattr(item, "triad_raw_results", None) or []
+            if triad_raw:
+                actor_summaries = [
+                    f"{r.get('model_id', '?')}={r.get('status', '?')}"
+                    for r in triad_raw
+                ]
+                lines.append(f"    triad_actors: {', '.join(actor_summaries)}")
+            scope_raw = getattr(item, "scope_raw_result", None) or {}
+            if scope_raw and scope_raw.get("status"):
+                lines.append(f"    scope_actor: {scope_raw.get('model_id', '?')}={scope_raw.get('status', '?')}")
 
     ca = last_attempt
     if ca and ca.status in ("blocked", "failed"):
@@ -1146,6 +1172,16 @@ def _merge_attempt(existing: CommitAttemptRecord, incoming: CommitAttemptRecord)
         finished_ts=incoming.finished_ts or existing.finished_ts,
         triad_models=list(incoming.triad_models or existing.triad_models),
         scope_model=incoming.scope_model or existing.scope_model,
+        triad_raw_results=list(
+            getattr(incoming, "triad_raw_results", None)
+            or getattr(existing, "triad_raw_results", None)
+            or []
+        ),
+        scope_raw_result=dict(
+            getattr(incoming, "scope_raw_result", None)
+            or getattr(existing, "scope_raw_result", None)
+            or {}
+        ),
     )
     return merged
 

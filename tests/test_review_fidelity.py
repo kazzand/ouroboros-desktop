@@ -60,6 +60,8 @@ def _make_commit_attempt(findings: List[Dict[str, Any]]) -> Any:
     ca.repo_key = ""
     ca.triad_models = []
     ca.scope_model = ""
+    ca.triad_raw_results = []
+    ca.scope_raw_result = {}
     return ca
 
 
@@ -801,6 +803,8 @@ class TestPersistencePathNotTruncated:
         ca.repo_key = ""
         ca.triad_models = []
         ca.scope_model = ""
+        ca.triad_raw_results = []
+        ca.scope_raw_result = {}
 
         tmp = pathlib.Path(tempfile.mkdtemp())
         (tmp / "state").mkdir()

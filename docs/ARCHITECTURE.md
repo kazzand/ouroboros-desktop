@@ -1,4 +1,4 @@
-# Ouroboros v4.31.0 — Architecture & Reference
+# Ouroboros v4.32.0 — Architecture & Reference
 
 This document describes every component, page, button, API endpoint, and data flow.
 It is the single source of truth for how the system works. Keep it updated.
@@ -1003,6 +1003,25 @@ errors surface via the same observability path.
   New fields: `blocking_history` (last 10 blocked attempts), `open_obligations` (list of
   `ObligationItem` with `obligation_id`, `item`, `severity`, `reason`, `source_attempt_ts`, `source_attempt_msg`, `status`, `resolved_by`, `repo_key`),
   `last_stale_from_edit_ts` / `last_stale_reason` / `last_stale_repo_key`, plus explicit lock-backed state updates.
+  **Epistemic-integrity fields** (v4.32.0): `triad_raw_results` (list of per-model actor dicts:
+  `model_id`, `status` — `"responded"` | `"error"` | `"parse_failure"`, `raw_text` — full
+  untruncated response, `parsed_items`, `tokens_in`, `tokens_out`, `cost_usd`) and
+  `scope_raw_result` (same shape as triad actor dicts plus `prompt_chars`, `critical_findings`,
+  `advisory_findings`; always a populated dict when scope ran or was attempted —
+  `status` values include `"responded"`, `"parse_failure"`, `"empty_response"`,
+  `"budget_exceeded"`, `"empty"`, `"omitted"`, `"error"` (no `"skipped"` value is emitted); `parsed_items` holds
+  `critical_findings + advisory_findings` for shape parity with triad actor records;
+  `budget_exceeded` path sets `prompt_chars = token_count * 4` for forensic size;
+  only `{}` when no scope review was launched at all). These fields store
+  the canonical per-actor evidence so failures, parse errors, and degraded participation are
+  distinguishable from PASS in durable state. `_commit_attempt_from_dict` and `_merge_attempt`
+  preserve both fields across serialization and state-merge cycles. `CommitAttemptRecord`
+  sets `triad_raw_results=[]` and `scope_raw_result={}` defaults via `field(default_factory=...)`;
+  legacy `__new__`-constructed objects (test helpers that bypass `__init__`) must explicitly set
+  both attributes — see `tests/test_review_fidelity.py::_make_commit_attempt`. `format_status_section`
+  and `_handle_review_status` (review_status tool) surface compact `triad_actors` / `scope_actor`
+  summaries (model_id + status only, raw text not injected into context) so the agent can see
+  which reviewer errored or parse-failed without loading full raw responses.
   `add_blocking_attempt()` populates open obligations from `critical_findings`; `on_successful_commit()`
   clears all obligations. Advisory invalidation is repo-scoped and triggered automatically by successful
   mutations from `_repo_write`, `_str_replace_editor`, `claude_code_edit`, mutating `run_shell`, and
@@ -1021,6 +1040,7 @@ errors surface via the same observability path.
   `Review Continuity` context. Corrupt active payloads are quarantined under
   `review_continuations/corrupt/` so valid state can replace them without losing
   the corruption signal.
+- **`_collect_review_findings`** (v4.32.0): returns a 4-tuple `(critical_fails, advisory_warns, errored_models, triad_raw_results)`. The fourth element is a list of per-model actor dicts (`model_id`, `status`, `raw_text`, `parsed_items`, `tokens_in`, `tokens_out`, `cost_usd`); status is `"responded"` on successful parse, `"parse_failure"` on unparseable output, `"error"` on API/timeout failure. All actor records are stored on `ctx._last_triad_raw_results`; ctx also receives `_review_degraded_reasons` entries when partial participation occurs (≥1 model errors while quorum is still met). **Parse_failure routing fix (v4.32.0)**: `parse_failure` entries go into `advisory_warns` (not `critical_fails`) so a 2-responded + 1-parse_failure triad does not block the commit when quorum is met — the quorum check (`sum(status=="responded") < 2`) is the correct gate for unusable evidence. Transport errors (`verdict="ERROR"`) still go to `errored_models`. **Quorum fix (v4.32.0)**: `_run_unified_review` counts `successful_reviewers` as `sum(status=="responded")` from `triad_raw_results` — both `parse_failure` and `error` actors are excluded from quorum. `_build_preflight_staged` extracted from `_run_unified_review` to keep that function under the 250-line method gate (P5).
 - **`review_evidence.py`**: structured collector that snapshots review ledger state, live advisory freshness,
   open obligations, and continuations into `task_results`, task summaries, and
   execution reflections. When `repo_dir` / `repo_key` is known, open obligations and stale markers stay
@@ -1031,8 +1051,12 @@ errors surface via the same observability path.
   plus **omission counters** `omitted_attempts`, `omitted_advisory_runs`, `omitted_obligations`,
   `omitted_continuations` (count of entries trimmed by their respective `max_*` budget params),
   `omitted_corrupt` (count of corrupt continuation files beyond the fixed visible cap of 3), and
-  **forensic fields** from attempt/run records: `triad_models`, `scope_model`, `readiness_warnings`,
-  `prompt_chars`, `model_used`, `duration_sec` exposed via `_attempt_to_dict` and `_run_to_dict`.
+  **forensic fields** from attempt records (via `_attempt_to_dict`): `triad_models`, `scope_model`,
+  `readiness_warnings`, `triad_raw_results` (per-model actor dicts with model_id/status/raw_text/
+  parsed_items/tokens/cost), and `scope_raw_result` (same shape + prompt_chars).
+  **Forensic fields** from advisory run records (via `_run_to_dict`): `prompt_chars`, `model_used`,
+  `duration_sec`. (`triad_raw_results` and `scope_raw_result` are commit-attempt-level fields only —
+  not present on advisory run records.)
   `has_evidence` is `True` when any visible list is non-empty, advisory_status is known, OR any
   omission counter is > 0 — including `omitted_corrupt` — so truncated evidence is never silently
   treated as absent. `max_attempts=0` / `max_runs=0` correctly returns an empty visible list with
@@ -1060,6 +1084,7 @@ errors surface via the same observability path.
 - Results are aggregated: if both block, the combined message shows all findings with a note that both
   reviewers blocked. `block_reason` tracks the primary blocker (triad takes precedence if both block).
 - `_scope_review_history` carries scope findings across retry rounds. Stored as `{snapshot_key: [entries]}` where `snapshot_key` is a SHA-256 prefix of the staged diff — findings from a prior blocked attempt on a different diff are not shown to the reviewer. Cleared to `{}` on a successful commit. Not in safety-critical registry.py (accessed via `getattr`).
+- **Scope-history label rendering (v4.32.0 epistemic-integrity fix)**: `_build_scope_history_section` in `scope_review.py` renders each retained round via the `_scope_round_label` helper. Label derivation: `blocked=True` → `BLOCKED`; otherwise the entry's `status` field decides — `responded` (or missing/empty) → `PASSED`, any other status (`budget_exceeded`, `omitted`, `parse_failure`, `error`, `empty_response`) → uppercase status as the label. Prevents degraded rounds with empty finding lists from being rendered as `PASSED` purely because `blocked=False`, which would have looked indistinguishable from a clean pass to the next scope reviewer. Regression guard: `tests/test_review_observability.py::test_scope_history_section_*` (6 tests covering the helper and all rendering branches).
 - History snapshot taken before parallel launch so scope sees consistent state regardless of triad execution order.
 - Applies to both `_repo_commit_push` and `_repo_write_commit` (legacy path).
 - Orchestration logic extracted to `ouroboros/tools/parallel_review.py` (P5 Minimalism — relieves git.py size pressure).
@@ -1113,6 +1138,7 @@ errors surface via the same observability path.
 - Checklist items (v4.14.1): 8 items including `cross_module_bugs` (does the change break something in a different module through implicit coupling?) and `implicit_contracts` (are there constants, data format assumptions, or expected signatures relied upon by other modules that this change violates?).
 - **Budget gate**: after assembling the full scope-review prompt (input section only), token count is estimated via `estimate_tokens` (chars/4 heuristic). If the estimate exceeds `_SCOPE_BUDGET_TOKEN_LIMIT` (750K tokens), scope review is **skipped with a non-blocking warning** rather than crashing or sending an oversized request. The commit is not blocked in this case. The 750K gate is margin-aware: chars/4 under-counts by ~15%; `750K / 0.85 ≈ 882K` actual input + 100K output = 982K < 1M API limit.
 - **`_TouchedContextStatus` dataclass** (v4.14.1): structured signal object used by `_build_scope_prompt()` to replace the old magic-string channel. `_compute_touched_status()` produces the touched-file statuses; `_build_scope_prompt()` creates `budget_exceeded` after estimating the assembled prompt. Fields: `status` ("empty"|"omitted"|"budget_exceeded"), `omitted_paths`, `token_count`. Success is represented by `context_status is None`, not a separate `"ok"` status. This prevents filename–sentinel collision (a real file named `__empty__` cannot be misclassified as a control sentinel).
+- **`ScopeReviewResult` epistemic fields** (v4.32.0): `raw_text` (full untruncated LLM response), `model_id`, `status` (`"responded"` | `"error"` | `"parse_failure"` | `"empty_response"` | `"budget_exceeded"` | `"omitted"` | `"empty"`), `prompt_chars`, `tokens_in`, `tokens_out`, `cost_usd`. `_handle_prompt_signals` explicitly sets `status` on all early-exit paths so budget-exceeded and empty-context skips are distinguishable from a real PASS; `budget_exceeded` path now also sets `prompt_chars = token_count * 4` so the forensic size fact is preserved. Empty LLM response uses `status="empty_response"` (distinct from `status="error"` transport failures). `run_scope_review` populates these from the LLM call response and propagates them via `parallel_review.py` into `ctx._last_scope_raw_result`, which `_record_commit_attempt` persists on every attempt record. `_run_unified_review` quorum check counts only `status=="responded"` triad actors — `parse_failure` actors are treated the same as transport errors for quorum purposes (both represent unusable evidence).
 - **Repo-pack gathering helper**: `_gather_scope_packs()` now only returns the wider repo-pack text (or raises on git failure). It no longer returns status sentinels.
 - Runs **in parallel with** triad review (v4.14.0), BEFORE `git commit`. Also runs in `_repo_write_commit` (legacy path). Runs even when triad blocks — **except** when the budget gate skips it for an oversized assembled prompt.
 - Respects review enforcement setting (blocking/advisory).

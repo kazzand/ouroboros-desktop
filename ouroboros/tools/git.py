@@ -139,9 +139,11 @@ def _handle_revalidation_failure(
         pre_review_fingerprint=pre_fingerprint.get("fingerprint", ""),
         post_review_fingerprint=(post_fingerprint or {}).get("fingerprint", ""),
         fingerprint_status=fingerprint_status,
-        degraded_reasons=[degraded_reason],
+        degraded_reasons=[degraded_reason] + list(getattr(ctx, "_review_degraded_reasons", []) or []),
         triad_models=getattr(ctx, "_last_triad_models", []),
         scope_model=getattr(ctx, "_last_scope_model", ""),
+        triad_raw_results=getattr(ctx, "_last_triad_raw_results", []),
+        scope_raw_result=getattr(ctx, "_last_scope_raw_result", {}),
     )
     return msg
 
@@ -172,6 +174,9 @@ def _finalize_blocked_review(
         fingerprint_status="matched",
         triad_models=getattr(ctx, "_last_triad_models", []),
         scope_model=getattr(ctx, "_last_scope_model", ""),
+        triad_raw_results=getattr(ctx, "_last_triad_raw_results", []),
+        scope_raw_result=getattr(ctx, "_last_scope_raw_result", {}),
+        degraded_reasons=list(getattr(ctx, "_review_degraded_reasons", []) or []),
     )
     try:
         run_cmd(["git", "reset", "HEAD"], cwd=ctx.repo_dir)
@@ -581,9 +586,12 @@ def _repo_write_commit(ctx: ToolContext, path: str, content: str,
     ctx.last_push_succeeded = False
     ctx._review_advisory = []
     # Reset forensic fields at the start of each commit attempt so stale values
-    # from a previous attempt never persist on early-exit paths.
+    # from a previous attempt never persist on early-exit paths (e.g. fingerprint failure).
     ctx._last_triad_models = []
     ctx._last_scope_model = ""
+    ctx._last_triad_raw_results = []
+    ctx._last_scope_raw_result = {}
+    ctx._review_degraded_reasons = []
     ctx._current_review_tool_name = "repo_write_commit"
     if not commit_message.strip():
         return "⚠️ ERROR: commit_message must be non-empty."
@@ -731,7 +739,10 @@ def _repo_write_commit(ctx: ToolContext, path: str, content: str,
                                    block_reason="infra_failure", block_details=err_msg,
                                    duration_sec=time.time() - _commit_start,
                                    triad_models=getattr(ctx, "_last_triad_models", []),
-                                   scope_model=getattr(ctx, "_last_scope_model", ""))
+                                   scope_model=getattr(ctx, "_last_scope_model", ""),
+                                   triad_raw_results=getattr(ctx, "_last_triad_raw_results", []),
+                                   scope_raw_result=getattr(ctx, "_last_scope_raw_result", {}),
+                                   degraded_reasons=list(getattr(ctx, "_review_degraded_reasons", []) or []))
             return err_msg
         _record_commit_attempt(ctx, commit_message, "succeeded",
                                duration_sec=time.time() - _commit_start,
@@ -740,7 +751,10 @@ def _repo_write_commit(ctx: ToolContext, path: str, content: str,
                                post_review_fingerprint=post_fingerprint.get("fingerprint", ""),
                                fingerprint_status="matched",
                                triad_models=getattr(ctx, "_last_triad_models", []),
-                               scope_model=getattr(ctx, "_last_scope_model", ""))
+                               scope_model=getattr(ctx, "_last_scope_model", ""),
+                               triad_raw_results=getattr(ctx, "_last_triad_raw_results", []),
+                               scope_raw_result=getattr(ctx, "_last_scope_raw_result", {}),
+                               degraded_reasons=list(getattr(ctx, "_review_degraded_reasons", []) or []))
         ctx._scope_review_history = {}  # Clear on success — next commit starts fresh
         _post_commit_result(ctx, commit_message, skip_tests, test_warning_ref)
         tag_info = _auto_tag_on_version_bump(ctx.repo_dir, commit_message)
@@ -765,6 +779,9 @@ def _repo_commit_push(ctx: ToolContext, commit_message: str,
     # from a previous attempt never persist on early-exit paths (e.g. fingerprint_unavailable).
     ctx._last_triad_models = []
     ctx._last_scope_model = ""
+    ctx._last_triad_raw_results = []
+    ctx._last_scope_raw_result = {}
+    ctx._review_degraded_reasons = []
     ctx._current_review_tool_name = "repo_commit"
     _commit_start = time.time()
     if not commit_message.strip():
@@ -903,7 +920,10 @@ def _repo_commit_push(ctx: ToolContext, commit_message: str,
                                    block_reason="infra_failure", block_details=err_msg,
                                    duration_sec=time.time() - _commit_start,
                                    triad_models=getattr(ctx, "_last_triad_models", []),
-                                   scope_model=getattr(ctx, "_last_scope_model", ""))
+                                   scope_model=getattr(ctx, "_last_scope_model", ""),
+                                   triad_raw_results=getattr(ctx, "_last_triad_raw_results", []),
+                                   scope_raw_result=getattr(ctx, "_last_scope_raw_result", {}),
+                                   degraded_reasons=list(getattr(ctx, "_review_degraded_reasons", []) or []))
             return err_msg
         _record_commit_attempt(ctx, commit_message, "succeeded",
                                duration_sec=time.time() - _commit_start,
@@ -912,7 +932,10 @@ def _repo_commit_push(ctx: ToolContext, commit_message: str,
                                post_review_fingerprint=post_fingerprint.get("fingerprint", ""),
                                fingerprint_status="matched",
                                triad_models=getattr(ctx, "_last_triad_models", []),
-                               scope_model=getattr(ctx, "_last_scope_model", ""))
+                               scope_model=getattr(ctx, "_last_scope_model", ""),
+                               triad_raw_results=getattr(ctx, "_last_triad_raw_results", []),
+                               scope_raw_result=getattr(ctx, "_last_scope_raw_result", {}),
+                               degraded_reasons=list(getattr(ctx, "_review_degraded_reasons", []) or []))
         ctx._scope_review_history = {}  # Clear on success — next commit starts fresh
         _post_commit_result(ctx, commit_message, skip_tests, test_warning_ref)
         tag_info = _auto_tag_on_version_bump(ctx.repo_dir, commit_message)
