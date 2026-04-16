@@ -27,6 +27,7 @@ from ouroboros.tools.review_helpers import (  # noqa: E402
     _is_probably_binary,
     _BINARY_SNIFF_BYTES,
 )
+from ouroboros.utils import estimate_tokens  # noqa: E402
 
 # Directory prefixes to skip entirely (relative to repo_dir, using forward slashes).
 # - assets/  : README screenshots and app icons — no agent logic
@@ -253,12 +254,26 @@ def run_deep_self_review(
         )
 
         # 2. Estimate tokens and check limit
-        estimated_tokens = int(stats["total_chars"] / 3.5)
-        if estimated_tokens > 900_000:
+        # Budget aligned with scope/plan review at 850K input tokens. Uses the
+        # shared estimate_tokens helper (chars/4) so the effective char budget
+        # is identical across scope/plan/deep surfaces. The gate is applied to
+        # the FULL assembled prompt (system + user), matching how scope_review
+        # gates its assembled prompt and plan_review gates system+user. Gating
+        # only on pack_text would understate the real request size.
+        #
+        # Math: the deep-review model (by default `openai/gpt-5.4-pro`, see
+        # `is_review_available`) has a 1M context window that is shared between
+        # input and output. chars/4 under-counts real tokens by ~15%, so actual
+        # input at gate=850K is ≈1M. Output `max_tokens` lives inside the same
+        # window, so near-gate prompts sit close to the API ceiling — the skip
+        # path is best-effort, not a hard guarantee.
+        full_prompt_chars = len(_SYSTEM_PROMPT) + len(pack_text)
+        estimated_tokens = estimate_tokens(_SYSTEM_PROMPT + pack_text)
+        if estimated_tokens > 850_000:
             return (
                 f"❌ Review pack too large: ~{estimated_tokens:,} tokens "
-                f"({stats['total_chars']:,} chars, {stats['file_count']} files). "
-                f"Maximum is ~900,000 tokens. Reduce codebase size or split review."
+                f"({full_prompt_chars:,} chars of system+pack, {stats['file_count']} files). "
+                f"Maximum is ~850,000 tokens. Reduce codebase size or split review."
             ), {}
 
         # 3. Determine model

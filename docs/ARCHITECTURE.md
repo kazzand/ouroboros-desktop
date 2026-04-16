@@ -1,4 +1,4 @@
-# Ouroboros v4.32.0 — Architecture & Reference
+# Ouroboros v4.32.1 — Architecture & Reference
 
 This document describes every component, page, button, API endpoint, and data flow.
 It is the single source of truth for how the system works. Keep it updated.
@@ -892,8 +892,13 @@ the constitutional guard is that the file itself must remain non-deletable.
   the proposal should be narrowed.
 - **Aggregate signal**: `GREEN` (proceed), `REVIEW_REQUIRED` (risks present), or `REVISE_PLAN` (FAILs found).
 - **Non-blocking**: results are advisory only — the implementer decides what to do.
-- **Budget gate**: if the assembled prompt exceeds `_PLAN_BUDGET_TOKEN_LIMIT` (1M tokens),
-  review is skipped with a non-blocking `⚠️ PLAN_REVIEW_SKIPPED:` warning.
+- **Budget gate**: if the assembled prompt exceeds `_PLAN_BUDGET_TOKEN_LIMIT` (850K tokens),
+  review is skipped with a non-blocking `⚠️ PLAN_REVIEW_SKIPPED:` warning. Unified with scope/deep
+  review at 850K as a best-effort shared policy. plan_task uses the configurable
+  `OUROBOROS_REVIEW_MODELS` set (not a fixed 1M-context model), so headroom depends on each
+  reviewer's actual context window; `estimate_tokens` (chars/4) under-counts by ~15%, so at
+  gate=850K actual input reaches ≈1M tokens and individual reviewers may still reject at the
+  API level.
 - **Cost**: ~$6-8 (3 × full-repo-pack reviewers, same cost as scope review × 3).
   Use for tasks where the alternative is 5+ blocked commits totaling $30-100.
 
@@ -1112,15 +1117,15 @@ errors surface via the same observability path.
 #### Blocking scope review
 
 - **Module**: `tools/scope_review.py`. Single-model (configurable via `OUROBOROS_SCOPE_REVIEW_MODEL`, default `anthropic/claude-opus-4.6`). Reasoning effort via `OUROBOROS_EFFORT_SCOPE_REVIEW` (default `high`).
-- **Fail-closed**: timeout, parse error, API failure, or unreadable touched files all block. Exception: when the fully assembled scope-review prompt (input only) exceeds `_SCOPE_BUDGET_TOKEN_LIMIT` (750K tokens), scope review is **skipped with a non-blocking advisory warning** rather than blocking the commit. The 750K gate is margin-aware: `estimate_tokens` (chars/4) under-counts by ~15%, so with 15% undercount `750K / 0.85 ≈ 882K` actual input tokens + 100K output = 982K < 1M API hard limit. Touched-file omission always takes precedence over the budget gate.
+- **Fail-closed**: timeout, parse error, API failure, or unreadable touched files all block. Exception: when the fully assembled scope-review prompt exceeds `_SCOPE_BUDGET_TOKEN_LIMIT` (850K tokens), scope review is **skipped with a non-blocking advisory warning** rather than blocking the commit. Context math: the default reviewer (`anthropic/claude-opus-4.6`) has a 1M context window (GA March 2026) **shared between input and output**; other reviewers configured via `OUROBOROS_SCOPE_REVIEW_MODEL` may have different ceilings. `estimate_tokens` (chars/4) under-counts real tokens by ~15%, so at gate=850K actual input is ≈1M tokens; on the default model, output `_SCOPE_MAX_TOKENS` draws from the same 1M window. The skip path is best-effort — 850K is a conscious trade that lets scope prompts that previously skipped at ~778K actually run. Touched-file omission always takes precedence over the budget gate.
 - **Role**: full-codebase reviewer with unique advantage — sees the ENTIRE repository,
   not just the diff. Finds cross-module bugs, broken implicit contracts, hidden
   regressions, and forgotten touchpoints that diff-only triad reviewers miss.
 - **Prompt includes**: "Intent / Scope Review Checklist" from CHECKLISTS.md, touched-file
   pack, full repo pack (all tracked non-test files minus touched — no char cap, binary/vendored/sensitive
-  filtered via `build_full_repo_pack`; `tests/` excluded from full repo pack to stay under the 1M-token
-  budget gate — touched test files remain visible via `build_touched_file_pack`), goal/scope sections,
-  DEVELOPMENT.md, staged diff, review history.
+  filtered via `build_full_repo_pack`; `tests/` excluded from full repo pack to stay under the 850K-token
+  budget gate (`_SCOPE_BUDGET_TOKEN_LIMIT`) — touched test files remain visible via `build_touched_file_pack`),
+  goal/scope sections, DEVELOPMENT.md, staged diff, review history.
 - **Pre-change (HEAD) snapshots** (best-effort): `build_head_snapshot_section` in `review_helpers.py`
   fetches the HEAD version of each touched file via `git show HEAD:<path>`. Sensitive files (`.env`,
   `.pem`, `.key`, `credentials.json`, etc. — case-insensitive) are suppressed before the subprocess
@@ -1136,7 +1141,7 @@ errors surface via the same observability path.
   oversized (>1MB), and directory prefixes `.cursor/`, `.github/`, `.vscode/`, `.idea/`, `assets/`,
   `webview/`. Explicit omission count appended when files are skipped.
 - Checklist items (v4.14.1): 8 items including `cross_module_bugs` (does the change break something in a different module through implicit coupling?) and `implicit_contracts` (are there constants, data format assumptions, or expected signatures relied upon by other modules that this change violates?).
-- **Budget gate**: after assembling the full scope-review prompt (input section only), token count is estimated via `estimate_tokens` (chars/4 heuristic). If the estimate exceeds `_SCOPE_BUDGET_TOKEN_LIMIT` (750K tokens), scope review is **skipped with a non-blocking warning** rather than crashing or sending an oversized request. The commit is not blocked in this case. The 750K gate is margin-aware: chars/4 under-counts by ~15%; `750K / 0.85 ≈ 882K` actual input + 100K output = 982K < 1M API limit.
+- **Budget gate**: after assembling the full scope-review prompt, token count is estimated via `estimate_tokens` (chars/4 heuristic). If the estimate exceeds `_SCOPE_BUDGET_TOKEN_LIMIT` (850K tokens), scope review is **skipped with a non-blocking warning** rather than crashing or sending an oversized request. The commit is not blocked in this case. Context math: 1M window is shared input+output; chars/4 under-counts by ~15%, so actual input at gate=850K is ≈1M tokens and output max_tokens draws from the same 1M ceiling — the skip path is best-effort.
 - **`_TouchedContextStatus` dataclass** (v4.14.1): structured signal object used by `_build_scope_prompt()` to replace the old magic-string channel. `_compute_touched_status()` produces the touched-file statuses; `_build_scope_prompt()` creates `budget_exceeded` after estimating the assembled prompt. Fields: `status` ("empty"|"omitted"|"budget_exceeded"), `omitted_paths`, `token_count`. Success is represented by `context_status is None`, not a separate `"ok"` status. This prevents filename–sentinel collision (a real file named `__empty__` cannot be misclassified as a control sentinel).
 - **`ScopeReviewResult` epistemic fields** (v4.32.0): `raw_text` (full untruncated LLM response), `model_id`, `status` (`"responded"` | `"error"` | `"parse_failure"` | `"empty_response"` | `"budget_exceeded"` | `"omitted"` | `"empty"`), `prompt_chars`, `tokens_in`, `tokens_out`, `cost_usd`. `_handle_prompt_signals` explicitly sets `status` on all early-exit paths so budget-exceeded and empty-context skips are distinguishable from a real PASS; `budget_exceeded` path now also sets `prompt_chars = token_count * 4` so the forensic size fact is preserved. Empty LLM response uses `status="empty_response"` (distinct from `status="error"` transport failures). `run_scope_review` populates these from the LLM call response and propagates them via `parallel_review.py` into `ctx._last_scope_raw_result`, which `_record_commit_attempt` persists on every attempt record. `_run_unified_review` quorum check counts only `status=="responded"` triad actors — `parse_failure` actors are treated the same as transport errors for quorum purposes (both represent unusable evidence).
 - **Repo-pack gathering helper**: `_gather_scope_packs()` now only returns the wider repo-pack text (or raises on git failure). It no longer returns status sentinels.
@@ -1151,7 +1156,7 @@ errors surface via the same observability path.
 - **Review pack**: all git-tracked files (read from the git index via `dulwich` — pure Python, no subprocess) + a whitelist of core memory files (`identity.md`, `scratchpad.md`, `registry.md`, `WORLD.md`, `knowledge/index-full.md`, `knowledge/patterns.md`, `knowledge/improvement-backlog.md`). Does NOT include dialogue history, task reflections, or other operational logs — these would consume too much context without adding architectural insight.
 - **macOS fork-safety**: when the Ouroboros app bundle uses `fork()` to spawn the inner `server.py` process, worker children inherit a multithreaded parent state. The first httpx HTTP request in a forked child triggers `SCDynamicStoreCopyProxiesWithOptions()` / `CFPreferences`, which is not fork-safe and causes a SIGSEGV (exit code -11, confirmed via `"crashed on child side of fork pre-exec"` in macOS crash reports). Fix: all worker-side LLM async calls (in `plan_review.py`, `review.py`, `scope_review.py`) pass `no_proxy=True` to `llm_client.chat_async()`. In `LLMClient.chat_async()`, when `no_proxy=True`, a one-shot `httpx.AsyncClient(trust_env=False, mounts={})` wrapped in an `AsyncOpenAI` client is created (closed in `finally`) for non-Anthropic providers; for Anthropic, `no_proxy=True` flows through to `_chat_anthropic()` which uses `requests.Session(trust_env=False)` instead of bare `requests.post()`. `_normalize_remote_response` is called with `skip_cost_fetch=True` when `no_proxy=True` to also suppress the `_fetch_generation_cost()` `requests.get()` call (which would re-introduce `SCDynamicStore` access on the OpenRouter path). The `deep_self_review` path uses `llm.chat(..., no_proxy=True)` via the synchronous `_chat_remote()` path. Regular task LLM calls use the shared cached client as before.
 - **Excluded from pack**: sensitive files (`.env`, `.pem`, `.key`, etc.); vendored/minified third-party assets (`.min.js`, `.min.css`, bundled libraries such as `chart.umd.min.js`); binary and media files by extension (`_BINARY_EXTENSIONS`: `.png`, `.jpg`, `.ico`, `.svg`, `.gif`, `.webp`, fonts, compiled blobs) plus a content-based sniffer (`_is_probably_binary()`: NUL-byte presence OR >30% ASCII control-char ratio OR UTF-8 incremental decode failure — safe for Cyrillic/CJK, catches unlisted extensions like `.wasm`, `.bin`, extensionless blobs); excluded directory prefixes (`_SKIP_DIR_PREFIXES`: `assets/` — README screenshots and app icons; `webview/` — legacy PyWebView JS helpers); and files > 1MB. All exclusions appear in the `## OMITTED FILES` section of the review pack. The rule: deep review is for agent logic and its own prompts/docs — not for libraries, images, or operational runtime logs.
-- **No chunking, no silent truncation**. All excluded files are listed in an `## OMITTED FILES` section appended to the review pack — visible to the model and the operator. If the total pack exceeds ~900K tokens, an explicit error is returned.
+- **No chunking, no silent truncation**. All excluded files are listed in an `## OMITTED FILES` section appended to the review pack — visible to the model and the operator. If the estimated token count of the full assembled prompt (`_SYSTEM_PROMPT + pack_text` via the shared `estimate_tokens` helper) exceeds ~850K tokens, an explicit error is returned (aligned with scope/plan review input budget).
 - **System prompt**: Constitution-first review mandate (BIBLE.md as absolute reference).
 - **Invariants**: reasoning effort `high`, max_tokens `100000`, no tools, 1 round, 60-minute hard timeout.
 - **Output**: full report to chat + saved to `memory/deep_review.md`.

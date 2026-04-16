@@ -81,32 +81,57 @@ def test_claude_code_sdk_only_no_cli_fallback():
 
 
 def test_scope_review_budget_limit():
-    """scope_review.py budget gate must be margin-aware for the chars/4 heuristic.
+    """scope_review.py budget gate must sit at the unified 850K input-token budget.
 
-    estimate_tokens (chars/4) under-counts by ~15% on real code.
-    The gate must be derived so that: (gate / 0.85) + max_tokens <= 1_000_000
-    i.e. gate <= floor((1_000_000 - max_tokens) * 0.85)
-    With max_tokens=100K: gate <= floor(900_000 * 0.85) = 765_000.
-    We use 750_000 as the conservative safe value.
+    Note: Claude Opus 4.6 has a 1M context window SHARED between input and output.
+    estimate_tokens (chars/4) under-counts by ~15%, so at gate=850K actual input
+    is ≈1M tokens and output max_tokens draws from the same 1M ceiling. The skip
+    path is best-effort — 850K is a conscious trade that lets scope prompts that
+    previously skipped at ~778K actually run.
     """
-    from ouroboros.tools.scope_review import _SCOPE_BUDGET_TOKEN_LIMIT, _SCOPE_MAX_TOKENS
-    assert _SCOPE_BUDGET_TOKEN_LIMIT >= 700_000, "budget limit too low (over-restrictive, skips most reviews)"
-    # Margin-aware invariant: (gate / 0.85) + max_tokens <= 1_000_000
-    # Equivalent to: gate <= (1_000_000 - max_tokens) * 0.85
-    max_safe_gate = int((1_000_000 - _SCOPE_MAX_TOKENS) * 0.85)
-    assert _SCOPE_BUDGET_TOKEN_LIMIT <= max_safe_gate, (
-        f"_SCOPE_BUDGET_TOKEN_LIMIT ({_SCOPE_BUDGET_TOKEN_LIMIT}) exceeds the margin-aware safe gate "
-        f"({max_safe_gate}): with 15% chars/4 undercount, actual input could be "
-        f"{int(_SCOPE_BUDGET_TOKEN_LIMIT / 0.85)} tokens, "
-        f"plus {_SCOPE_MAX_TOKENS} output = "
-        f"{int(_SCOPE_BUDGET_TOKEN_LIMIT / 0.85) + _SCOPE_MAX_TOKENS} > 1M API limit"
+    from ouroboros.tools.scope_review import _SCOPE_BUDGET_TOKEN_LIMIT
+    assert _SCOPE_BUDGET_TOKEN_LIMIT == 850_000, (
+        f"_SCOPE_BUDGET_TOKEN_LIMIT ({_SCOPE_BUDGET_TOKEN_LIMIT}) must equal 850_000 "
+        "to match the unified scope/plan/deep-review input budget."
     )
 
 
 def test_plan_review_budget_limit():
-    """plan_review.py _PLAN_BUDGET_TOKEN_LIMIT must be ≥1_000_000."""
+    """plan_review.py _PLAN_BUDGET_TOKEN_LIMIT must match the unified 850K budget."""
     from ouroboros.tools.plan_review import _PLAN_BUDGET_TOKEN_LIMIT
-    assert _PLAN_BUDGET_TOKEN_LIMIT >= 1_000_000
+    assert _PLAN_BUDGET_TOKEN_LIMIT == 850_000, (
+        f"_PLAN_BUDGET_TOKEN_LIMIT ({_PLAN_BUDGET_TOKEN_LIMIT}) must equal 850_000 "
+        "to match the unified scope/plan/deep-review input budget."
+    )
+
+
+def test_deep_self_review_budget_limit():
+    """deep_self_review.py pack-size gate must match the unified 850K budget
+    and must gate on the FULL assembled prompt (system + user), not just the pack.
+
+    The deep self-review runner rejects packs whose shared estimate_tokens
+    (chars/4) estimate exceeds the gate. This test pins the numeric threshold,
+    the use of the shared helper, AND the requirement that the gate reflects
+    the full assembled prompt — matching how scope_review and plan_review gate.
+    """
+    import pathlib
+    src = pathlib.Path("ouroboros/deep_self_review.py").read_text(encoding="utf-8")
+    assert "estimated_tokens > 850_000" in src, (
+        "deep_self_review must gate on estimated_tokens > 850_000"
+    )
+    assert "Maximum is ~850,000 tokens" in src, (
+        "deep_self_review error message must reference 850,000 tokens"
+    )
+    assert "estimate_tokens(_SYSTEM_PROMPT + pack_text)" in src, (
+        "deep_self_review must gate on the FULL assembled prompt "
+        "(system + user) using the shared estimate_tokens(chars/4) helper, "
+        "matching scope_review and plan_review. Gating on pack_text alone "
+        "understates the real request size."
+    )
+    assert "int(stats[\"total_chars\"] / 3.5)" not in src, (
+        "deep_self_review must not use its old chars/3.5 estimator — it diverges "
+        "from the scope/plan review chars/4 budget at the same nominal token gate"
+    )
 
 
 def test_tool_timeout_uses_max_of_settings_and_per_tool():

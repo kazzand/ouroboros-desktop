@@ -42,9 +42,14 @@ log = logging.getLogger(__name__)
 _PLAN_REVIEW_MAX_TOKENS = 65536
 _PLAN_REVIEW_EFFORT = "high"
 
-# Budget gate: skip with advisory warning if prompt exceeds this token estimate.
-# 1M fills the full context window of most frontier models (same as scope review).
-_PLAN_BUDGET_TOKEN_LIMIT = 1_000_000
+# Budget gate: skip with advisory warning if assembled prompt exceeds this token
+# estimate. Unified with scope/deep review at 850K as a best-effort shared policy.
+# plan_task uses the configurable `OUROBOROS_REVIEW_MODELS` set (not a fixed 1M
+# model), so the exact headroom depends on each reviewer's actual context window.
+# `estimate_tokens` (chars/4) under-counts real tokens by ~15%, so at gate=850K
+# actual input reaches ≈1M tokens; the skip path is best-effort and individual
+# reviewers may still reject oversized requests at the API level.
+_PLAN_BUDGET_TOKEN_LIMIT = 850_000
 
 
 # ------------------------------------------------------------------ #

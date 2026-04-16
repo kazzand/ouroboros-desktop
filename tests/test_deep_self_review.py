@@ -579,8 +579,8 @@ class TestNoProxyLlmChat:
 
 class TestReviewPackOverflow:
     def test_explicit_error_on_overflow(self, tmp_repo, tmp_drive):
-        """When pack exceeds ~900K tokens, run_deep_self_review returns an error."""
-        # Create a pack that's way too large (> 3.15M chars ≈ 900K tokens)
+        """When pack exceeds ~850K tokens, run_deep_self_review returns an error."""
+        # Create a pack that's way too large (> 2.975M chars ≈ 850K tokens)
         huge_pack = "x" * 4_000_000
         mock_llm = mock.Mock()
 
@@ -598,6 +598,6 @@ class TestReviewPackOverflow:
             )
 
         assert "too large" in result
-        assert "900,000" in result
+        assert "850,000" in result
         assert usage == {}
         mock_llm.chat.assert_not_called()

@@ -40,17 +40,21 @@ log = logging.getLogger(__name__)
 _SCOPE_MODEL_DEFAULT = "anthropic/claude-opus-4.6"
 _SCOPE_MAX_TOKENS = 100_000  # 100K output tokens
 
-# Budget gate: if the fully assembled scope-review prompt (input only) exceeds this
+# Budget gate: if the fully assembled scope-review prompt (input) exceeds this
 # token estimate, scope review is skipped with a non-blocking warning instead of
 # crashing or sending an oversized request.
 #
-# Safety math: estimate_tokens uses chars/4 heuristic which under-counts by ~15%
-# on real code. So: actual_input = estimate / 0.85
-# To guarantee actual_input + output <= 1M hard API limit:
-#   gate <= (1_000_000 - _SCOPE_MAX_TOKENS) * 0.85 = 900_000 * 0.85 = 765_000
-# We round down to 750_000 for a clean conservative number.
-# At gate=750K: actual_input = 750_000 / 0.85 ≈ 882K; 882K + 100K output = 982K < 1M.
-_SCOPE_BUDGET_TOKEN_LIMIT = 750_000
+# Context math: the default reviewer (anthropic/claude-opus-4.6) has a 1M context
+# window (GA March 2026) that is SHARED between input and output; other configured
+# reviewers via OUROBOROS_SCOPE_REVIEW_MODEL may have different ceilings.
+# `estimate_tokens` uses chars/4 which under-counts real tokens by ~15%, so at
+# gate=850_000 actual input is ≈1_000_000 tokens. On the default 1M model, output
+# `_SCOPE_MAX_TOKENS` draws from the same 1M window, so near-gate prompts sit
+# close to the API ceiling; the non-blocking skip path is best-effort, not a
+# guarantee — some API-level rejections at 850K are still possible. This is a
+# conscious trade: 850K lets scope-review prompts that previously skipped at
+# ~778K actually run.
+_SCOPE_BUDGET_TOKEN_LIMIT = 850_000
 
 
 @dataclass
