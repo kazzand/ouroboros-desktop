@@ -37,6 +37,46 @@ _call_llm_with_retry = call_llm_with_retry
 log = logging.getLogger(__name__)
 
 
+def _estimate_messages_chars(messages: List[Dict[str, Any]]) -> int:
+    """Estimate the serialised size of a message list in characters.
+
+    Counts all serialised fields that actually reach the provider:
+    - message `content` (string or multipart list)
+    - `tool_calls` (serialised to JSON)
+    - `tool_call_id`
+    This deliberately excludes the static system-prompt block (built once in
+    context.py and amortised across rounds by prompt caching), focusing on
+    the mutable per-round portion of the transcript which is what grows
+    unboundedly during long tasks.
+    """
+    total = 0
+    for msg in messages:
+        content = msg.get("content")
+        if isinstance(content, str):
+            total += len(content)
+        elif isinstance(content, list):
+            for block in content:
+                if isinstance(block, dict):
+                    # Serialise the whole block so non-text types (image_url, etc.)
+                    # are counted — not just the "text" field.
+                    try:
+                        import json as _json2
+                        total += len(_json2.dumps(block, ensure_ascii=False))
+                    except (TypeError, ValueError):
+                        total += len(str(block))
+        tool_calls = msg.get("tool_calls")
+        if tool_calls:
+            try:
+                import json as _json
+                total += len(_json.dumps(tool_calls, ensure_ascii=False))
+            except (TypeError, ValueError):
+                total += sum(len(str(tc)) for tc in tool_calls)
+        tc_id = msg.get("tool_call_id")
+        if tc_id:
+            total += len(str(tc_id))
+    return total
+
+
 def _provider_failure_hint(accumulated_usage: Dict[str, Any]) -> str:
     detail = " ".join(str(accumulated_usage.get("_last_llm_error") or "").split()).strip()
     if not detail:
@@ -561,20 +601,45 @@ def run_llm_loop(
 
             _compaction_usage = None
             pending_compaction = getattr(tools._ctx, '_pending_compaction', None)
-            # Skip compaction on checkpoint rounds: the checkpoint message was
-            # just appended, it lives inside keep_recent=50 anyway (so
-            # compaction would not touch it), and running the compactor LLM on
-            # the same turn as the checkpoint self-check roughly doubles
-            # LLM cost for this round without changing the transcript.
-            if not _checkpoint_injected:
-                if pending_compaction is not None:
-                    messages, _compaction_usage = compact_tool_history_llm(messages, keep_recent=pending_compaction)
-                    tools._ctx._pending_compaction = None
-                elif round_idx > 12:
-                    messages, _compaction_usage = compact_tool_history_llm(messages, keep_recent=50)
-                elif round_idx > 6:
-                    if len(messages) > 80:
-                        messages, _compaction_usage = compact_tool_history_llm(messages, keep_recent=50)
+            # Compaction policy:
+            #
+            # Manual compaction (_pending_compaction) and the remote emergency path
+            # run UNCONDITIONALLY — even on checkpoint rounds.  Only the routine
+            # per-round compaction (local threshold / old "every round > 12" remote
+            # path) is suppressed on checkpoint rounds to avoid paying twice for the
+            # compaction LLM call on the same turn the self-check was injected.
+            #
+            # Remote mode (default): automatic semantic compaction is DISABLED for
+            # routine rounds.  The previous policy called compact_tool_history_llm
+            # every round after round_idx > 12, which meant that once tool-rounds
+            # exceeded keep_recent=50 the compactor ran on EVERY round — destroying
+            # raw tool outputs, breaking cache continuity, and hurting cache hit rate.
+            # Remote models handle large contexts (~400k tokens); preserving exact
+            # history is more valuable than saving tokens.
+            #
+            # Emergency threshold: if the total context grows beyond ~1.2M chars
+            # (~300k tokens) we must compact regardless of mode to stay within
+            # provider context limits.
+            #
+            # Local mode: compact at a lower threshold because local models typically
+            # have small context windows (8k–32k tokens).
+
+            # --- Manual compaction (always runs) ---
+            if pending_compaction is not None:
+                messages, _compaction_usage = compact_tool_history_llm(messages, keep_recent=pending_compaction)
+                tools._ctx._pending_compaction = None
+
+            # --- Emergency compaction (always runs, catches both remote and local) ---
+            elif _estimate_messages_chars(messages) > 1_200_000:
+                messages, _compaction_usage = compact_tool_history_llm(messages, keep_recent=50)
+
+            # --- Routine compaction (suppressed on checkpoint rounds) ---
+            elif not _checkpoint_injected:
+                if active_use_local:
+                    # Local models: compact aggressively to fit small context windows.
+                    if round_idx > 6 and len(messages) > 40:
+                        messages, _compaction_usage = compact_tool_history_llm(messages, keep_recent=20)
+                # Remote: no routine compaction — emergency path above handles overflow.
             if tools._ctx.messages is not messages:
                 tools._ctx.messages = messages
             if _compaction_usage:

@@ -1,4 +1,4 @@
-# Ouroboros v4.36.2 — Architecture & Reference
+# Ouroboros v4.36.3 — Architecture & Reference
 
 This document describes every component, page, button, API endpoint, and data flow.
 It is the single source of truth for how the system works. Keep it updated.
@@ -602,7 +602,7 @@ backward compatibility but is not the runtime authority.
   the executor emits a `tool_call_late` progress event but continues waiting synchronously
   for the real result (hard ceiling: 1800s). This prevents ambiguous "tool timed out, maybe
   still running" states for commit operations.
-- Context compaction kicks in after round 8 (summarizes old tool results)
+- **Context compaction policy** (v4.36.3): automatic semantic compaction is disabled for remote models. The previous policy (`compact_tool_history_llm` every round after round_idx > 12) caused the compactor to fire on every round once tool-rounds exceeded `keep_recent=50`, destroying raw tool outputs, fragmenting working memory, and killing cache hit rate. New policy: (1) **Remote** — emergency only: compact when total context exceeds 1.2M chars (~300k tokens); (2) **Local** — aggressive: compact when messages > 40 after round 6, to fit small context windows; (3) **Manual** — `_pending_compaction` from `compact_context` tool is always honoured. Exact history is preserved at the cost of larger context for remote tasks.
 - **Loop checkpoint** (`_maybe_inject_self_check`): every 15 rounds, a plain `user` message is
   inserted into the transcript (as the LAST message, AFTER `_drain_incoming_messages`, so that any
   queued owner messages are already flushed to the transcript and the checkpoint is what the LLM
@@ -643,6 +643,11 @@ backward compatibility but is not the runtime authority.
   almost every real answer the model tried to give. The ceremony competed with
   the model's actual work without adding usable signal, so it was retired in favour
   of this single-message self-check.
+  **Checkpoint and compaction interaction**: checkpoint rounds suppress ONLY the
+  routine per-round compaction path (local threshold). Manual `_pending_compaction`
+  and the remote emergency threshold (> 1.2M chars) are unconditional and run even
+  on checkpoint rounds — the suppression guard (`elif not _checkpoint_injected`) is
+  the innermost branch, not the outer one.
 
 ### Claude runtime (gateways/claude_code.py + platform_layer.py)
 
