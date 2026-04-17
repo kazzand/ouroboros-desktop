@@ -922,15 +922,18 @@ class TestA2AConfig:
         assert "a2a_send" in names
         assert "a2a_status" in names
 
-    def test_a2a_not_in_frozen_modules(self):
-        """Pin the documented frozen-bundle limitation: a2a must NOT be in
-        _FROZEN_TOOL_MODULES until a new bundle is cut with registry.py updated.
-        See ARCHITECTURE.md A2A section: 'Frozen-bundle limitation (known)'.
+    def test_a2a_in_frozen_modules(self):
+        """A2A client tools must be loaded in frozen/packaged bundles.
+
+        Unlocked in v4.36.1: 'a2a' was added to _FROZEN_TOOL_MODULES so that
+        a2a_discover / a2a_send / a2a_status are available in the packaged
+        .app/.tar.gz/.zip bundles (not only in dev/source mode).
         """
         from ouroboros.tools.registry import ToolRegistry
-        assert "a2a" not in ToolRegistry._FROZEN_TOOL_MODULES, (
-            "a2a was added to _FROZEN_TOOL_MODULES — update ARCHITECTURE.md "
-            "frozen-bundle limitation note and README changelog accordingly."
+        assert "a2a" in ToolRegistry._FROZEN_TOOL_MODULES, (
+            "a2a was removed from _FROZEN_TOOL_MODULES — the A2A client tools "
+            "will disappear from frozen builds. Restore it or update the "
+            "frozen-bundle note in docs/ARCHITECTURE.md and README changelog."
         )
 
     def test_a2a_restart_required_keys_include_all_a2a_keys(self):

@@ -50,11 +50,11 @@ def test_memory_ensure_files_generates_world_profile(tmp_path, monkeypatch):
     assert memory.world_path().read_text(encoding="utf-8") == "# WORLD\n"
 
 
-def test_check_uncommitted_changes_skips_auto_rescue_outside_launcher(monkeypatch, tmp_path):
+def test_check_uncommitted_changes_never_commits_outside_launcher(monkeypatch, tmp_path):
+    """Worker-side check_uncommitted_changes is warning-only; never commits."""
     env = types.SimpleNamespace(
         repo_dir=tmp_path,
         repo_path=lambda rel: tmp_path / rel,
-        launcher_managed=False,
     )
     calls = []
 
@@ -62,7 +62,7 @@ def test_check_uncommitted_changes_skips_auto_rescue_outside_launcher(monkeypatc
         calls.append(cmd)
         if cmd[:3] == ["git", "status", "--porcelain"]:
             return types.SimpleNamespace(returncode=0, stdout=" M server.py\n")
-        raise AssertionError(cmd)
+        raise AssertionError(f"Unexpected subprocess call: {cmd}")
 
     monkeypatch.delenv("OUROBOROS_MANAGED_BY_LAUNCHER", raising=False)
     monkeypatch.setattr(startup_mod.subprocess, "run", fake_run)
@@ -72,7 +72,7 @@ def test_check_uncommitted_changes_skips_auto_rescue_outside_launcher(monkeypatc
     assert issues == 1
     assert result["status"] == "warning"
     assert result["auto_committed"] is False
-    assert result["auto_rescue_skipped"] == "not_launcher_managed"
+    assert result["auto_rescue_skipped"] == "supervisor_side_rescue_owns_this"
     assert calls == [["git", "status", "--porcelain"]]
 
 
@@ -125,7 +125,11 @@ def test_lifespan_calls_apply_settings_to_env_before_supervisor(monkeypatch):
     )
 
 
-def test_check_uncommitted_changes_auto_rescue_when_launcher_managed(monkeypatch, tmp_path):
+def test_check_uncommitted_changes_never_commits_even_when_launcher_managed(monkeypatch, tmp_path):
+    """Regression for v4.36.1: worker-side startup check must never run git
+    add/commit, even under OUROBOROS_MANAGED_BY_LAUNCHER=1. Rescue is owned by
+    supervisor-side safe_restart(rescue_and_reset) in _bootstrap_supervisor_repo.
+    """
     env = types.SimpleNamespace(
         repo_dir=tmp_path,
         repo_path=lambda rel: tmp_path / rel,
@@ -138,17 +142,18 @@ def test_check_uncommitted_changes_auto_rescue_when_launcher_managed(monkeypatch
         calls.append(cmd)
         if cmd[:3] == ["git", "status", "--porcelain"]:
             return types.SimpleNamespace(returncode=0, stdout=" M server.py\n")
-        if cmd[:2] == ["git", "add"]:
-            return types.SimpleNamespace(returncode=0, stdout="", stderr="")
-        if cmd[:2] == ["git", "commit"]:
-            return types.SimpleNamespace(returncode=0, stdout="[ouroboros abc123] auto-rescue\n", stderr="")
-        raise AssertionError(cmd)
+        raise AssertionError(
+            f"Unexpected subprocess call {cmd}: worker-side check_uncommitted_changes "
+            "must not mutate git state (no add/commit)"
+        )
 
+    monkeypatch.setenv("OUROBOROS_MANAGED_BY_LAUNCHER", "1")
     monkeypatch.setattr(startup_mod.subprocess, "run", fake_run)
 
     result, issues = startup_mod.check_uncommitted_changes(env)
 
     assert issues == 1
     assert result["status"] == "warning"
-    assert result["auto_committed"] is True
-    assert [cmd[:2] for cmd in calls] == [["git", "status"], ["git", "add"], ["git", "commit"]]
+    assert result["auto_committed"] is False
+    assert result["auto_rescue_skipped"] == "supervisor_side_rescue_owns_this"
+    assert calls == [["git", "status", "--porcelain"]]

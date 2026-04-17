@@ -24,18 +24,24 @@ def _is_stable_release_tag(tag: str) -> bool:
     return bool(re.match(r"^\d+\.\d+\.\d+$", str(tag or "").strip()))
 
 
-def _startup_auto_rescue_enabled(env: Any) -> bool:
-    managed = getattr(env, "launcher_managed", None)
-    if managed is None:
-        managed = os.environ.get("OUROBOROS_MANAGED_BY_LAUNCHER", "")
-    if isinstance(managed, bool):
-        return managed
-    return str(managed or "").strip() == "1"
-
-
 def check_uncommitted_changes(env: Any) -> Tuple[dict, int]:
-    """Check for uncommitted changes and attempt auto-rescue commit."""
-    import re
+    """Diagnose uncommitted changes on worker boot. Warning-only: never commits.
+
+    Rescue of a dirty worktree is owned by the supervisor-side mechanism
+    ``safe_restart(..., unsynced_policy='rescue_and_reset')`` in
+    ``server.py::_bootstrap_supervisor_repo``, which creates a proper rescue
+    snapshot branch via ``supervisor/git_ops.py::_create_rescue_snapshot`` —
+    it runs exactly once per supervisor start and does not pollute the
+    ``ouroboros`` dev branch.
+
+    This worker-side check used to perform its own ``git add -u`` + ``git
+    commit`` as a second rescue mechanism. That duplication was the root
+    cause of the v4.36.0 bug: because ``OUROBOROS_MANAGED_BY_LAUNCHER=1`` is
+    inherited by every subprocess (pytest runs, A2A agent-card builder,
+    supervisor-side ``_get_chat_agent``), any code path reaching
+    ``make_agent()`` would steal the agent's in-progress edits into a
+    worker-side auto-rescue commit on the dev branch.
+    """
     try:
         lock_path = env.repo_path(".git/index.lock")
         if lock_path.exists():
@@ -52,40 +58,17 @@ def check_uncommitted_changes(env: Any) -> Tuple[dict, int]:
         )
         dirty_files = [l.strip() for l in result.stdout.strip().split('\n') if l.strip()]
         if dirty_files:
-            auto_committed = False
-            if not _startup_auto_rescue_enabled(env):
-                log.warning(
-                    "Uncommitted changes detected on startup; skipping auto-rescue commit "
-                    "outside launcher-managed mode"
-                )
-                return {
-                    "status": "warning",
-                    "files": dirty_files[:20],
-                    "auto_committed": auto_committed,
-                    "auto_rescue_skipped": "not_launcher_managed",
-                }, 1
-            try:
-                subprocess.run(["git", "add", "-u"], cwd=str(env.repo_dir),
-                               capture_output=True, timeout=10)
-                if not re.match(r'^[a-zA-Z0-9_/-]+$', str(getattr(env, "branch_dev", "ouroboros"))):
-                    raise ValueError(f"Invalid branch name: {getattr(env, 'branch_dev', '')}")
-                commit_result = subprocess.run(
-                    ["git", "commit", "-m", "auto-rescue: uncommitted changes detected on startup"],
-                    cwd=str(env.repo_dir), capture_output=True, text=True, timeout=30,
-                )
-                if commit_result.returncode == 0 and "nothing to commit" not in (commit_result.stdout or ""):
-                    auto_committed = True
-                    log.warning(f"Auto-rescued {len(dirty_files)} uncommitted files on startup")
-                else:
-                    log.info("Auto-rescue: nothing staged to commit (untracked files only or no changes)")
-            except Exception as e:
-                log.warning(f"Failed to auto-rescue uncommitted changes: {e}", exc_info=True)
+            log.warning(
+                "Uncommitted changes detected on worker boot; diagnostic-only, "
+                "rescue is owned by supervisor-side safe_restart(rescue_and_reset)"
+            )
             return {
-                "status": "warning", "files": dirty_files[:20],
-                "auto_committed": auto_committed,
+                "status": "warning",
+                "files": dirty_files[:20],
+                "auto_committed": False,
+                "auto_rescue_skipped": "supervisor_side_rescue_owns_this",
             }, 1
-        else:
-            return {"status": "ok"}, 0
+        return {"status": "ok"}, 0
     except Exception as e:
         return {"status": "error", "error": str(e)}, 0
 

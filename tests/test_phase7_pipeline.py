@@ -781,27 +781,6 @@ class TestMigrateRemoteCredentials:
         assert "already clean" in source.lower() or "Already clean" in source
 
 
-# --- Startup auto-rescue semantics ---
-
-class TestAutoRescueSemantics:
-    def test_auto_rescue_checks_commit_result(self):
-        """Auto-rescue must verify git commit actually created a commit."""
-        agent_mod = importlib.import_module("ouroboros.agent")
-        source = inspect.getsource(agent_mod.OuroborosAgent._check_uncommitted_changes)
-        assert "nothing to commit" in source
-        assert "capture_output=True" in source
-
-    def test_auto_rescue_does_not_claim_committed_on_noop(self):
-        """When git commit produces no new commit, auto_committed must be False."""
-        agent_mod = importlib.import_module("ouroboros.agent")
-        source = inspect.getsource(agent_mod.OuroborosAgent._check_uncommitted_changes)
-        assert "returncode == 0" in source
-        assert "auto_committed = True" in source
-        idx_committed = source.index("auto_committed = True")
-        idx_check = source.index("nothing to commit")
-        assert idx_check < idx_committed
-
-
 # --- ToolContext review state ---
 
 class TestToolContextReviewState:

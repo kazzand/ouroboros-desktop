@@ -155,11 +155,6 @@ class OuroborosAgent:
         verify_system_state(self.env, git_sha)
 
     def _check_uncommitted_changes(self):
-        # Backward-compat note for tests: startup auto-rescue only marks
-        # success when commit_result.returncode == 0 and output is not
-        # "nothing to commit". The startup subprocess still uses
-        # capture_output=True, and only then does auto_committed = True.
-        # The executable logic lives in agent_startup_checks.check_uncommitted_changes().
         return check_uncommitted_changes(self.env)
 
     def _check_version_sync(self):
