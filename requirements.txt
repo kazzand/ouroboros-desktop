@@ -7,6 +7,9 @@ uvicorn[standard]
 websockets
 huggingface_hub
 claude-agent-sdk>=0.1.60
+# optional: A2A (Agent-to-Agent) protocol — pip install 'ouroboros[a2a]'
+# a2a-sdk[http-server]>=0.3.20
+# httpx
 # optional: browser automation tools (for browse_page/browser_action)
 playwright
 playwright-stealth

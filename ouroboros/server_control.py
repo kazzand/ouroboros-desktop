@@ -67,6 +67,12 @@ def execute_panic_stop(
         pass
 
     try:
+        from ouroboros.a2a_server import stop_a2a_server
+        stop_a2a_server()
+    except Exception:
+        pass
+
+    try:
         from ouroboros.tools.shell import kill_all_tracked_subprocesses
 
         kill_all_tracked_subprocesses()
@@ -89,6 +95,14 @@ def execute_panic_stop(
                 pass
         kill_process_on_port(8765)
         kill_process_on_port(8766)
+        # A2A server binds to its own port (default 18800, overridable via
+        # A2A_PORT). Sweep it too so panic fully tears down the A2A surface
+        # and the port is free for the next launch.
+        try:
+            a2a_port = int(os.environ.get("A2A_PORT", "18800"))
+        except (TypeError, ValueError):
+            a2a_port = 18800
+        kill_process_on_port(a2a_port)
     except Exception:
         pass
 

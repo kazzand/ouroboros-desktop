@@ -312,6 +312,46 @@ export function renderSettingsPage() {
                         </div>
                         <div class="settings-inline-note">Only needed for in-app remote sync features. Safe to leave empty if you work locally.</div>
                     </div>
+                    <div class="form-section">
+                        <h3>A2A Protocol</h3>
+                        <div class="settings-section-copy">Agent-to-Agent communication server. Disabled by default. Requires restart to toggle.</div>
+                        <div class="form-row">
+                            <div class="form-field checkbox-field">
+                                <label for="s-a2a-enabled">Enable A2A Server</label>
+                                <input type="checkbox" id="s-a2a-enabled">
+                            </div>
+                        </div>
+                        <div class="form-grid two">
+                            <div class="form-field">
+                                <label for="s-a2a-host">A2A Host</label>
+                                <input type="text" id="s-a2a-host" placeholder="127.0.0.1">
+                            </div>
+                            <div class="form-field">
+                                <label for="s-a2a-port">A2A Port</label>
+                                <input type="number" id="s-a2a-port" placeholder="18800">
+                            </div>
+                        </div>
+                        <div class="form-grid two">
+                            <div class="form-field">
+                                <label for="s-a2a-agent-name">Agent Name (override)</label>
+                                <input type="text" id="s-a2a-agent-name" placeholder="Auto-detected from identity.md">
+                            </div>
+                            <div class="form-field">
+                                <label for="s-a2a-agent-description">Agent Description (override)</label>
+                                <input type="text" id="s-a2a-agent-description" placeholder="Auto-detected from identity.md">
+                            </div>
+                        </div>
+                        <div class="form-grid two">
+                            <div class="form-field">
+                                <label for="s-a2a-max-concurrent">Max Concurrent Tasks</label>
+                                <input type="number" id="s-a2a-max-concurrent" placeholder="3">
+                            </div>
+                            <div class="form-field">
+                                <label for="s-a2a-ttl-hours">Task TTL (hours)</label>
+                                <input type="number" id="s-a2a-ttl-hours" placeholder="24">
+                            </div>
+                        </div>
+                    </div>
                 </section>
 
                 <section class="settings-panel" data-settings-panel="advanced">

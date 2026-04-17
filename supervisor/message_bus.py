@@ -50,6 +50,11 @@ def get_bridge() -> "LocalChatBridge":
     return _BRIDGE
 
 
+def try_get_bridge() -> "Optional[LocalChatBridge]":
+    """Return the bridge or None if not yet initialized (safe for early callers)."""
+    return _BRIDGE
+
+
 def refresh_budget_limit(new_limit: Optional[float]) -> None:
     """Hot-reload the total budget limit used for status messages.
 
@@ -75,6 +80,9 @@ class LocalChatBridge:
         self._log_queue: queue.Queue = queue.Queue(maxsize=1000)
         self._update_counter = 0
         self._broadcast_fn = None  # set by server.py for WebSocket streaming
+        # A2A response subscriptions: {subscription_id: (chat_id, callback)}
+        self._response_subs: Dict[str, tuple] = {}
+        self._response_subs_lock = threading.Lock()
         self._telegram_bot_token = ""
         self._telegram_chat_id: int = 0
         self._telegram_active_chat_id: int = 0
@@ -82,6 +90,24 @@ class LocalChatBridge:
         self._telegram_stop = threading.Event()
         if settings:
             self.configure_from_settings(settings)
+
+    def broadcast(self, payload: dict) -> None:
+        """Broadcast a payload to WebSocket clients if the broadcast hook is wired.
+
+        A2A virtual chat_ids (negative values) are intentionally skipped so that
+        A2A task traffic does not appear in the human-visible chat UI live stream.
+        The history API (server_history_api.py) separately filters negative chat_ids
+        from page-reload history, providing consistent isolation.
+        """
+        chat_id = payload.get("chat_id")
+        if chat_id is not None:
+            try:
+                if int(chat_id) < 0:
+                    return
+            except (ValueError, TypeError):
+                pass
+        if self._broadcast_fn:
+            self._broadcast_fn(payload)
 
     def get_updates(self, offset: int, timeout: int = 10) -> List[Dict[str, Any]]:
         """Block on the inbox queue and return updates."""
@@ -142,6 +168,19 @@ class LocalChatBridge:
 
         if token_changed or chat_id_changed:
             self._restart_telegram_polling()
+
+    def subscribe_response(self, chat_id: int, callback) -> str:
+        """Subscribe to agent responses for a given chat_id. Returns subscription_id."""
+        import uuid as _uuid
+        sub_id = _uuid.uuid4().hex
+        with self._response_subs_lock:
+            self._response_subs[sub_id] = (chat_id, callback)
+        return sub_id
+
+    def unsubscribe_response(self, subscription_id: str) -> None:
+        """Remove a response subscription."""
+        with self._response_subs_lock:
+            self._response_subs.pop(subscription_id, None)
 
     def shutdown(self) -> None:
         self._stop_telegram_polling()
@@ -209,6 +248,9 @@ class LocalChatBridge:
         return response.content, mime
 
     def _telegram_target(self, preferred_chat_id: int = 0) -> int:
+        # Reject A2A virtual chat IDs (negative values) — they must not route to Telegram
+        if preferred_chat_id is not None and int(preferred_chat_id) < 0:
+            preferred_chat_id = None
         if self._telegram_chat_id:
             return self._telegram_chat_id
         if preferred_chat_id and int(preferred_chat_id) > 1:
@@ -466,7 +508,17 @@ class LocalChatBridge:
             "task_id": str(task_id or ""),
         }
         self._outbox.put(msg)
-        if self._broadcast_fn:
+        # Notify A2A response subscribers
+        with self._response_subs_lock:
+            subs = [(sid, cb) for sid, (cid, cb) in self._response_subs.items()
+                    if cid == chat_id and not is_progress]
+        for sid, cb in subs:
+            try:
+                cb(clean_text)
+            except Exception:
+                log.debug("A2A response callback error for sub %s", sid, exc_info=True)
+        # Skip WebSocket broadcast for A2A virtual chat_ids (negative values)
+        if self._broadcast_fn and chat_id >= 0:
             self._broadcast_fn({
                 "type": "chat",
                 "role": "assistant",

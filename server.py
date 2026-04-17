@@ -172,6 +172,14 @@ _RESTART_REQUIRED_KEYS = frozenset({
     "OPENAI_BASE_URL",
     "OPENAI_COMPATIBLE_BASE_URL",
     "CLOUDRU_FOUNDATION_MODELS_BASE_URL",
+    # A2A server requires restart when toggled or reconfigured
+    "A2A_ENABLED",
+    "A2A_PORT",
+    "A2A_HOST",
+    "A2A_AGENT_NAME",
+    "A2A_AGENT_DESCRIPTION",
+    "A2A_MAX_CONCURRENT",
+    "A2A_TASK_TTL_HOURS",
 })
 
 
@@ -1159,9 +1167,51 @@ async def lifespan(app):
             daemon=True, name="local-model-autostart",
         ).start()
 
+    # A2A server — disabled by default; enable in Settings → Integrations
+    a2a_server_task = None
+    if settings.get("A2A_ENABLED", False):
+        try:
+            from ouroboros.a2a_server import start_a2a_server
+            from ouroboros.server_auth import is_loopback_host
+            a2a_host = str(settings.get("A2A_HOST", "127.0.0.1")).strip()
+            a2a_port = int(settings.get("A2A_PORT", 18800))
+            if not is_loopback_host(a2a_host):
+                from ouroboros.server_auth import get_configured_network_password
+                if not get_configured_network_password():
+                    log.warning(
+                        "A2A server binding to non-loopback host %s without a network password. "
+                        "NetworkAuthGate is applied — set OUROBOROS_NETWORK_PASSWORD to require "
+                        "authentication, or keep A2A_HOST=127.0.0.1 for loopback-only access.",
+                        a2a_host,
+                    )
+            a2a_server_task = asyncio.create_task(
+                start_a2a_server(settings), name="a2a-server"
+            )
+            log.info("A2A server task created on port %d", a2a_port)
+        except Exception:
+            log.warning("Failed to start A2A server", exc_info=True)
+
     try:
         yield
     finally:
+        # Stop A2A server
+        if a2a_server_task:
+            try:
+                from ouroboros.a2a_server import stop_a2a_server
+                from contextlib import suppress
+                stop_a2a_server()
+                a2a_server_task.cancel()
+                with suppress(asyncio.CancelledError, asyncio.TimeoutError):
+                    await asyncio.wait_for(a2a_server_task, timeout=5)
+                # Sweep the port in case uvicorn left it in TIME_WAIT so the
+                # next launch can bind A2A_PORT immediately (mirrors panic-stop).
+                try:
+                    from ouroboros.platform_layer import kill_process_on_port
+                    kill_process_on_port(a2a_port)
+                except Exception:
+                    pass
+            except Exception:
+                pass
         ws_heartbeat_task.cancel()
         with suppress(asyncio.CancelledError):
             await ws_heartbeat_task

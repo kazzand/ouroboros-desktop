@@ -271,6 +271,9 @@ class Memory:
                     log.debug(f"Failed to parse JSON line in chat_history: {line[:100]}")
                     continue
 
+            # Filter out A2A synthetic traffic (negative chat_id) — only human dialogue
+            entries = [e for e in entries if (e.get("chat_id") or 0) >= 0]
+
             if search:
                 search_lower = search.lower()
                 entries = [e for e in entries if search_lower in str(e.get("text", "")).lower()]

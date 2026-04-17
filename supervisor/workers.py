@@ -125,6 +125,12 @@ def get_running_task_ids() -> List[str]:
 # Chat agent (direct mode)
 # ---------------------------------------------------------------------------
 _chat_agent = None
+# Module-level lock serializing ALL callers of handle_chat_direct, including
+# A2A tasks (via a2a_executor._dispatch_to_supervisor) and Web UI calls.
+# The shared _chat_agent singleton has mutable per-call state (_busy,
+# _current_chat_id, _current_task_id) that is not safe for concurrent access.
+import threading as _threading
+_chat_agent_lock = _threading.Lock()
 
 
 def _get_chat_agent():
@@ -142,6 +148,11 @@ def _get_chat_agent():
 
 
 def handle_chat_direct(chat_id: int, text: str, image_data: Optional[Union[Tuple[str, str], Tuple[str, str, str]]] = None) -> None:
+    with _chat_agent_lock:
+        _handle_chat_direct_locked(chat_id, text, image_data)
+
+
+def _handle_chat_direct_locked(chat_id: int, text: str, image_data: Optional[Union[Tuple[str, str], Tuple[str, str, str]]] = None) -> None:
     from supervisor.state import budget_remaining, load_state
     if budget_remaining(load_state()) <= 0:
         try:

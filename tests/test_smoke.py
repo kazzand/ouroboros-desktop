@@ -139,6 +139,8 @@ EXPECTED_TOOLS = [
     "plan_task",
     # CI
     "run_ci_tests",
+    # A2A (Agent-to-Agent protocol, non-core: require enable_tools)
+    "a2a_discover", "a2a_send", "a2a_status",
 ]
 
 
@@ -480,7 +482,7 @@ def test_function_count_reasonable():
     """Codebase doesn't have too few or too many functions.
 
     The hard gate value is imported from ouroboros/review.py::MAX_TOTAL_FUNCTIONS
-    (currently 1115 as of v4.32.0) — no hardcoded number here.
+    (currently 1160 as of v4.32.0) — no hardcoded number here.
     """
     from ouroboros.review import MAX_TOTAL_FUNCTIONS
 

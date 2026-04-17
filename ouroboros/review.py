@@ -38,7 +38,7 @@ TARGET_MODULE_LINES = 1000
 MAX_MODULE_LINES = 1600
 TARGET_FUNCTION_LINES = 150
 MAX_FUNCTION_LINES = 250
-MAX_TOTAL_FUNCTIONS = 1125  # raised in v4.33.0: +4 new helpers (supported_parameters, _commit_subject, review_status payload helpers) with +6 margin
+MAX_TOTAL_FUNCTIONS = 1160  # raised in v4.36.0: +25 new functions from A2A modules (a2a_server, a2a_executor, a2a_task_store, tools/a2a) with +10 margin
 GRANDFATHERED_OVERSIZED_MODULES = {"llm.py"}
 # Immutable bundle-only entrypoints ship with release artifacts but should not
 # count against the self-editable codebase function budget.

@@ -206,6 +206,14 @@ export function initSettings({ state }) {
         applyCheckboxValue('s-local-code', s.USE_LOCAL_CODE);
         applyCheckboxValue('s-local-light', s.USE_LOCAL_LIGHT);
         applyCheckboxValue('s-local-fallback', s.USE_LOCAL_FALLBACK);
+        // A2A settings
+        applyCheckboxValue('s-a2a-enabled', s.A2A_ENABLED);
+        if (s.A2A_PORT) applyInputValue('s-a2a-port', s.A2A_PORT);
+        applyInputValue('s-a2a-host', s.A2A_HOST);
+        applyInputValue('s-a2a-agent-name', s.A2A_AGENT_NAME);
+        applyInputValue('s-a2a-agent-description', s.A2A_AGENT_DESCRIPTION);
+        if (s.A2A_MAX_CONCURRENT) applyInputValue('s-a2a-max-concurrent', s.A2A_MAX_CONCURRENT);
+        if (s.A2A_TASK_TTL_HOURS) applyInputValue('s-a2a-ttl-hours', s.A2A_TASK_TTL_HOURS);
         resetSecretClearFlags(page);
         syncEffortSegments(page);
     }
@@ -255,6 +263,14 @@ export function initSettings({ state }) {
             USE_LOCAL_CODE: byId('s-local-code').checked,
             USE_LOCAL_LIGHT: byId('s-local-light').checked,
             USE_LOCAL_FALLBACK: byId('s-local-fallback').checked,
+            // A2A settings
+            A2A_ENABLED: byId('s-a2a-enabled')?.checked ?? false,
+            A2A_PORT: readInt('s-a2a-port', 18800),
+            A2A_HOST: (byId('s-a2a-host')?.value || '127.0.0.1').trim(),
+            A2A_AGENT_NAME: (byId('s-a2a-agent-name')?.value || '').trim(),
+            A2A_AGENT_DESCRIPTION: (byId('s-a2a-agent-description')?.value || '').trim(),
+            A2A_MAX_CONCURRENT: readInt('s-a2a-max-concurrent', 3),
+            A2A_TASK_TTL_HOURS: readInt('s-a2a-ttl-hours', 24),
             OPENAI_BASE_URL: byId('s-openai-base-url').value.trim(),
             OPENAI_COMPATIBLE_BASE_URL: byId('s-openai-compatible-base-url').value.trim(),
             CLOUDRU_FOUNDATION_MODELS_BASE_URL: byId('s-cloudru-base-url').value.trim(),

@@ -1,4 +1,4 @@
-# Ouroboros v4.35.1 — Architecture & Reference
+# Ouroboros v4.36.0 — Architecture & Reference
 
 This document describes every component, page, button, API endpoint, and data flow.
 It is the single source of truth for how the system works. Keep it updated.
@@ -33,6 +33,9 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on localhost:8765
       ├── chat_upload_api.py   ← Chat file attachment upload/delete endpoints
       ├── agent_startup_checks.py ← Startup verification and health checks
       ├── agent_task_pipeline.py  ← Task execution pipeline orchestration
+      ├── a2a_executor.py      ← A2A AgentExecutor bridging A2A protocol to supervisor via handle_chat_direct
+      ├── a2a_server.py        ← A2A Starlette/uvicorn server (port 18800, dynamic Agent Card, JSON-RPC)
+      ├── a2a_task_store.py    ← File-based A2A TaskStore (atomic writes, TTL cleanup)
       ├── improvement_backlog.py ← Minimal durable advisory backlog helpers + digest formatting
       ├── loop.py              ← High-level LLM tool loop
       ├── loop_llm_call.py     ← Single-round LLM call + usage accounting
@@ -73,6 +76,7 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on localhost:8765
       ├── gateways/            ← External API adapters (thin transport, no business logic)
       │   └── claude_code.py   ← Claude Agent SDK gateway (edit + read-only paths)
       ├── tools/               ← Auto-discovered tool plugins
+      │   ├── a2a.py             ← A2A client tools: a2a_discover, a2a_send, a2a_status (non-core, require enable_tools)
       │   ├── ci.py              ← CI trigger and monitoring (GitHub Actions API)
       │   ├── claude_advisory_review.py ← Advisory pre-review tool (read-only Claude Agent SDK)
       │   ├── commit_gate.py     ← Advisory freshness gate and commit-attempt recording (extracted from git.py)
@@ -157,7 +161,9 @@ Dockerfile                    ← Docker image (web UI runtime)
 │   │   ├── events.jsonl    ← LLM rounds, task lifecycle, errors
 │   │   ├── tools.jsonl     ← Tool call log with args/results
 │   │   ├── supervisor.jsonl ← Supervisor-level events
-│   │   └── task_reflections.jsonl ← Execution reflections (process memory)
+│   │   ├── task_reflections.jsonl ← Execution reflections (process memory)
+│   │   └── a2a.log         ← A2A server logs (RotatingFileHandler, 2 MB × 3 backups)
+│   ├── a2a_tasks/          ← A2A task persistence (FileTaskStore, atomic JSON files with TTL)
 │   ├── archive/            ← Rotated logs, rescue snapshots
 │   └── uploads/            ← Chat file attachments (uploaded via paperclip button)
 └── ouroboros.pid           ← PID lock file (platform lock — auto-released on crash)
@@ -426,6 +432,13 @@ authentication. If the password is blank, non-loopback access stays open by desi
 | GET/POST | `/auth/logout` | Clear auth cookie/session |
 | WS | `/ws` | WebSocket: chat messages, commands, log streaming |
 | GET | `/static/*` | Static files from `web/` directory (NoCacheStaticFiles wrapper forces revalidation) |
+
+**A2A endpoints (port 18800, served by separate uvicorn server when `A2A_ENABLED=True`):**
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/.well-known/agent-card.json` (port 18800) | A2A Agent Card — dynamic JSON describing agent identity, skills, capabilities |
+| POST | `/` (port 18800) | A2A JSON-RPC endpoint — message/send, tasks/get, tasks/cancel |
 
 ### WebSocket protocol
 
@@ -812,6 +825,24 @@ the constitutional guard is that the file itself must remain non-deletable.
 - Budget-capped (default 10% of total)
 - As of v4.29.4, background consciousness also reads the compact `Improvement Backlog` digest so it can groom, dedupe, or nominate existing backlog items without auto-starting implementation work.
 - As of v4.29.4, CONSCIOUSNESS.md includes an 8-item rotating maintenance checklist (dialogue consolidation, identity freshness, scratchpad freshness, knowledge gaps, process-memory freshness, improvement backlog, tech radar, registry sync). One item is addressed per wakeup cycle.
+
+### A2A (Agent-to-Agent) protocol
+
+- **Disabled by default** (`A2A_ENABLED=False`). Enable in Settings → Integrations; requires restart.
+- **Dual-server model**: when enabled, `server.py` lifespan spawns a second `asyncio.create_task(start_a2a_server(settings))` running `uvicorn` on port 18800 (configurable via `A2A_HOST`/`A2A_PORT`). The main server (port 8765) is unaffected.
+- **Security**: the A2A Starlette app is wrapped in `NetworkAuthGate` (same middleware as the main server) before being passed to uvicorn. Non-loopback binding without `OUROBOROS_NETWORK_PASSWORD` logs a warning but is allowed — the gate rejects unauthenticated non-local requests when a password is configured.
+- **Agent Card** (`GET /.well-known/agent-card.json`): dynamic JSON served via `A2AStarletteApplication`. Card fields (name, description) are read from `memory/identity.md`; skills are populated live from `ToolRegistry.schemas()` on each request via `card_modifier=_refresh_skills`. Falls back to a generic "General Assistant" skill if the registry is not yet available.
+- **Task execution** (`POST /`): `OuroborosA2AExecutor` bridges A2A tasks to the supervisor via `LocalChatBridge.handle_chat_direct()`. Uses a response-subscription API (`subscribe_response`/`unsubscribe_response`) added to `LocalChatBridge` for async response routing.
+- **Task persistence**: `FileTaskStore` stores tasks as atomic JSON files in `data/a2a_tasks/`. TTL-based cleanup loop runs every hour, removing expired tasks (default TTL: 24 hours, configurable via `A2A_TASK_TTL_HOURS`).
+- **Logging**: structured logs written to `data/logs/a2a.log` (RotatingFileHandler, 2 MB × 3 backups).
+- **Client tools** (non-core, require `enable_tools("a2a_discover,a2a_send,a2a_status")`): `a2a_discover` fetches remote Agent Cards, `a2a_send` sends tasks and waits for results, `a2a_status` polls task status.
+- **Settings**: `A2A_ENABLED` (bool), `A2A_HOST` (default `127.0.0.1`), `A2A_PORT` (default `18800`), `A2A_MAX_CONCURRENT` (default `3`), `A2A_AGENT_NAME`, `A2A_AGENT_DESCRIPTION`, `A2A_TASK_TTL_HOURS` (default `24`). All changes require restart (all seven keys are in `server.py::_RESTART_REQUIRED_KEYS`; all included in `apply_settings_to_env` for consistency).
+- **Optional dependency**: `a2a-sdk[http-server]>=0.3.20` and `httpx` are in the `a2a` extra (`pip install 'ouroboros[a2a]'`), NOT in mandatory `install_requires` and NOT in `requirements.txt`. All four A2A modules (`a2a_server.py`, `a2a_executor.py`, `a2a_task_store.py`, `tools/a2a.py`) guard their top-level `from a2a.*` imports with `try/except ImportError` so the rest of Ouroboros starts cleanly when the extra is absent. `start_a2a_server` returns early with a warning if the SDK is missing. The test module (`tests/test_a2a_protocol.py`) uses `pytest.importorskip('a2a.types')` at the top so it skips cleanly when the extra is absent.
+- **Concurrency safety**: `supervisor/workers.py` exposes a module-level `_chat_agent_lock` (`threading.Lock`) that `handle_chat_direct` acquires before touching the shared `_chat_agent` singleton. This serializes all callers — A2A tasks (via `asyncio.to_thread`) and Web UI direct-chat — against the agent's mutable per-call state (`_busy`, `_current_chat_id`, `_current_task_id`). A2A tasks are accepted up to `A2A_MAX_CONCURRENT` (semaphore) but their supervisor dispatches are serialized through this shared lock.
+- **Client auth**: `A2A_CLIENT_PASSWORD` env var (not a settings key — read at call time). When set, `a2a_discover`, `a2a_send`, and `a2a_status` pass it as HTTP Basic auth (`ouroboros:<password>`) so they can reach remote A2A servers protected by `NetworkAuthGate` / `OUROBOROS_NETWORK_PASSWORD`.
+- **Memory isolation**: A2A traffic uses negative `chat_id` values (base `-1001`, decremented per task) to distinguish it from human dialogue. `supervisor/message_bus.py::broadcast` and `send_message` check `chat_id >= 0` before WebSocket broadcast; `ouroboros/server_history_api.py` filters negative `chat_id` from `/api/chat/history` replay; `ouroboros/consolidator.py::_read_chat_entries` skips `chat_id < 0` entries to prevent A2A traffic from contaminating `dialogue_blocks.json`; `ouroboros/memory.py::chat_history` (exposed as the `chat_history` tool) filters `chat_id < 0` entries so A2A traffic never appears in the agent's dialogue tool results. Raw A2A entries may still be present in `data/logs/chat.jsonl` (written by `log_chat`); all consumer paths above guard against them. Structured A2A audit logs also go to `data/logs/a2a.log`.
+- **Panic cleanup**: `ouroboros/server_control.py::execute_panic_stop` sweeps the A2A port (`A2A_PORT`, default `18800`) alongside the main server port (`8765`) and local-model port (`8766`) so a stuck A2A uvicorn server does not leave the port in `TIME_WAIT` after an emergency stop.
+- **Frozen-bundle limitation (known):** `tools/a2a.py` is auto-discovered by `pkgutil` at runtime in dev/source mode. It is intentionally NOT in `_FROZEN_TOOL_MODULES` in `registry.py` (that file is safety-critical and overwritten from the bundle on every launch). The three A2A client tools (`a2a_discover`, `a2a_send`, `a2a_status`) are **unavailable in the packaged `.app`/`.tar.gz` bundle** until a new bundle is cut with an updated `registry.py`. This is a documented limitation, not an oversight. The A2A server itself (port 18800) is unaffected — it starts normally in packaged builds when `A2A_ENABLED=True`.
 
 ### Block-wise dialogue consolidation (consolidator.py)
 
@@ -1235,7 +1266,10 @@ Single source of truth for:
 - **Constants**: RESTART_EXIT_CODE (42), AGENT_SERVER_PORT (8765)
 - **Settings defaults**: all model names, budget, timeouts, worker count
 - **Functions**: `load_settings()`, `save_settings()`,
-  `apply_settings_to_env()`, `acquire_pid_lock()`, `release_pid_lock()`
+  `apply_settings_to_env()` (copies all hot-reloadable keys — models, API keys,
+  Telegram/GitHub integrations, review/effort settings, local-model config,
+  and `A2A_*` keys — from the settings dict into `os.environ`),
+  `acquire_pid_lock()`, `release_pid_lock()`
 
 Settings file: `~/Ouroboros/data/settings.json`. File-locked for concurrent access.
 

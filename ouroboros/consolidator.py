@@ -476,7 +476,13 @@ def _count_lines(path: pathlib.Path) -> int:
 
 
 def _read_chat_entries(path: pathlib.Path) -> List[Dict[str, Any]]:
-    """Read ALL entries from chat.jsonl."""
+    """Read ALL entries from chat.jsonl.
+
+    Filters out entries with negative chat_id values (e.g. A2A virtual
+    chat_ids starting at -1001) so they do not pollute the agent's
+    long-term dialogue memory. This guard is in sync with the same filter
+    in memory.py::chat_history and server_history_api.py::api_chat_history.
+    """
     if not path.exists():
         return []
     entries = []
@@ -486,9 +492,15 @@ def _read_chat_entries(path: pathlib.Path) -> List[Dict[str, Any]]:
             if not line:
                 continue
             try:
-                entries.append(json.loads(line))
+                entry = json.loads(line)
             except (json.JSONDecodeError, ValueError):
                 continue
+            try:
+                if int(entry.get("chat_id", 1)) < 0:
+                    continue
+            except (TypeError, ValueError):
+                pass
+            entries.append(entry)
     return entries
 
 

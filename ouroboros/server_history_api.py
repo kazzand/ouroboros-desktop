@@ -99,6 +99,13 @@ def make_chat_history_endpoint(data_dir: pathlib.Path):
                             entry = json.loads(line)
                         except (json.JSONDecodeError, ValueError):
                             continue
+                        # Skip A2A virtual chat_ids (negative; start at -1001)
+                        # so A2A task traffic does not appear in human chat history.
+                        try:
+                            if int(entry.get("chat_id", 1)) < 0:
+                                continue
+                        except (TypeError, ValueError):
+                            pass
                         direction = str(entry.get("direction", "")).lower()
                         role = {"in": "user", "out": "assistant", "system": "system"}.get(direction)
                         if role is None:
@@ -140,6 +147,12 @@ def make_chat_history_endpoint(data_dir: pathlib.Path):
                             entry = json.loads(line)
                         except (json.JSONDecodeError, ValueError):
                             continue
+                        # Skip A2A virtual chat_ids (negative; start at -1001)
+                        try:
+                            if int(entry.get("chat_id", 1)) < 0:
+                                continue
+                        except (TypeError, ValueError):
+                            pass
                         text = str(entry.get("content", entry.get("text", "")))
                         if not text:
                             continue
