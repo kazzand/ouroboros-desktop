@@ -1198,7 +1198,6 @@ async def lifespan(app):
         if a2a_server_task:
             try:
                 from ouroboros.a2a_server import stop_a2a_server
-                from contextlib import suppress
                 stop_a2a_server()
                 a2a_server_task.cancel()
                 with suppress(asyncio.CancelledError, asyncio.TimeoutError):
