@@ -117,6 +117,7 @@ Concrete requirements:
 |------|----------|-----------------|----------------|
 | Main task context (`context.py`) | ✅ full | ✅ full | ✅ full |
 | Triad review (`tools/review.py`) | ✅ via preamble | ✅ via `_load_architecture_text` | ✅ via `_load_dev_guide_text` |
+| ↳ Anti-thrashing (v4.35.1) | — | — | Open obligations loaded from `review_state` via `load_state(drive_root)` + `make_repo_key(repo_dir)`, injected unconditionally into `_build_review_history_section` prompt context. Same mechanism in `scope_review.py::_build_scope_prompt` (best-effort when `drive_root` available). |
 | Background consciousness (`consciousness.py`) | ✅ full | ✅ full | — (not yet required) |
 | Advisory pre-review (`tools/claude_advisory_review.py`) | ✅ via `_load_doc` | ✅ via `_load_doc` | ✅ via `_load_doc` |
 | Scope review (`tools/scope_review.py`) | via full repo pack | via full repo pack | via full repo pack |

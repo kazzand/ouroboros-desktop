@@ -105,6 +105,51 @@ repo-local, reachable defects.
 """
 
 
+# Anti-thrashing prompt rules — shared across triad, scope, and advisory reviewers.
+_ANTI_THRASHING_RULE_VERDICT = (
+    "The JSON `\"verdict\"` field is the **authoritative signal** — withdrawal notes in "
+    "`\"reason\"` text are silently ignored by the system. If you verify a finding is "
+    "resolved, set `\"verdict\": \"PASS\"`. Do NOT leave `\"verdict\": \"FAIL\"` for a "
+    "finding you have confirmed passes."
+)
+
+_ANTI_THRASHING_RULE_ITEM_NAME = (
+    "Do NOT rephrase prior findings under a different checklist `item` name. "
+    "If a root cause was addressed, mark the SAME item PASS (reference the `obligation_id` "
+    "if one was shown above). Raising the same root cause under a new item name creates a "
+    "phantom new obligation."
+)
+
+
+def format_obligation_excerpt(reason: str, max_chars: int = 120) -> str:
+    """Format an obligation reason excerpt with sanitization and explicit OMISSION NOTE.
+
+    Sanitizes prior-model reason text before injecting into future reviewer prompts:
+    - Collapses newlines/whitespace to a single line (prevents multi-line prompt injection)
+    - Redacts secret-like values via redact_prompt_secrets
+    - Truncates to max_chars with an explicit ⚠️ OMISSION NOTE (not a silent slice)
+
+    Used by review history section builders to surface obligation context
+    without silent truncation (DEVELOPMENT.md cognitive-artifact rule 2f).
+    """
+    import re as _re
+    # Redact first (on original text with line boundaries intact) so that
+    # line-anchored patterns like API_KEY=secret are still visible to _SECRET_LINE_RE.
+    try:
+        redacted, _ = redact_prompt_secrets(str(reason or ""))
+    except Exception:
+        redacted = str(reason or "")  # redact is best-effort; never crash the review pipeline
+    # Then collapse newlines/whitespace to a single line (prevents multi-line prompt injection)
+    sanitized = _re.sub(r"\s+", " ", redacted).strip()
+    if len(sanitized) > max_chars:
+        return (
+            sanitized[:max_chars]
+            + f" ⚠️ OMISSION NOTE: truncated at {max_chars} chars"
+            " (full reason preserved in durable state)"
+        )
+    return sanitized
+
+
 def redact_prompt_secrets(text: str) -> tuple[str, bool]:
     """Redact secret-like values before prompt injection."""
     if not isinstance(text, str) or not text:

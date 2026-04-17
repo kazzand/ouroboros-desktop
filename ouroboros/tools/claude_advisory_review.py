@@ -50,6 +50,8 @@ from ouroboros.tools.review_helpers import (
     CRITICAL_FINDING_CALIBRATION,
     get_advisory_runtime_diagnostics as _get_runtime_diagnostics,
     format_advisory_sdk_error as _format_advisory_error,
+    _ANTI_THRASHING_RULE_VERDICT,
+    _ANTI_THRASHING_RULE_ITEM_NAME,
 )
 from ouroboros.utils import (
     append_jsonl,
@@ -332,6 +334,9 @@ Return ONLY a JSON array. Each element:
 4. Look for ALL bugs, logic errors, regressions, race conditions, and violations of BIBLE.md or DEVELOPMENT.md.
 5. Cross-check: do tool descriptions in prompts match actual get_tools() exports?
    Does ARCHITECTURE.md header version match the VERSION file?
+5a. **ALWAYS — Verdict and item-name discipline (applies unconditionally, even when no obligations exist):**
+   - **VERDICT IS AUTHORITATIVE:** {_ANTI_THRASHING_RULE_VERDICT}
+   - **DO NOT REPHRASE:** {_ANTI_THRASHING_RULE_ITEM_NAME}
 6. **MANDATORY — Prior obligations:** If an "Unresolved obligations" section appears above,
    address EVERY listed obligation explicitly in your output:
    a. Include a separate JSON entry per obligation for the corresponding checklist item.
@@ -345,6 +350,8 @@ Return ONLY a JSON array. Each element:
       A generic `"item": "code_quality"` entry when multiple same-item obligations are
       open will NOT resolve all of them — only the one matched by `obligation_id` will
       be closed; the rest remain open until explicitly addressed.
+   e. **VERDICT IS AUTHORITATIVE:** {_ANTI_THRASHING_RULE_VERDICT}
+   f. **DO NOT REPHRASE:** {_ANTI_THRASHING_RULE_ITEM_NAME}
 7. Output ONLY the JSON array — no markdown fences, no commentary outside the JSON.
 """
     return prompt

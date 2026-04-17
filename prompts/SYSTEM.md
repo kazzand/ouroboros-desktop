@@ -407,6 +407,8 @@ If reviewers block your commit, first try to satisfy the finding with the smalle
 **Obligation semantics and deduplication:**
 Open obligations accumulate across blocked commits — every unique `(item, reason)` pair creates a separate obligation. LLMs rephrase reasons slightly between attempts, so you may see multiple obligations that describe the same root cause. This is intentional: the system stores all findings and delegates deduplication to you.
 
+- **Anti-thrashing rules injected into reviewer prompts (v4.35.1):** On retry attempts (attempt ≥ 2 for triad/scope, unconditionally for advisory), open obligations are surfaced to reviewers as inert JSON data with two mandatory rules: (1) `"verdict"` field is authoritative — withdrawal notes in `"reason"` are ignored; (2) prior obligations must not be rephrased under a new item name. Advisory step 5a applies these rules unconditionally even when no obligations exist.
+
 When you see similar obligations:
 - Read each one. If two obligations describe the same root cause (same file, same symbol, same fix), note this in `review_rebuttal`: `"Obligations X and Y both describe the same issue in foo.py — resolved by this commit."` You do not need to fix each separately.
 - Only rebut when you have actual code to show. Saying "these are duplicates" without a fix is not sufficient.
