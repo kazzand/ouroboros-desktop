@@ -197,13 +197,35 @@ class TestPlanReviewSystemPrompt(unittest.TestCase):
         self.assertIn("validating a concrete candidate plan", prompt)
         self.assertIn("not brainstorming from zero", prompt)
 
-    def test_system_prompt_adds_review_stance_for_hidden_assumptions_and_narrowing(self):
+    def test_system_prompt_declares_generative_stance(self):
+        """Review stance must explicitly frame the reviewer as a generative partner."""
         from ouroboros.tools.plan_review import _build_system_prompt
         prompt = _build_system_prompt("checklist", "", "", "")
         self.assertIn("## Review stance", prompt)
-        self.assertIn("challenge hidden assumptions", prompt)
-        self.assertIn("If the proposal is too wide, say how to narrow it.", prompt)
-        self.assertIn("name the exact additional files or subsystems", prompt)
+        self.assertIn("GENERATIVE", prompt)
+        # Design PARTNER framing — not auditor
+        self.assertIn("PARTNER", prompt)
+
+    def test_system_prompt_requires_own_approach_and_proposals_sections(self):
+        """Required output structure must include 'Your own approach' and ## PROPOSALS."""
+        from ouroboros.tools.plan_review import _build_system_prompt
+        prompt = _build_system_prompt("checklist", "", "", "")
+        self.assertIn("Required output structure", prompt)
+        self.assertIn("Your own approach", prompt)
+        self.assertIn("## PROPOSALS", prompt)
+
+    def test_system_prompt_forbids_commit_hygiene_penalty(self):
+        """Reviewers must not penalise missing tests/VERSION/README — plan has no code yet."""
+        from ouroboros.tools.plan_review import _build_system_prompt
+        prompt = _build_system_prompt("checklist", "", "", "")
+        self.assertIn("Do NOT penalise missing tests", prompt)
+
+    def test_system_prompt_explains_majority_vote_coordination(self):
+        """The prompt must explain that REVISE_PLAN requires majority agreement."""
+        from ouroboros.tools.plan_review import _build_system_prompt
+        prompt = _build_system_prompt("checklist", "", "", "")
+        self.assertIn("majority-vote", prompt)
+        self.assertIn("at least 2 of 3 reviewers", prompt)
 
     def test_system_prompt_preserves_aggregate_contract(self):
         from ouroboros.tools.plan_review import _build_system_prompt
@@ -225,8 +247,11 @@ class TestPlanReviewFormatOutput(unittest.TestCase):
             {"model": "model-c", "text": "No issues found.\nAGGREGATE: GREEN", "error": None},
         ]
         out = self._run(results)
-        self.assertIn("GREEN", out)
-        self.assertNotIn("REVISE_PLAN", out.split("## Aggregate")[1])
+        aggregate_section = out.split("## Aggregate")[1]
+        # Final verdict (bolded) must be GREEN, not REVISE_PLAN or REVIEW_REQUIRED
+        self.assertIn("**GREEN**", aggregate_section)
+        self.assertNotIn("**REVISE_PLAN**", aggregate_section)
+        self.assertNotIn("**REVIEW_REQUIRED**", aggregate_section)
 
     def test_review_required_when_risk_present(self):
         results = [
@@ -237,14 +262,48 @@ class TestPlanReviewFormatOutput(unittest.TestCase):
         out = self._run(results)
         self.assertIn("REVIEW_REQUIRED", out)
 
-    def test_revise_plan_when_fail_present(self):
+    def test_minority_revise_plan_becomes_review_required(self):
+        """One reviewer flagging REVISE_PLAN while the others do not → REVIEW_REQUIRED.
+
+        Majority-vote coordination: a lone dissenting REVISE_PLAN surfaces as a
+        strong coordination signal (REVIEW_REQUIRED with dissent noted), not an
+        automatic REVISE_PLAN. Replaces the pre-majority-vote behavior where any
+        single REVISE_PLAN escalated the final verdict.
+        """
         results = [
             {"model": "model-a", "text": "Critical FAIL: missing tests.\nAGGREGATE: REVISE_PLAN", "error": None},
             {"model": "model-b", "text": "AGGREGATE: GREEN", "error": None},
             {"model": "model-c", "text": "AGGREGATE: GREEN", "error": None},
         ]
         out = self._run(results)
-        self.assertIn("REVISE_PLAN", out)
+        aggregate_section = out.split("## Aggregate")[1]
+        # Final verdict should be REVIEW_REQUIRED, not REVISE_PLAN
+        self.assertIn("REVIEW_REQUIRED", aggregate_section)
+        self.assertNotIn("**REVISE_PLAN**", aggregate_section)
+        # Dissent must be explicitly noted in the aggregate reasoning
+        self.assertIn("dissent", aggregate_section.lower())
+
+    def test_majority_revise_plan_blocks(self):
+        """Two reviewers flagging REVISE_PLAN → final verdict is REVISE_PLAN."""
+        results = [
+            {"model": "model-a", "text": "FAIL on correctness.\nAGGREGATE: REVISE_PLAN", "error": None},
+            {"model": "model-b", "text": "FAIL on completeness.\nAGGREGATE: REVISE_PLAN", "error": None},
+            {"model": "model-c", "text": "AGGREGATE: GREEN", "error": None},
+        ]
+        out = self._run(results)
+        aggregate_section = out.split("## Aggregate")[1]
+        self.assertIn("REVISE_PLAN", aggregate_section)
+
+    def test_unanimous_revise_plan_is_revise_plan(self):
+        """Three reviewers flagging REVISE_PLAN → final verdict is REVISE_PLAN."""
+        results = [
+            {"model": "model-a", "text": "FAIL.\nAGGREGATE: REVISE_PLAN", "error": None},
+            {"model": "model-b", "text": "FAIL.\nAGGREGATE: REVISE_PLAN", "error": None},
+            {"model": "model-c", "text": "FAIL.\nAGGREGATE: REVISE_PLAN", "error": None},
+        ]
+        out = self._run(results)
+        aggregate_section = out.split("## Aggregate")[1]
+        self.assertIn("REVISE_PLAN", aggregate_section)
 
     def test_error_result_does_not_crash(self):
         results = [
@@ -255,8 +314,14 @@ class TestPlanReviewFormatOutput(unittest.TestCase):
         out = self._run(results)
         self.assertIn("ERROR", out)
 
-    def test_error_does_not_downgrade_revise_plan(self):
-        """An error from a later reviewer must not downgrade REVISE_PLAN to REVIEW_REQUIRED."""
+    def test_single_revise_plus_error_is_review_required(self):
+        """One REVISE_PLAN + one error + one GREEN → REVIEW_REQUIRED (no majority FAIL).
+
+        Replaces the pre-majority-vote test that asserted REVISE_PLAN stayed final
+        when a later reviewer errored. Majority-vote coordination requires TWO
+        agreeing REVISE_PLAN reviewers; a single dissent plus a degraded reviewer
+        does not clear the bar.
+        """
         results = [
             {"model": "model-a", "text": "Critical FAIL.\nAGGREGATE: REVISE_PLAN", "error": None},
             {"model": "model-b", "text": "", "error": "Timeout after 120s"},
@@ -264,8 +329,36 @@ class TestPlanReviewFormatOutput(unittest.TestCase):
         ]
         out = self._run(results)
         aggregate_section = out.split("## Aggregate")[1]
-        self.assertIn("REVISE_PLAN", aggregate_section)
-        self.assertNotIn("REVIEW_REQUIRED", aggregate_section)
+        self.assertIn("REVIEW_REQUIRED", aggregate_section)
+        self.assertNotIn("**REVISE_PLAN**", aggregate_section)
+
+    def test_aggregate_block_reports_per_reviewer_counts(self):
+        """Aggregate block should surface per-reviewer signal counts for auditability."""
+        results = [
+            {"model": "model-a", "text": "AGGREGATE: REVISE_PLAN", "error": None},
+            {"model": "model-b", "text": "AGGREGATE: REVIEW_REQUIRED", "error": None},
+            {"model": "model-c", "text": "AGGREGATE: GREEN", "error": None},
+        ]
+        out = self._run(results)
+        aggregate_section = out.split("## Aggregate")[1]
+        self.assertIn("REVISE_PLAN=1", aggregate_section)
+        self.assertIn("REVIEW_REQUIRED=1", aggregate_section)
+        self.assertIn("GREEN=1", aggregate_section)
+
+    def test_empty_reviewer_list_returns_explicit_review_required(self):
+        """Empty per-reviewer list → explicit 'no responses' message, not misleading zero counts.
+
+        Defensive path: `_run_plan_review_async` guarantees at least one reviewer,
+        but if `_format_output` is ever called with an empty list the aggregate
+        block must say so explicitly rather than rendering 'REVISE_PLAN=0, ...'
+        which would read like a false clean-PASS aggregate.
+        """
+        out = self._run([])
+        self.assertIn("## Aggregate", out)
+        self.assertIn("REVIEW_REQUIRED", out)
+        self.assertIn("No reviewer responses", out)
+        # Must NOT render the zero-count line when there is no data at all
+        self.assertNotIn("REVISE_PLAN=0", out)
 
     def test_missing_aggregate_line_yields_review_required(self):
         """A non-error response with no AGGREGATE: line → REVIEW_REQUIRED (not GREEN)."""

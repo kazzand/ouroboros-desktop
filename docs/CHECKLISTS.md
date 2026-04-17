@@ -66,6 +66,34 @@ These tools restore to already-reviewed states by definition.
 
 ---
 
+## Pre-Commit Self-Check (Ouroboros, before calling advisory_pre_review)
+
+Run this walkthrough honestly before every `advisory_pre_review` call for a
+`repo_commit` / `repo_write_commit`. The correct sequence is:
+
+```
+finish ALL edits → Pre-Commit Self-Check → advisory_pre_review → repo_commit
+```
+
+This section is **not loaded by reviewers** — it exists here so the agent's
+pre-flight checklist lives in the same single source of truth as the review
+checklists it guards.
+
+| # | Check | How |
+|---|-------|-----|
+| 1 | `VERSION`, `pyproject.toml`, `README.md` badge, and `docs/ARCHITECTURE.md` header — are all four carrying the same version string? | `repo_read` each file before editing. Never reconstruct version strings from memory — the in-context copy may be stale. |
+| 2 | Behavior changed → is `VERSION` bumped? | If logic changed (new code path, altered control flow, new output format, new tool call), a `VERSION` bump is mandatory. Docs/config/memory-only diffs do NOT require a bump. |
+| 3 | New or changed logic → does an existing or newly staged test assert on the specific scenario it introduces? | Name the scenario your code handles in plain words. If no test asserts on THAT named scenario, write or update one now. "Tests exist for the module" is not the same as "tests cover this new behavior". |
+| 4 | Shared log / memory / replay format changed? | Grep every reader and writer first. JSONL logs (`events.jsonl`, `task_reflections.jsonl`, replay indexes), durable state files (`advisory_review.json`, `review_continuations/*.json`), and canonical-vs-derived memory pairs (patterns-register journal / `patterns.md`, improvement-backlog items) must stay coherent across every consumer. |
+| 5 | New validation guard, input filter, or edge-case check? | Before the first commit attempt, name three concrete ways it could break: wrong bounds, legitimate inputs it silently blocks, platform-specific edge cases. If you cannot name three, think longer. One honest minute here is cheaper than one reviewer round. |
+| 6 | New tool added? | `get_tools()` exports it, `prompts/SYSTEM.md` tool tables mention it, the handler signature matches the declared schema, and (if it mutates repo state) it is routed through the reviewed commit path rather than ad-hoc `run_shell`. |
+
+Rule: read before write. Never reconstruct `VERSION`, `pyproject.toml`
+`version`, or the README badge from memory — one stale reconstruction creates
+a `self_consistency` FAIL that an entire advisory cycle is then spent on.
+
+---
+
 ## Repo Commit Checklist
 
 Used by `repo_commit` and `repo_write_commit` for all changes to the
@@ -78,7 +106,7 @@ Ouroboros repository.
 | 3 | secrets_check | Are secrets, API keys, .env files, credentials present in the diff? | critical |
 | 4 | code_quality | Careful code review: bugs, logic errors, crashes, regressions, race conditions, resource leaks? | critical |
 | 5 | security_issues | Security vulnerabilities: injection, path traversal, secret leakage, unsafe operations? | critical |
-| 6 | tests_affected | Did code logic change without corresponding test changes? (PASS if only docs/config/memory changed, or if tests are present.) | critical |
+| 6 | tests_affected | Did code logic change without corresponding test changes? (PASS if only docs/config/memory changed, or if tests already cover the new behavior.) **Critical FAIL requires all three:** (a) name a specific behavior, code path, symbol, or failure scenario that THIS diff introduces or changes; (b) explain why existing or newly staged tests do NOT catch that specific scenario; (c) the gap is concrete, not speculative. Adjacent tests in the same module or for the same feature count as coverage. Requiring an additional overlapping selector/unit/e2e test is only justified when a second distinct failure mode is named explicitly. If the only concern is "I'd feel better with one more test," that is advisory, not critical. | critical |
 | 7 | architecture_doc | New module, endpoint, or data flow added but ARCHITECTURE.md not updated? (Write "Not applicable" with PASS if no architectural change.) | critical |
 | 8 | version_bump | Behavior changed but VERSION not updated? (PASS if no behavior change.) | critical |
 | 9 | changelog_and_badge | VERSION bumped but README.md badge or changelog not updated? (PASS if VERSION not bumped.) | critical |
@@ -87,6 +115,7 @@ Ouroboros repository.
 | 12 | knowledge_index | Knowledge base topics changed but memory/knowledge/index-full.md not updated? | advisory |
 | 13 | self_consistency | Does this change affect behavior described in `BIBLE.md`, `prompts/`, `docs/`, or this checklist itself? Check explicitly: (a) version in `ARCHITECTURE.md` header matches `VERSION` file; (b) tool names/descriptions in `prompts/SYSTEM.md` match tools actually exported by `get_tools()`; (c) JSONL log/memory file formats described in `ARCHITECTURE.md` match all readers/writers; (d) any behavioral change reflected in `prompts/CONSCIOUSNESS.md` if it affects background loop behavior; (e) DEVELOPMENT.md rules still accurate after the change. Severity must follow the shared `Critical surface whitelist` below — release metadata, tool schema, module map, behavioural documentation, or safety contracts are critical; commentary/prose/stylistic mismatches are advisory. | critical |
 | 14 | cross_platform | Does the diff use platform-specific APIs (`os.kill`, `os.setsid`, `os.killpg`, `os.getpgid`, `fcntl`, `msvcrt`, `signal.SIGKILL`, `signal.SIGTERM`, `subprocess` with `start_new_session`/`creationflags`, hardcoded `/` or `\\` in filesystem paths) outside of `ouroboros/platform_layer.py`? Does it import Unix-only or Windows-only modules (`fcntl`, `msvcrt`, `winreg`, `resource`) at any level without a platform guard (`sys.platform`/`IS_WINDOWS` check)? | critical |
+| 15 | changelog_accuracy | Do the exact wording, test counts, and minor description details in the README Version History row match what the diff actually does? Wording drift, off-by-one test counts, minor inaccuracies in descriptive prose — these belong here, NOT in `self_consistency` or `changelog_and_badge`. This item exists so reviewers have a dedicated advisory bucket for prose-level changelog imprecision that does not affect release metadata, runtime behavior, or safety contracts. | advisory |
 
 ### Severity rules
 
@@ -94,12 +123,26 @@ Ouroboros repository.
 - Items 6-10, 14 are conditionally critical: FAIL only when the condition applies.
   If the condition does not apply, write verdict PASS with a short reason
   (e.g. "Not applicable — no code logic change").
-- Items 11-12 are advisory: FAIL produces a warning but does not block.
+- Items 11-12 and 15 are advisory: FAIL produces a warning but does not block.
 - Item 13 (self_consistency) is conditionally critical: FAIL only when the
   mismatch falls in the `Critical surface whitelist` below AND a concrete
   stale artifact is named (specific file, line, or symbol). If no whitelisted
   surface is affected, the finding is advisory. If no concrete staleness is
   found at all, write verdict PASS with a short reason.
+- Item 15 (`changelog_accuracy`) is advisory by design: prose-level wording
+  drift, off-by-one test counts, and minor descriptive inaccuracies in the
+  README changelog row MUST NOT be raised as critical under `self_consistency`
+  or `changelog_and_badge`. They surface here and do not block.
+
+### Retry convergence for tests_affected
+
+When the previous blocker was *only* `tests_affected` and the new diff changes
+*only* files under `tests/` plus release/version touchpoints (`VERSION`,
+`pyproject.toml`, `README.md`, `docs/ARCHITECTURE.md`), reviewers must focus
+on verifying whether the newly staged tests address the named gap — not search
+for fresh gaps in unchanged code. A new critical finding on this retry round
+requires a new concrete artifact, consistent with the Critical threshold rule
+below: a reformulation of an earlier concern is not a new finding.
 
 ### Critical threshold rule (applies to ALL items)
 
@@ -181,9 +224,35 @@ Used by `plan_task` for pre-implementation design reviews, BEFORE any code is wr
 Reviewers see the entire repository (full repo pack) plus the proposed plan and HEAD
 snapshots of files planned to be touched.
 
-For each item, reviewers provide: verdict (PASS / RISK / FAIL), a detailed explanation
-of what was found, a concrete fix if RISK or FAIL (naming exact file/function/symbol),
-and alternative approaches when a simpler solution exists.
+**Reviewer role is GENERATIVE, not audit.** The primary job is to contribute
+ideas the implementer may not see, using full repo access. Finding defects in
+the plan is secondary; proposing concrete alternatives, surfacing existing
+surfaces that already solve the goal, and flagging subtle contract breaks the
+implementer missed is primary.
+
+### Required output structure
+
+Reviewers must structure their response in this order:
+
+1. **Your own approach** (1-2 sentences). State what YOU would do if this goal
+   came to you with full repo access: the concrete alternative path, the
+   existing file/function you would reuse, or the simpler route. If after real
+   effort you genuinely see no better approach, say so explicitly.
+2. **`## PROPOSALS` section** (top 1-2 contributions). The highest-value thing
+   you add. Each proposal should be one of:
+   - An existing function/module that already solves this (named exactly).
+   - A subtle contract break or shared-state interaction the plan likely missed.
+   - A simpler path with less surface area that still preserves the goal.
+   - A risk pattern visible from codebase history in your context.
+   - A BIBLE.md alignment issue with a specific principle cited.
+3. **Per-item verdicts** (PASS / RISK / FAIL), each with a detailed explanation
+   and — when RISK or FAIL — a concrete fix naming the exact file/function/symbol.
+4. **Final line** (exactly one of):
+   - `AGGREGATE: GREEN`
+   - `AGGREGATE: REVIEW_REQUIRED`
+   - `AGGREGATE: REVISE_PLAN`
+
+### Checklist items
 
 | # | item | what to check | severity |
 |---|------|---------------|----------|
@@ -196,13 +265,38 @@ and alternative approaches when a simpler solution exists.
 | 7 | architecture_fit | Does the plan solve the class of problem or is it a narrow patch leaving the root cause unresolved? If the latter, describe what architectural change would address the root cause. | RISK (advisory) |
 | 8 | forgotten_docs | If the change affects behavior described in ARCHITECTURE.md, SYSTEM.md, README.md, DEVELOPMENT.md, or BIBLE.md, is that update included in the plan? Name the specific stale artifact. | FAIL if a concrete doc/prompt becomes stale and is not mentioned |
 
-### Aggregate signal rules
+### Aggregate signal levels (majority-vote)
 
-- **GREEN** — no FAIL items, at most advisory RISKs. Implementer can proceed.
-- **REVIEW_REQUIRED** — one or more RISK items. Implementer should read and decide.
-- **REVISE_PLAN** — one or more FAIL items. Plan must be revised before writing code.
+- **GREEN** — all reviewers PASS. Read every reviewer's `## PROPOSALS` section
+  (they are the point of this call), then proceed with implementation.
+- **REVIEW_REQUIRED** — one or more of: (a) exactly one reviewer flagged
+  `REVISE_PLAN` among otherwise-clear signals (minority dissent); (b) one or
+  more RISK items were raised; (c) non-substantive degradation occurred (a
+  reviewer errored, timed out, or returned an unparseable response, so `GREEN`
+  cannot be confirmed). Read every reviewer's full response and all PROPOSALS
+  before deciding: a single dissenting reviewer often sees the structural issue
+  the others missed.
+- **REVISE_PLAN** — **≥2 reviewers flagged `REVISE_PLAN`**. Majority confirms a
+  structural problem with the plan. Redesign before writing code.
 
-Reviewers must end with `AGGREGATE: GREEN`, `AGGREGATE: REVIEW_REQUIRED`, or `AGGREGATE: REVISE_PLAN`.
+### Rules for reviewers
+
+- `plan_review` does NOT block the agent — the implementer decides what to do
+  with the feedback (P3 LLM-first). Aggregate levels are advisory coordination,
+  not enforcement.
+- Name exact files, functions, symbols, or line numbers when raising FAIL/RISK.
+  Generic concerns without a concrete pointer are advisory only.
+- Do NOT mark RISK on `minimalism` just because you would have done it
+  differently. Flag RISK only when you can name (a) fewer files touched,
+  (b) fewer lines changed, or (c) reuse of a specific existing surface —
+  concrete alternative, not taste.
+- Do NOT penalise missing tests, `VERSION` bumps, `README.md` changelog rows,
+  or `docs/ARCHITECTURE.md` updates — the plan has no code yet. Focus on design
+  correctness and elegance, not commit hygiene. Commit-gate reviewers handle
+  those at commit time.
+
+Reviewers must end with exactly one of `AGGREGATE: GREEN`,
+`AGGREGATE: REVIEW_REQUIRED`, or `AGGREGATE: REVISE_PLAN`.
 
 ---
 

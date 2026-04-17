@@ -325,6 +325,19 @@ async def _query_reviewer(
 # ------------------------------------------------------------------ #
 
 def _format_output(raw_results: list, models: list, goal: str, estimated_tokens: int) -> str:
+    """Render reviewer responses + aggregate verdict using majority-vote coordination.
+
+    Aggregate rules:
+    - `REVISE_PLAN` only when at least 2 reviewers independently return `REVISE_PLAN`.
+      A lone dissenting `REVISE_PLAN` surfaces as `REVIEW_REQUIRED` with the dissent
+      noted in the aggregate block — it is treated as a strong coordination signal,
+      not an automatic block.
+    - `REVIEW_REQUIRED` when at least one reviewer returns `REVIEW_REQUIRED` or
+      `REVISE_PLAN` (minority), or had a non-substantive failure (error / empty /
+      missing `AGGREGATE:` line). `GREEN` cannot be confirmed without a successful
+      response from every reviewer.
+    - `GREEN` only when every reviewer returned a parseable `AGGREGATE: GREEN`.
+    """
     lines = [
         "## Plan Review Results",
         "",
@@ -336,7 +349,9 @@ def _format_output(raw_results: list, models: list, goal: str, estimated_tokens:
         "",
     ]
 
-    aggregate_signal = "GREEN"  # GREEN | REVIEW_REQUIRED | REVISE_PLAN
+    # Per-reviewer categorisation: GREEN | REVIEW_REQUIRED | REVISE_PLAN | DEGRADED
+    # DEGRADED covers error / empty / missing-aggregate-line (non-substantive failures).
+    per_reviewer: list[str] = []
 
     for i, result in enumerate(raw_results):
         model_label = result.get("model") or result.get("request_model") or f"Model {i+1}"
@@ -346,39 +361,65 @@ def _format_output(raw_results: list, models: list, goal: str, estimated_tokens:
         if result.get("error"):
             lines.append(f"⚠️ **ERROR:** {result['error']}")
             lines.append("")
-            # Only downgrade to REVIEW_REQUIRED if we haven't already seen a REVISE_PLAN
-            if aggregate_signal == "GREEN":
-                aggregate_signal = "REVIEW_REQUIRED"
+            per_reviewer.append("DEGRADED")
             continue
 
         text = result.get("text", "").strip()
         if not text:
             lines.append("⚠️ **ERROR:** Empty response from reviewer.")
             lines.append("")
-            if aggregate_signal == "GREEN":
-                aggregate_signal = "REVIEW_REQUIRED"
+            per_reviewer.append("DEGRADED")
             continue
 
         lines.append(text)
         lines.append("")
 
-        # Update aggregate signal based on reviewer's explicit AGGREGATE: line.
-        # Uses the LAST matching line in the response (in case the reviewer self-corrects
-        # or includes an earlier example line before their final verdict).
-        # If no AGGREGATE: line is found, downgrade to REVIEW_REQUIRED — absence of an
-        # explicit aggregate line is a signal of uncertainty, not confidence.
         reviewer_signal = _parse_aggregate_signal(text)
         if not reviewer_signal:
-            # No parseable aggregate line → treat as uncertain, at least REVIEW_REQUIRED
-            if aggregate_signal == "GREEN":
-                aggregate_signal = "REVIEW_REQUIRED"
+            # No parseable AGGREGATE: line — treat as degraded (non-substantive failure).
+            per_reviewer.append("DEGRADED")
         elif reviewer_signal == "REVISE_PLAN":
-            aggregate_signal = "REVISE_PLAN"
-        elif reviewer_signal == "REVIEW_REQUIRED" and aggregate_signal == "GREEN":
-            aggregate_signal = "REVIEW_REQUIRED"
+            per_reviewer.append("REVISE_PLAN")
+        elif reviewer_signal == "REVIEW_REQUIRED":
+            per_reviewer.append("REVIEW_REQUIRED")
+        else:
+            # GREEN
+            per_reviewer.append("GREEN")
 
         lines.append("---")
         lines.append("")
+
+    # Majority-vote aggregation.
+    revise_count = sum(1 for sig in per_reviewer if sig == "REVISE_PLAN")
+    review_required_count = sum(1 for sig in per_reviewer if sig == "REVIEW_REQUIRED")
+    degraded_count = sum(1 for sig in per_reviewer if sig == "DEGRADED")
+    green_count = sum(1 for sig in per_reviewer if sig == "GREEN")
+
+    # Explicit guard for the no-reviewer case. In normal operation
+    # _run_plan_review_async always submits at least one reviewer, but
+    # emitting zero per-reviewer counts in the aggregate block would look
+    # misleadingly like all-zero clean PASS data rather than "no data at all".
+    if not per_reviewer:
+        lines.append("## Aggregate Signal")
+        lines.append("")
+        lines.append("❓ **REVIEW_REQUIRED**")
+        lines.append("")
+        lines.append("No reviewer responses were collected (empty reviewer list). "
+                     "Treat as REVIEW_REQUIRED — re-run plan_task with at least one reviewer configured.")
+        return "\n".join(lines)
+
+    if revise_count >= 2:
+        aggregate_signal = "REVISE_PLAN"
+    elif revise_count == 1 or review_required_count > 0 or degraded_count > 0:
+        aggregate_signal = "REVIEW_REQUIRED"
+    elif green_count == len(per_reviewer):
+        aggregate_signal = "GREEN"
+    else:
+        # Defensive fallback — no known signal variant, and neither GREEN nor
+        # any failure/degradation was recorded. Should not occur given the
+        # enumeration above, but a visible REVIEW_REQUIRED is safer than a
+        # silent GREEN on anomalous bookkeeping.
+        aggregate_signal = "REVIEW_REQUIRED"
 
     # Aggregate signal block
     signal_emoji = {
@@ -391,17 +432,46 @@ def _format_output(raw_results: list, models: list, goal: str, estimated_tokens:
     lines.append("")
     lines.append(f"{signal_emoji} **{aggregate_signal}**")
     lines.append("")
+    lines.append(
+        f"Per-reviewer signals: REVISE_PLAN={revise_count}, "
+        f"REVIEW_REQUIRED={review_required_count}, "
+        f"GREEN={green_count}, DEGRADED={degraded_count}."
+    )
+    lines.append("")
+
     if aggregate_signal == "GREEN":
-        lines.append("No critical issues found. Proceed with implementation.")
-    elif aggregate_signal == "REVIEW_REQUIRED":
         lines.append(
-            "At least one reviewer found RISKs or had errors. "
-            "Read the findings carefully and decide whether to adjust your plan before coding."
+            "All reviewers converged on GREEN. Read every reviewer's PROPOSALS "
+            "section (they are the point of this call) and proceed with implementation."
         )
-    else:
+    elif aggregate_signal == "REVIEW_REQUIRED":
+        reasons: list[str] = []
+        if revise_count == 1:
+            reasons.append(
+                "one reviewer dissented with REVISE_PLAN while the others did not — "
+                "a single dissent often sees the structural issue the others missed; "
+                "read the dissenting reviewer's response in full before deciding"
+            )
+        if review_required_count > 0:
+            reasons.append(
+                f"{review_required_count} reviewer(s) raised RISKs or non-structural concerns"
+            )
+        if degraded_count > 0:
+            reasons.append(
+                f"{degraded_count} reviewer(s) failed to return a parseable response "
+                "(error, empty, or missing AGGREGATE line) — GREEN cannot be confirmed"
+            )
+        if reasons:
+            lines.append("Reason: " + "; ".join(reasons) + ".")
         lines.append(
-            "At least one reviewer found FAILs. "
-            "Revise the plan to address the flagged issues before writing any code."
+            "Read every reviewer's full response and PROPOSALS section. "
+            "Decide whether to adjust the plan before coding."
+        )
+    else:  # REVISE_PLAN
+        lines.append(
+            f"{revise_count} reviewers independently flagged REVISE_PLAN — majority "
+            "confirms a structural problem with the plan. Redesign to address the "
+            "flagged issues before writing any code."
         )
 
     return "\n".join(lines)
@@ -423,28 +493,56 @@ def _build_system_prompt(
         "You are validating a concrete candidate plan, not brainstorming from zero. If the plan is weak, say exactly why and what boundary or contract was missed.",
         "You have full access to the entire codebase to find issues that the implementer may have missed.",
         "",
-        "## Review stance",
+        "## Review stance — GENERATIVE, not audit",
         "",
-        "Assume the implementer has already thought through the first-pass design.",
-        "Your role is to challenge hidden assumptions, surface forgotten touchpoints, and identify simpler or safer alternatives.",
-        "If the proposal is too wide, say how to narrow it. If a broader architecture read is genuinely needed, name the exact additional files or subsystems.",
+        "Your primary job is to CONTRIBUTE ideas the implementer may not see, using full repo access.",
+        "Finding defects in the plan is secondary; proposing concrete alternatives, surfacing existing",
+        "surfaces that already solve the goal, and flagging subtle contract breaks is primary.",
+        "Assume the implementer has already thought through the first-pass design — you are a design",
+        "PARTNER who contributes, not an auditor who rubber-stamps.",
         "",
-        "## Your Output Format",
+        "## Required output structure (follow exactly)",
         "",
-        "For each checklist item, provide:",
-        "  - **verdict**: PASS | RISK | FAIL",
-        "  - **explanation**: 2-5 sentences describing what you found (or why it's fine)",
-        "  - **concrete fix** (if RISK or FAIL): exact file, function, or line to address",
-        "  - **alternative approaches** (if applicable): 1-2 more elegant solutions to the same problem",
-        "",
-        "End your review with one of three aggregate verdicts (on its own line):",
-        "  - `AGGREGATE: GREEN` — no critical issues, implementer can proceed",
-        "  - `AGGREGATE: REVIEW_REQUIRED` — risks found, implementer should consider adjustments",
-        "  - `AGGREGATE: REVISE_PLAN` — critical issues found, plan must be revised before coding",
+        "1. **Your own approach** (1-2 sentences). State what YOU would do with full repo access:",
+        "   the concrete alternative path, the existing file/function you would reuse, or the simpler route.",
+        "   If after real effort you see no better approach, say so explicitly.",
+        "2. **`## PROPOSALS` section** (top 1-2 ideas). Each proposal is one of:",
+        "   - An existing function/module that already solves this (named exactly).",
+        "   - A subtle contract break or shared-state interaction the plan likely missed.",
+        "   - A simpler path with less surface area preserving the goal.",
+        "   - A risk pattern visible from codebase history in your context.",
+        "   - A BIBLE.md alignment issue with a specific principle cited.",
+        "3. **Per-item verdicts**. For each checklist item below:",
+        "   - **verdict**: PASS | RISK | FAIL",
+        "   - **explanation**: 2-5 sentences describing what you found (or why it's fine)",
+        "   - **concrete fix** (if RISK or FAIL): exact file, function, or line to address",
+        "   - **alternative approaches** (if applicable): 1-2 more elegant solutions",
+        "4. **Final line** (exactly one of):",
+        "   - `AGGREGATE: GREEN` — no critical issues, implementer can proceed",
+        "   - `AGGREGATE: REVIEW_REQUIRED` — risks or minor concerns, implementer should consider adjustments",
+        "   - `AGGREGATE: REVISE_PLAN` — critical structural issues, plan must be revised before coding",
         "",
         "Be specific. Name exact files, functions, constants, or call sites.",
         "Vague concerns without a concrete pointer are advisory at most.",
         "If you see a simpler solution, say so directly — don't just hint.",
+        "",
+        "## Rules (what NOT to flag)",
+        "",
+        "- Do NOT mark RISK on `minimalism` just because you would have done it differently.",
+        "  Flag RISK only when you can name (a) fewer files touched, (b) fewer lines changed,",
+        "  or (c) reuse of a specific existing surface — concrete alternative, not taste.",
+        "- Do NOT penalise missing tests, `VERSION` bumps, `README.md` changelog rows, or",
+        "  `docs/ARCHITECTURE.md` updates — the plan has no code yet. Focus on design correctness",
+        "  and elegance, not commit hygiene. Commit-gate reviewers handle that later.",
+        "",
+        "## Aggregate level — majority-vote coordination across 3 reviewers",
+        "",
+        "- `AGGREGATE: REVISE_PLAN` should be used ONLY when you are confident the plan has a",
+        "  concrete structural problem that warrants a redesign. The coordinator escalates to final",
+        "  `REVISE_PLAN` only when at least 2 of 3 reviewers independently flag it — a lone dissenting",
+        "  `REVISE_PLAN` will surface as `REVIEW_REQUIRED` with your dissent noted. This is deliberate:",
+        "  `plan_review` is a coordinative signal, not a block. Use `REVIEW_REQUIRED` for real but",
+        "  non-structural risks; reserve `REVISE_PLAN` for defects worth blocking the plan on.",
         "",
         "---",
         "",

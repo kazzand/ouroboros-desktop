@@ -1,4 +1,4 @@
-# Ouroboros v4.36.1 — Architecture & Reference
+# Ouroboros v4.36.2 — Architecture & Reference
 
 This document describes every component, page, button, API endpoint, and data flow.
 It is the single source of truth for how the system works. Keep it updated.
@@ -966,13 +966,39 @@ the constitutional guard is that the file itself must remain non-deletable.
   Checklist" from `docs/CHECKLISTS.md` + BIBLE.md + DEVELOPMENT.md + ARCHITECTURE.md.
 - **Checklist items**: completeness, correctness, minimalism, bible_alignment,
   implicit_contracts, testability, architecture_fit, forgotten_docs (8 items total).
-- **Output format per reviewer**: verdict (PASS/RISK/FAIL) + detailed explanation + concrete fix
-  (exact file/function/symbol) + alternative approaches if applicable. The system prompt also frames
-  reviewers as validators of a concrete candidate plan rather than zero-based brainstormers: they are
-  expected to challenge hidden assumptions, name missed boundaries/contracts, and explicitly say when
-  the proposal should be narrowed.
-- **Aggregate signal**: `GREEN` (proceed), `REVIEW_REQUIRED` (risks present), or `REVISE_PLAN` (FAILs found).
+- **Reviewer stance — GENERATIVE, not audit (v4.36.2)**: the system prompt frames
+  each reviewer as a design PARTNER who contributes ideas first and audits second.
+  The primary job is surfacing simpler alternatives, existing surfaces that already
+  solve the goal, and subtle contract breaks the implementer missed.
+- **Required output structure** (v4.36.2, enforced by prompt and by the aggregate
+  coordinator): (1) **Your own approach** — 1-2 sentences stating what the reviewer
+  would do with full repo access; (2) **`## PROPOSALS` section** — top 1-2
+  contributions (existing surface reuse, subtle contract break, simpler path,
+  risk-pattern from codebase history, or BIBLE.md alignment cite); (3) per-item
+  verdicts (PASS/RISK/FAIL) with detailed explanation + concrete fix naming exact
+  file/function/symbol when RISK or FAIL; (4) final `AGGREGATE:` line. The `## PROPOSALS`
+  section is mandatory — if a reviewer genuinely sees no better approach, they must
+  say so explicitly rather than omit the section.
+- **Aggregate signal — majority-vote (v4.36.2)**: coordination across the 3
+  reviewers is now:
+  - `GREEN` — every reviewer returned a parseable `AGGREGATE: GREEN`.
+  - `REVIEW_REQUIRED` — one or more of: (a) exactly one reviewer flagged
+    `REVISE_PLAN` (minority dissent); (b) one or more RISK items were raised;
+    (c) non-substantive degradation occurred (reviewer errored, timed out, or
+    returned an unparseable response, so `GREEN` cannot be confirmed).
+  - `REVISE_PLAN` — **≥2 reviewers independently flagged `REVISE_PLAN`**. Majority
+    confirms a structural problem with the plan.
+  The aggregate block surfaces per-reviewer signal counts (`REVISE_PLAN=N,
+  REVIEW_REQUIRED=N, GREEN=N, DEGRADED=N`) for auditability. A minority dissenter
+  is explicitly noted so the implementer reads the dissent instead of being
+  auto-blocked. The prior `any-FAIL-blocks` semantics was intentionally retired in
+  favour of coordinative advisory output consistent with P3 (LLM-first — implementer
+  decides).
 - **Non-blocking**: results are advisory only — the implementer decides what to do.
+  Reviewers are instructed not to penalise missing tests, VERSION bumps, README
+  changelog rows, or ARCHITECTURE.md updates (the plan has no code yet) and not to
+  mark `minimalism` RISK on taste alone (need concrete fewer-files / fewer-lines /
+  named-existing-surface).
 - **Budget gate**: if the assembled prompt exceeds `_PLAN_BUDGET_TOKEN_LIMIT` (850K tokens),
   review is skipped with a non-blocking `⚠️ PLAN_REVIEW_SKIPPED:` warning. Unified with scope/deep
   review at 850K as a best-effort shared policy. plan_task uses the configurable
@@ -1203,7 +1229,7 @@ errors surface via the same observability path.
   keeping narrative README/count mismatches advisory while preserving release/safety invariants as
   critical) stays consistent across all three review surfaces.
 - **Anti pattern-lock guard** (v4.34.0): the triad prompt includes an explicit instruction that
-  if the first pass surfaces exactly one FAIL across the 14 items, the reviewer must do a
+  if the first pass surfaces exactly one FAIL across the 15 items, the reviewer must do a
   deliberate second pass focused on a different concern class (examples: `code_quality` → re-examine
   `tests_affected` and `self_consistency`; `cross_platform` → re-examine `security_issues` and
   `architecture_doc`; `version_bump` → re-examine `changelog_and_badge` and `self_consistency`)
@@ -1248,7 +1274,7 @@ errors surface via the same observability path.
   oversized (>1MB), and directory prefixes `.cursor/`, `.github/`, `.vscode/`, `.idea/`, `assets/`,
   `webview/`. Explicit omission count appended when files are skipped.
 - Checklist items (v4.14.1): 8 items including `cross_module_bugs` (does the change break something in a different module through implicit coupling?) and `implicit_contracts` (are there constants, data format assumptions, or expected signatures relied upon by other modules that this change violates?).
-- **Full 8-item matrix output** (v4.34.0): the scope prompt now requires the reviewer to emit one JSON entry per Intent/Scope checklist item (8 entries total) rather than only FAILs. PASS entries are mandatory and must carry 1–2 sentences of justification naming a concrete artifact or code path that was checked — a bare "PASS" or single-word reason is explicitly called out as a reviewer failure. Rationale: before v4.34.0, scope returned only 1–2 FAILs while triad returned the full 14-item matrix, so scope coverage silently collapsed whenever the reviewer locked onto one concern class. The matrix contract makes skipped items visible and makes shallow PASS reasoning auditable in `scope_raw_result`. `_classify_scope_findings` continues to forward only `verdict == "FAIL"` entries to the commit gate, so the added PASS rows do not change blocking behaviour — they only make the reviewer's actual coverage visible.
+- **Full 8-item matrix output** (v4.34.0): the scope prompt now requires the reviewer to emit one JSON entry per Intent/Scope checklist item (8 entries total) rather than only FAILs. PASS entries are mandatory and must carry 1–2 sentences of justification naming a concrete artifact or code path that was checked — a bare "PASS" or single-word reason is explicitly called out as a reviewer failure. Rationale: before v4.34.0, scope returned only 1–2 FAILs while triad returned the full 15-item matrix, so scope coverage silently collapsed whenever the reviewer locked onto one concern class. The matrix contract makes skipped items visible and makes shallow PASS reasoning auditable in `scope_raw_result`. `_classify_scope_findings` continues to forward only `verdict == "FAIL"` entries to the commit gate, so the added PASS rows do not change blocking behaviour — they only make the reviewer's actual coverage visible.
 - **Anti pattern-lock guard** (v4.34.0): the scope prompt now explicitly instructs the reviewer that if the first pass surfaces exactly one FAIL (and all other items are PASS), it must run a deliberate second pass focused on a different concern class before returning. Concrete pairings are listed in the prompt: `intent_alignment` → `forgotten_touchpoints`/`cross_module_bugs`; `forgotten_touchpoints` → `cross_surface_consistency`/`implicit_contracts`; etc. The reviewer updates PASS entries in-place if the second pass uncovers new FAILs and returns a single JSON array. Mirrors the same guard added to triad prompts in v4.34.0 — single-FAIL outputs are the most common pattern-lock failure mode of single-pass review.
 - **Budget gate**: after assembling the full scope-review prompt, token count is estimated via `estimate_tokens` (chars/4 heuristic). If the estimate exceeds `_SCOPE_BUDGET_TOKEN_LIMIT` (850K tokens), scope review is **skipped with a non-blocking warning** rather than crashing or sending an oversized request. The commit is not blocked in this case. Context math: 1M window is shared input+output; chars/4 under-counts by ~15%, so actual input at gate=850K is ≈1M tokens and output max_tokens draws from the same 1M ceiling — the skip path is best-effort.
 - **`_TouchedContextStatus` dataclass** (v4.14.1): structured signal object used by `_build_scope_prompt()` to replace the old magic-string channel. `_compute_touched_status()` produces the touched-file statuses; `_build_scope_prompt()` creates `budget_exceeded` after estimating the assembled prompt. Fields: `status` ("empty"|"omitted"|"budget_exceeded"), `omitted_paths`, `token_count`. Success is represented by `context_status is None`, not a separate `"ok"` status. This prevents filename–sentinel collision (a real file named `__empty__` cannot be misclassified as a control sentinel).

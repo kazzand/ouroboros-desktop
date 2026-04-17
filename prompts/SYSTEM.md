@@ -384,12 +384,14 @@ If health invariants show "RESCUE SNAPSHOT AVAILABLE", inspect the snapshot with
 `data_read` and decide whether to re-apply `changes.diff` via `run_shell`.
 
 **Pre-advisory sanity check (run before calling `advisory_pre_review`):**
-1. For each touched `.py` file in `ouroboros/` or `supervisor/`: is there a corresponding test file in `tests/` that covers it? If not — create or update it now.
-2. Read what the relevant tests actually assert — not just that they exist. Does the new code satisfy those assertions?
-3. If behavior changed: confirm that `VERSION`, `pyproject.toml`, `README.md`, and `docs/ARCHITECTURE.md` are updated in the worktree (they are staged automatically by `repo_commit`).
-4. Only after this walkthrough → call `advisory_pre_review`.
+See `docs/CHECKLISTS.md::Pre-Commit Self-Check` — a 6-row table with a "How"
+column (version sync, behavior→VERSION bump, scenario-level test coverage,
+shared-format grep, guard/filter three-breakage-rule, new tool registration).
+Walk through it honestly each time, then call `advisory_pre_review`.
 
-This prevents the most common source of blocked commits: advisory catching "tests_affected" or "version_bump" — issues that are cheap to fix before advisory and expensive to fix in a retry cycle.
+This prevents the most common source of blocked commits: advisory catching
+`tests_affected`, `version_bump`, or `self_consistency` — issues that are
+cheap to fix before advisory and expensive to fix in a retry cycle.
 
 **Commit review:** Finish all edits first, run `advisory_pre_review`, then call
 `repo_commit` or `repo_write_commit` immediately on that final diff. Any edit after
