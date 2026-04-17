@@ -873,6 +873,10 @@ class TestCherryPickCommits:
             git_pr._cherry_pick_pr_commits(ctx, shas=shas)
             mock_inv.assert_called_once()
 
+    # -----------------------------------------------------------------
+    # override_author tests live in tests/test_git_pr_override_author.py
+    # (moved out to keep this module under the 1600-line hard gate).
+    # -----------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
 # git_pr: stage_pr_merge
@@ -1215,6 +1219,11 @@ class TestGetPr:
         assert "fetch_pr_ref" in result
         assert "create_integration_branch" in result
         assert "advisory_pre_review" in result
+        assert "override_author" in result, (
+            "Integration steps must mention override_author so operators using "
+            "get_github_pr learn the v4.35.0 workflow for rewriting placeholder "
+            "committer identities to real GitHub authors."
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1256,6 +1265,9 @@ class TestToolRegistration:
         assert not intersection, (
             f"PR tools must be non-core (require enable_tools): {intersection}"
         )
+
+    # Note: override_author schema pin lives in tests/test_git_pr_override_author.py
+    # along with the behavioral tests, to keep this module under the 1600-line gate.
 
 
 # ---------------------------------------------------------------------------

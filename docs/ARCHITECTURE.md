@@ -1,4 +1,4 @@
-# Ouroboros v4.34.0 — Architecture & Reference
+# Ouroboros v4.35.0 — Architecture & Reference
 
 This document describes every component, page, button, API endpoint, and data flow.
 It is the single source of truth for how the system works. Keep it updated.
@@ -643,12 +643,15 @@ backward compatibility but is not the runtime authority.
 
 **Attribution design (critical):**
 - `cherry_pick_pr_commits` uses `git cherry-pick --no-edit` (NOT `--no-commit`).
-  Each PR commit is replayed as a **real commit** with:
+  By default each PR commit is replayed as a **real commit** with:
   - `author name / email` = original contributor (preserved by git)
   - `author date`         = original timestamp (preserved by git)
-  - `committer`           = Ouroboros (who applied the cherry-pick)
+  - `committer`           = repo-local configured identity (`user.name` / `user.email`),
+                            atomic-pair fallback to `Ouroboros <ouroboros@local.mac>` when
+                            either local field is missing or empty
 - GitHub contribution counting is based on `author.email`, so external contributors receive full graph credit.
 - `Co-authored-by` in the final merge commit message is an additional hint, NOT the primary attribution mechanism.
+- **Optional author override** (v4.35.0): `cherry_pick_pr_commits(..., override_author={"name": "X", "email": "Y"})` rewrites the author name+email on every cherry-picked commit via a second step `git commit --amend --no-edit --author="Name <email>" --date=<original>`. The original author DATE is captured from the source commit via `%aI` BEFORE the cherry-pick and passed to `--date` so timestamps are preserved, and the repo-local committer identity (atomic-pair fallback to Ouroboros defaults when missing; via GIT_COMMITTER_* env) is preserved. Used when an external contributor ran Ouroboros locally without configuring git `user.email`, leaving all their commits attributed to the default `Ouroboros <ouroboros@local.mac>` placeholder identity; the override restores their real GitHub identity so the contribution graph credits them. The override applies to the entire batch uniformly — intended for single-author placeholder commit sets; split the batch by source-author if mixed authors need different identities. `_validate_override_author` rejects missing/empty fields, emails without `@`, and names/emails containing control characters (`\r`, `\n`, `\t`, `\x00`) or angle brackets (`<`, `>`) which would corrupt the `--author="Name <email>"` argument. When an `--amend` call fails (typically a git-config problem), the just-added commit is rolled back via `git reset --hard HEAD~1`, the function returns a diagnostic error, and earlier successfully-amended commits in the same batch are kept; advisory invalidation still fires for them. Amend failures always abort regardless of `stop_on_conflict` — fail-fast is intentional because amend failures are config problems, not PR content problems.
 - `stage_adaptations` stages Ouroboros adaptation changes without committing. Call it immediately before `stage_pr_merge` — do NOT run `repo_commit` in between, because `repo_commit` always checks out `branch_dev` (ouroboros) first, which drops off the integration branch and discards the staged state. Staged adaptation changes survive into the final merge commit created by `advisory_pre_review → repo_commit` after `stage_pr_merge`.
 - `stage_pr_merge` uses `git merge --no-ff --no-commit` which sets `MERGE_HEAD` and stages the diff. The resulting `repo_commit` creates a proper merge commit with both parents, permanently linking the integration branch (with its original-author history). Any staged adaptation changes from `stage_adaptations` are included in this merge commit.
 
@@ -657,7 +660,7 @@ backward compatibility but is not the runtime authority.
 2. `get_github_pr(number=N)` — inspect PR: metadata, commits with authors/emails, changed files, diff/patch (truncated), review comments, mergeability + integration instructions
 3. `fetch_pr_ref(pr_number=N)` — fetch `+refs/pull/N/head:pr/N` (force-update for rebased PRs); lists commits with original author metadata
 4. `create_integration_branch(pr_number=N)` — create `integrate/pr-N` from `ouroboros`
-5. `cherry_pick_pr_commits(shas=[...])` — replay each commit with `--no-edit`; real authored commits, original authorship preserved. Provides `Co-authored-by` hint for final merge commit.
+5. `cherry_pick_pr_commits(shas=[...])` — replay each commit with `--no-edit`; real authored commits, original authorship preserved. Provides `Co-authored-by` hint for final merge commit (references the ORIGINAL upstream author — also in override mode, since the override identity is already the commit author and repeating it in Co-authored-by would be redundant). Optional `override_author={"name": "login", "email": "id+login@users.noreply.github.com"}` rewrites author name+email on every commit (batch-wide) while preserving original author dates and the repo-local committer identity (atomic-pair fallback to Ouroboros defaults when local `user.name`/`user.email` is missing) — use when the external contributor ran Ouroboros locally and their commits are all attributed to the default placeholder identity.
 6. `stage_adaptations()` — optional: stage Ouroboros adaptation/fixup changes without committing. Call `stage_pr_merge` immediately after — do NOT run `repo_commit` here (see note above).
 7. `stage_pr_merge(branch="integrate/pr-N")` → `advisory_pre_review` → `repo_commit` — finalise through the standard reviewed pipeline; creates a merge commit with both parents (staged adaptations from step 6 land here)
 8. `comment_on_pr(number=N, body="...")` — leave an audit trail on the PR
