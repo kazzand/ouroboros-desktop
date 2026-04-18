@@ -161,7 +161,15 @@ def _run_post_task_processing_async(
     review_evidence: Dict[str, Any],
     drive_logs: pathlib.Path,
 ) -> None:
-    """Best-effort async post-task memory work that must not block reply delivery."""
+    """Best-effort async post-task memory work that must not block reply delivery.
+
+    Runs in a daemon thread so reflection, backlog candidate persistence, and
+    task-summary generation stay off the reply critical path. The previous
+    synchronous variant added reflection latency (1–3 s LLM round) to every
+    reply; daemon-thread async restores the pre-v4.39.0 UX contract
+    (ARCHITECTURE.md "Only task summary remains async" was a misnomer — all
+    LLM-heavy post-task work belongs off the critical path).
+    """
     task_snapshot = json.loads(json.dumps(task, ensure_ascii=False, default=str))
     usage_snapshot = json.loads(json.dumps(usage, ensure_ascii=False, default=str))
     trace_snapshot = json.loads(json.dumps(llm_trace, ensure_ascii=False, default=str))
@@ -172,6 +180,11 @@ def _run_post_task_processing_async(
             from ouroboros.llm import LLMClient
 
             llm_client = LLMClient()
+            # Order matters for hard-restart durability: task summary writes
+            # to `logs/chat.jsonl` (durable chat history) and is more
+            # important than reflection/backlog (best-effort process memory).
+            # Running summary FIRST minimises the chance that a worker
+            # shutdown mid-thread drops the more valuable artifact.
             _run_task_summary(
                 env,
                 llm_client,
@@ -182,17 +195,10 @@ def _run_post_task_processing_async(
                 review_evidence=review_evidence_snapshot,
             )
             reflection_entry = _run_reflection(
-                env,
-                llm_client,
-                task_snapshot,
-                usage_snapshot,
-                trace_snapshot,
-                review_evidence_snapshot,
+                env, llm_client, task_snapshot, usage_snapshot,
+                trace_snapshot, review_evidence_snapshot,
             )
-            _update_improvement_backlog(
-                env,
-                reflection_entry,
-            )
+            _update_improvement_backlog(env, reflection_entry)
         except Exception:
             log.warning("Async post-task processing failed", exc_info=True)
 
@@ -286,7 +292,12 @@ def emit_task_results(
 
     _run_chat_consolidation(env, memory, llm, task, drive_logs)
     _run_scratchpad_consolidation(env, memory, llm)
-    _run_post_task_processing_async(env, task, usage, llm_trace, review_evidence, drive_logs)
+    # Reflection, backlog persistence, and task summary all run in the daemon
+    # thread started below — LLM-heavy work must stay off the reply critical
+    # path so send_message reaches the UI without extra latency.
+    _run_post_task_processing_async(
+        env, task, usage, llm_trace, review_evidence, drive_logs,
+    )
 
 
 def _store_task_result(env: Any, task: Dict[str, Any], text: str,
@@ -484,7 +495,12 @@ def _run_reflection(env: Any, llm: Any, task: Dict[str, Any],
         from ouroboros.reflection import (
             should_generate_reflection, generate_reflection, append_reflection,
         )
-        if should_generate_reflection(llm_trace):
+        if should_generate_reflection(
+            llm_trace,
+            rounds=int(usage.get("rounds", 0)),
+            # usage key is "cost" (not "cost_usd") — map explicitly
+            cost_usd=float(usage.get("cost", 0.0)),
+        ):
             trace_summary = build_trace_summary(llm_trace)
             try:
                 entry = generate_reflection(

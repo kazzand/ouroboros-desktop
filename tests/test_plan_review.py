@@ -141,24 +141,22 @@ class TestPlanReviewModels(unittest.TestCase):
         """plan_task must use the same direct-provider fallback as the commit triad.
 
         Regression guard for v4.33.1 scope review finding
-        ``plan_task_review_model_parity``: ``_get_review_models`` previously
-        parsed ``OUROBOROS_REVIEW_MODELS`` directly, bypassing
+        ``plan_task_review_model_parity`` + v4.39.0 quorum-safe-fallback fix:
         ``config.get_review_models``'s OpenAI-only / Anthropic-only fallback
-        that rewrites the list to ``[main_model] * 3`` when the configured
-        reviewers don't match the exclusive direct-provider prefix. The two
-        flows must stay in lockstep.
+        now rewrites the list to ``[main, light, light]`` (3 slots, 2 unique)
+        when the configured reviewers don't match the exclusive direct-
+        provider prefix, and ``_get_review_models`` must see that shape
+        unchanged. The shape satisfies both the commit triad's 3-reviewer
+        contract and plan_task's 2-unique-reviewer quorum gate.
         """
         from ouroboros.tools.plan_review import _get_review_models
         # Simulate Anthropic-only direct setup: only ANTHROPIC key present,
         # main is anthropic::..., but the reviewer list is still the default
         # OpenRouter-style set (so none match the anthropic:: prefix).
-        # Hermetic: also clears OPENAI_BASE_URL because a non-empty value is
-        # treated as a custom-runtime signal by
-        # `_exclusive_direct_remote_provider_env` and disables the exclusive
-        # direct-provider fallback path we are testing here.
         env = {
             "OUROBOROS_REVIEW_MODELS": "openai/gpt-5.4,google/gemini-3.1-pro-preview,anthropic/claude-opus-4.7",
             "OUROBOROS_MODEL": "anthropic::claude-opus-4-7",
+            "OUROBOROS_MODEL_LIGHT": "anthropic::claude-sonnet-4-6",
             "OPENROUTER_API_KEY": "",
             "OPENAI_API_KEY": "",
             "OPENAI_BASE_URL": "",
@@ -168,11 +166,17 @@ class TestPlanReviewModels(unittest.TestCase):
         }
         with patch.dict(os.environ, env, clear=False):
             models = _get_review_models()
-        # Expect the Anthropic-only fallback: main model repeated.
+        # Expect the Anthropic-only fallback: `[main, light, light]` — 3 slots,
+        # 2 unique, both commit-triad and plan_task quorum-compatible.
         self.assertEqual(len(models), 3)
-        self.assertTrue(
-            all(m == "anthropic::claude-opus-4-7" for m in models),
-            f"expected main model × 3 for Anthropic-only direct setup, got {models!r}",
+        self.assertEqual(
+            models,
+            [
+                "anthropic::claude-opus-4-7",
+                "anthropic::claude-sonnet-4-6",
+                "anthropic::claude-sonnet-4-6",
+            ],
+            f"expected [main, light, light] direct-provider fallback, got {models!r}",
         )
 
 
@@ -221,11 +225,14 @@ class TestPlanReviewSystemPrompt(unittest.TestCase):
         self.assertIn("Do NOT penalise missing tests", prompt)
 
     def test_system_prompt_explains_majority_vote_coordination(self):
-        """The prompt must explain that REVISE_PLAN requires majority agreement."""
+        """The prompt must explain that REVISE_PLAN requires majority agreement
+        across the configured reviewer count (2 or 3 distinct models per
+        v4.39.0)."""
         from ouroboros.tools.plan_review import _build_system_prompt
         prompt = _build_system_prompt("checklist", "", "", "")
         self.assertIn("majority-vote", prompt)
-        self.assertIn("at least 2 of 3 reviewers", prompt)
+        self.assertIn("at least 2 distinct reviewers", prompt)
+        self.assertIn("2-3 distinct reviewers", prompt)
 
     def test_system_prompt_preserves_aggregate_contract(self):
         from ouroboros.tools.plan_review import _build_system_prompt
@@ -406,7 +413,14 @@ class TestPlanReviewBudgetGate(unittest.IsolatedAsyncioTestCase):
             patch.object(pr, "_load_plan_checklist", return_value="checklist"),
             patch.object(pr, "_load_bible", return_value=""),
             patch.object(pr, "_load_doc", return_value=""),
-            patch.object(pr, "_get_review_models", return_value=["model-a"]),
+            # Two distinct models so the quorum gate (v4.39.0) passes and we
+            # actually reach the budget check under test. Patch BOTH
+            # `_cfg.get_review_models` (quorum gate reads this) and
+            # `pr._get_review_models` (parallel-run reads this) so the test
+            # is hermetic against developer `OUROBOROS_REVIEW_MODELS`.
+            patch("ouroboros.config.get_review_models",
+                  return_value=["model-a", "model-b"]),
+            patch.object(pr, "_get_review_models", return_value=["model-a", "model-b"]),
             # estimate_tokens returns a large number
             patch("ouroboros.tools.plan_review.estimate_tokens", return_value=1_100_000),
         ):
@@ -435,7 +449,13 @@ class TestPlanReviewBudgetGate(unittest.IsolatedAsyncioTestCase):
             patch.object(pr, "_load_plan_checklist", return_value="checklist"),
             patch.object(pr, "_load_bible", return_value=""),
             patch.object(pr, "_load_doc", return_value=""),
-            patch.object(pr, "_get_review_models", return_value=["model-a"]),
+            # Two distinct models so the quorum gate (v4.39.0) passes and we
+            # actually reach the reviewer-call path under test. Patch both
+            # `_cfg.get_review_models` and `pr._get_review_models` to stay
+            # hermetic against developer `OUROBOROS_REVIEW_MODELS`.
+            patch("ouroboros.config.get_review_models",
+                  return_value=["model-a", "model-b"]),
+            patch.object(pr, "_get_review_models", return_value=["model-a", "model-b"]),
             patch("ouroboros.tools.plan_review.estimate_tokens", return_value=10_000),
             patch.object(pr, "_query_reviewer", return_value=mock_result),
         ):

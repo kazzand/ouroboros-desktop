@@ -487,6 +487,65 @@ def _llm_extract_advisory_items(raw_text: str, ctx: object) -> list:
         return []
 
 
+def _syntax_preflight_staged_py_files(
+    repo_dir: pathlib.Path,
+    resolved_paths: List[str],
+) -> Optional[str]:
+    """Compile each staged `.py` file in-process to catch SyntaxErrors before
+    the Claude SDK advisory call.
+
+    Purpose: the SDK call costs ~$1-2 and several minutes; it is wasteful to
+    run it when a staged `.py` file would not even compile. Parsing is done via
+    `compile(source, path, "exec", dont_inherit=True)` — no `__pycache__` is
+    produced and no subprocess is started.
+
+    Returns None when every staged `.py` file compiles cleanly (or none exist).
+    Returns a formatted `PREFLIGHT_BLOCKED` message when one or more fail.
+
+    Non-agent-repo skip: if the target repo does not contain `ouroboros/__init__.py`
+    (i.e. we are not reviewing our own repo), skip the gate. Target Python
+    version can differ from ours and we do not want to block on that.
+    """
+    if not (repo_dir / "ouroboros" / "__init__.py").exists():
+        return None
+
+    errors: List[str] = []
+    for rel in resolved_paths:
+        if not rel.endswith(".py"):
+            continue
+        file_path = repo_dir / rel
+        try:
+            source = file_path.read_text(encoding="utf-8", errors="replace")
+        except FileNotFoundError:
+            continue
+        except OSError:
+            continue
+        try:
+            compile(source, rel, "exec", dont_inherit=True)
+        except SyntaxError as exc:
+            line = getattr(exc, "lineno", None) or "?"
+            msg = getattr(exc, "msg", None) or str(exc)
+            errors.append(f"{rel}:{line}: {msg}")
+        except ValueError as exc:
+            # `compile` raises ValueError (not SyntaxError) when the source
+            # contains null bytes or other non-printable bytes that the
+            # tokenizer rejects before parsing. Treat these the same as a
+            # syntax error so the SDK call is still skipped and the agent
+            # gets an actionable PREFLIGHT_BLOCKED message instead of an
+            # opaque ADVISORY_ERROR.
+            errors.append(f"{rel}:?: {exc}")
+
+    if not errors:
+        return None
+
+    return (
+        "⚠️ PREFLIGHT_BLOCKED: syntax errors:\n"
+        + "\n".join(f"- {err}" for err in errors)
+        + "\n\nFix the syntax error(s) above and re-run advisory_pre_review. "
+        "Claude SDK advisory was skipped to save budget."
+    )
+
+
 def _run_claude_advisory(
     repo_dir: pathlib.Path,
     commit_message: str,
@@ -528,6 +587,12 @@ def _run_claude_advisory(
             paths=paths,
             exclude_paths=always_inlined,
         )
+
+        preflight_err = _syntax_preflight_staged_py_files(repo_dir, resolved_paths)
+        if preflight_err:
+            log.warning("Advisory skipped — syntax preflight blocked: %s", preflight_err.splitlines()[0])
+            return [], preflight_err, "", 0
+
         prompt = _build_advisory_prompt(
             repo_dir,
             commit_message,
@@ -845,6 +910,22 @@ def _next_step_guidance(latest: Optional["AdvisoryRunRecord"], state: "AdvisoryR
                         open_obs: list, effective_is_fresh: bool = False) -> str:
     """Return a concrete next-step string based on current advisory state."""
     if not effective_is_fresh:
+        # preflight_blocked for the exact current snapshot (SDK skipped —
+        # a staged .py file has a SyntaxError). Raise it above parse_failure
+        # in the priority list: the concrete syntax-error location is much
+        # more actionable than the generic "could not parse" message.
+        if latest and latest.status == "preflight_blocked" and not stale_from_edit:
+            tail = (
+                f" There are still {len(open_obs)} open obligation(s) from previous "
+                "blocking rounds — address those in the same edit pass."
+                if open_obs else ""
+            )
+            return (
+                "Last advisory run was blocked by syntax preflight: a staged .py "
+                "file has a SyntaxError. See the file:line:msg in the raw_result. "
+                "Fix the syntax error and re-run advisory_pre_review."
+                + tail
+            )
         # parse_failure for the exact current snapshot (advisory ran but output was unparseable)
         if latest and latest.status == "parse_failure" and not stale_from_edit:
             if open_obs:
@@ -1044,6 +1125,56 @@ def _handle_advisory_pre_review(
             "message": (
                 "Advisory review failed to run. Fix the error and retry, "
                 "or use skip_advisory_pre_review=True to bypass (will be audited)."
+            ),
+        }, ensure_ascii=False, indent=2)
+
+    # Handle syntax-preflight short-circuit (v4.38.0 + v4.39.0 persistence).
+    # The SDK was intentionally skipped because a staged `.py` file would not
+    # even compile. Surface this as an explicit `preflight_blocked` status so
+    # it is not misclassified as `parse_failure` (which would hide the actual
+    # syntax error from the agent). Persist a durable AdvisoryRunRecord so
+    # `review_status` and the `Review Continuity` context can surface the
+    # block reason after a restart.
+    if raw_result.startswith("⚠️ PREFLIGHT_BLOCKED"):
+        preflight_summary = f"{changed_files.count(chr(10)) + 1} file(s) changed"
+
+        def _mutate_preflight(pre_state: AdvisoryReviewState) -> None:
+            next_run_attempt = len(
+                pre_state.filter_advisory_runs(
+                    repo_key=repo_key,
+                    tool_name="advisory_pre_review",
+                    task_id=task_id,
+                )
+            ) + 1
+            pre_state.add_run(AdvisoryRunRecord(
+                snapshot_hash=snapshot_hash,
+                commit_message=commit_message,
+                status="preflight_blocked",
+                ts=_utc_now(),
+                items=[],
+                snapshot_summary=preflight_summary,
+                raw_result=raw_result,
+                snapshot_paths=paths,
+                repo_key=repo_key,
+                tool_name="advisory_pre_review",
+                task_id=task_id,
+                attempt=next_run_attempt,
+                readiness_warnings=readiness_warnings,
+                prompt_chars=0,  # SDK never called — zero-cost block
+                model_used="",
+                duration_sec=_advisory_duration,
+            ))
+
+        update_state(drive_root, _mutate_preflight)
+
+        return json.dumps({
+            "status": "preflight_blocked",
+            "snapshot_hash": snapshot_hash,
+            "error": raw_result,
+            "readiness_warnings": readiness_warnings,
+            "message": (
+                "Advisory SDK was skipped: a staged .py file has a SyntaxError. "
+                "Fix the syntax error listed above and re-run advisory_pre_review."
             ),
         }, ensure_ascii=False, indent=2)
 
@@ -1331,8 +1462,9 @@ def _handle_review_status(
         latest_paths = latest.snapshot_paths if latest else None
         current_hash = compute_snapshot_hash(repo_dir, "", paths=latest_paths)
         hash_mismatch = bool(
-            latest and latest.status in ("fresh", "bypassed", "skipped", "parse_failure")
-            and latest.snapshot_hash != current_hash
+            latest and latest.status in (
+                "fresh", "bypassed", "skipped", "parse_failure", "preflight_blocked",
+            ) and latest.snapshot_hash != current_hash
         )
     except Exception:
         current_hash = None

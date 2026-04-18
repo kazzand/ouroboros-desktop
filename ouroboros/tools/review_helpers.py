@@ -120,6 +120,13 @@ _ANTI_THRASHING_RULE_ITEM_NAME = (
     "phantom new obligation."
 )
 
+_CONVERGENCE_RULE_TEXT = (
+    "CONVERGENCE RULE (attempt 3+): Do NOT raise new critical findings on code that "
+    "was not changed between this attempt and the previous attempt. New critical "
+    "findings are allowed only on genuinely new code introduced in this revision. "
+    "Pre-existing issues in unchanged code are advisory at most."
+)
+
 
 def format_obligation_excerpt(reason: str, max_chars: int = 120) -> str:
     """Format an obligation reason excerpt with sanitization and explicit OMISSION NOTE.

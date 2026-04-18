@@ -159,8 +159,11 @@ Reviewed commits now have an explicit **two-step gate**:
    Any edit after advisory makes it stale and requires a re-run.
 2. **Unified pre-commit review**: once advisory is fresh, the reviewed commit path
    runs two reviewers in parallel on the exact staged snapshot:
-   - **Triad review** (`ouroboros/tools/review.py`): three models review the staged
-     diff against `docs/CHECKLISTS.md`.
+   - **Triad review** (`ouroboros/tools/review.py`): at least 2 reviewer
+     models (as configured in `OUROBOROS_REVIEW_MODELS`; ships with 3, hard
+     cap `_handle_multi_model_review.MAX_MODELS = 10`) review the staged
+     diff against `docs/CHECKLISTS.md`. Quorum requires at least 2 responded
+     actors (`_run_unified_review`).
    - **Scope review** (`ouroboros/tools/scope_review.py`): one model reviews
      completeness and cross-module consistency with full-repo context
      (`build_full_repo_pack`).

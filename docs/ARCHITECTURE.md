@@ -1,4 +1,4 @@
-# Ouroboros v4.36.5 — Architecture & Reference
+# Ouroboros v4.39.0 — Architecture & Reference
 
 This document describes every component, page, button, API endpoint, and data flow.
 It is the single source of truth for how the system works. Keep it updated.
@@ -85,8 +85,8 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on localhost:8765
       │   ├── git_pr.py          ← PR integration tools: fetch_pr_ref, create_integration_branch, cherry_pick_pr_commits, stage_adaptations, stage_pr_merge (non-core, require enable_tools)
       │   ├── github.py          ← GitHub integration: issues (list/get/comment/close) + PR tools: list_github_prs, get_github_pr, comment_on_pr (non-core; github.py is in _FROZEN_TOOL_MODULES so PR inspection/comment tools work in packaged builds)
       │   ├── parallel_review.py ← Parallel triad+scope orchestration and verdict aggregation (extracted from git.py)
-      │   ├── plan_review.py     ← Pre-implementation design review (3 parallel full-codebase reviewers, plan_task tool)
-      │   ├── review.py          ← Triad diff review (3-model parallel review against CHECKLISTS.md)
+      │   ├── plan_review.py     ← Pre-implementation design review (2–3 distinct parallel full-codebase reviewers, plan_task tool)
+      │   ├── review.py          ← Triad diff review (>=2 reviewer models in parallel against CHECKLISTS.md; ships with 3, capped at 10)
       │   ├── review_helpers.py  ← Shared review helpers (section loader, file packs, intent)
       │   └── scope_review.py   ← Blocking scope reviewer (opus, fail-closed)
       └── platform_layer.py    ← Cross-platform process/path/locking helpers
@@ -343,7 +343,7 @@ The Dashboard tab has been removed. Its functionality is now distributed:
   Backed by `OUROBOROS_REVIEW_MODELS`.
 - **Scope Review Model**: Single model for the blocking scope reviewer.
   Backed by `OUROBOROS_SCOPE_REVIEW_MODEL` (default `anthropic/claude-opus-4.6`).
-- **Direct-provider review fallback** (formerly "OpenAI-only review fallback"): if exactly one of **official OpenAI** or **Anthropic** is configured (no OpenRouter, no legacy OpenAI base URL, no OpenAI-compatible, no Cloud.ru) and the configured review list is invalid or doesn't match the exclusive provider prefix, review falls back to the main model repeated three times. Current scope is OpenAI-only and Anthropic-only — the detector (`ouroboros/config.py::_exclusive_direct_remote_provider_env`) early-returns `""` when OpenAI-compatible or Cloud.ru keys are present, so those provider-only setups do not yet receive the fallback. The fallback additionally requires the main slot `OUROBOROS_MODEL` — after `provider_models.migrate_model_value` — to already start with the exclusive provider prefix (`openai::` / `anthropic::`); if the normalized main model does not match the prefix, `get_review_models` leaves the configured reviewer list untouched and does **not** rewrite it to `[main]*3`. This covers the edge case where the Settings `#s-model` free-text input accepts a non-default cross-provider value. The same SSOT (`ouroboros/config.py::get_review_models`) powers both the commit triad and `plan_task`.
+- **Direct-provider review fallback** (formerly "OpenAI-only review fallback"; updated v4.39.0 for `plan_task` quorum): if exactly one of **official OpenAI** or **Anthropic** is configured (no OpenRouter, no legacy OpenAI base URL, no OpenAI-compatible, no Cloud.ru) and the configured review list is invalid or doesn't match the exclusive provider prefix, review falls back to `[OUROBOROS_MODEL, OUROBOROS_MODEL_LIGHT, OUROBOROS_MODEL_LIGHT]` (3 commit-triad slots, 2 unique models) drawn from `_DIRECT_PROVIDER_AUTO_DEFAULTS` (which pairs e.g. `openai::gpt-5.4` + `openai::gpt-5.4-mini` or `anthropic::claude-opus-4-7` + `anthropic::claude-sonnet-4-6`). This shape preserves the commit triad's "three models review the staged diff" contract (DEVELOPMENT.md) while yielding exactly 2 unique reviewers for `plan_task`'s quorum gate. If `main` and `light` happen to equal (user overrode both lanes to the same model), the fallback degrades to legacy `[main] * _DIRECT_PROVIDER_REVIEW_RUNS` — commit triad still works, `plan_task` then emits its quorum-error recovery hint. This replaces the old `[main] * 3` fallback which broke `plan_task` on first-run single-provider setups. Current scope is OpenAI-only and Anthropic-only — the detector (`ouroboros/config.py::_exclusive_direct_remote_provider_env`) early-returns `""` when OpenAI-compatible or Cloud.ru keys are present, so those provider-only setups do not yet receive the fallback. The fallback additionally requires the main slot `OUROBOROS_MODEL` — after `provider_models.migrate_model_value` — to already start with the exclusive provider prefix (`openai::` / `anthropic::`); if the normalized main model does not match the prefix, `get_review_models` leaves the configured reviewer list untouched and does **not** rewrite it to `[main]*3`. This covers the edge case where the Settings `#s-model` free-text input accepts a non-default cross-provider value. The same SSOT (`ouroboros/config.py::get_review_models`) powers both the commit triad and `plan_task`.
 - **Review Enforcement**: `Advisory` or `Blocking` for pre-commit review behavior. Rendered as a two-button segmented toggle (advisory = amber, blocking = crimson) rather than a dropdown.
   Backed by `OUROBOROS_REVIEW_ENFORCEMENT`. Review always runs in both modes.
 - **Advanced tab**: local model runtime, max workers, tool timeout, soft/hard timeout, and reset controls. Total budget and per-task cost cap have moved to the **Costs** page.
@@ -553,7 +553,7 @@ immediately on a crash signal (SIGSEGV) with a diagnostic message suggesting
    a. Build context (`context.py`): system prompt + bible + architecture + development guide + README + checklists, plus a **3-block system-memory layout**: (1) static governance/docs block (`cache_control: ttl=1h`), (2) semi-stable memory block for low-churn artifacts such as identity, knowledge base, patterns, and deep review (`cache_control: ephemeral`), and (3) dynamic working-memory/runtime block for scratchpad, dialogue history/summary, registry digest, drive/runtime state, review continuity, and recent sections
    b. `run_llm_loop()`: LLM call → tool execution → repeat until final text response
    c. Emit final `send_message`, `task_metrics`, and `task_done`; any restart request is latched until after those final events are queued
-   d. Store task result synchronously; task summary and reflection run off the user-reply critical path. For non-trivial tasks, the task-summary prompt now explicitly requests a short operational meta-reflection about friction, weak assumptions, and what Ouroboros should change in its own process/prompts; if the summary LLM path fails, `_run_task_summary` still falls back to a one-line summary. The trivial fast-path remains exactly `0 tool calls AND ≤1 round`, and only that path bypasses the LLM summary path entirely and keeps the old 1–2 sentence summary with no meta-reflection.
+   d. Store task result synchronously, then start a daemon thread that runs **execution reflection, backlog-candidate persistence, and task summary** off the reply critical path. LLM-heavy post-task work must not block `send_message` delivery. On explicit `restart_request`, the restart event is queued after the reply events, giving the daemon thread a best-effort window to flush before shutdown; a dropped reflection on hard restart is acceptable (reflections are not durable contract data). For non-trivial tasks, the task-summary prompt explicitly requests a short operational meta-reflection about friction and process improvements; the trivial fast-path (`0 tool calls AND ≤1 round`) keeps a 1–2 sentence summary.
 4. Events flow back to supervisor via event queue
 
 ### Tool capability sets (tool_capabilities.py)
@@ -733,12 +733,17 @@ backward compatibility but is not the runtime authority.
   Includes `review_rebuttal` parameter for disputing reviewer feedback.
 - **`repo_write_commit`**: legacy single-file write+commit (kept for compatibility).
   Also checks advisory freshness, then runs unified review before commit.
-- **Unified pre-commit review** (v3.24.0): triad diff review (3 models against
-  `docs/CHECKLISTS.md`) plus a blocking scope review that runs in parallel on the
-  same staged snapshot. `Blocking` mode keeps critical findings as hard gates;
-  `Advisory` mode surfaces the same findings as warnings and lets the commit
-  continue. Review history carried across blocking iterations. Quorum: at least
-  2 of 3 triad reviewers must succeed in blocking mode. Deterministic preflight
+- **Unified pre-commit review** (v3.24.0; v4.39.0 reviewer count flexible):
+  triad diff review (2-3 models against `docs/CHECKLISTS.md` — the "triad"
+  name is legacy; the actual count is driven by `OUROBOROS_REVIEW_MODELS`
+  via `config.get_review_models()`, which pads single-provider direct
+  fallback to `[main, light, light]` but honours an explicit `"a,b"` user
+  list as 2 reviewers) plus a blocking scope review that runs in parallel
+  on the same staged snapshot. `Blocking` mode keeps critical findings as
+  hard gates; `Advisory` mode surfaces the same findings as warnings and
+  lets the commit continue. Review history carried across blocking
+  iterations. Quorum: at least 2 triad reviewers must succeed in blocking
+  mode (when 2 models are configured that means both must succeed). Deterministic preflight
   (uses `git diff --cached --name-status`;
   renames expand to `D src + A dst`; copies expand to `A dst` only; deleted files excluded
   from companion-file presence checks) catches VERSION/README mismatches; blocks when any
@@ -907,9 +912,19 @@ the constitutional guard is that the file itself must remain non-deletable.
 
 ### Execution reflection (reflection.py)
 
-- Triggered at end of task when tool calls had errors or results contained
-  blocking markers (`REVIEW_BLOCKED`, `TESTS_FAILED`, `COMMIT_BLOCKED`, etc.)
-- Light LLM produces 150-250 word reflection capturing goal, errors, root cause, lessons
+- Triggered at end of task when ANY of: tool calls had errors or results contained
+  blocking markers (`REVIEW_BLOCKED`, `TESTS_FAILED`, `COMMIT_BLOCKED`, etc.),
+  OR `rounds >= NONTRIVIAL_ROUNDS_THRESHOLD` (default 15), OR `cost_usd >= NONTRIVIAL_COST_THRESHOLD`
+  (default $5.0). The two threshold constants live in `ouroboros/reflection.py` and
+  can be changed without touching trigger logic. Non-error triggers use a separate
+  `_REFLECTION_PROMPT_NONTRIVIAL` that asks about friction/detours rather than errors.
+- Light LLM produces 150-250 word reflection. Error-path prompt: goal, errors, root cause,
+  lessons. Non-error (nontrivial) prompt: goal, friction sources, weak assumptions, cheaper/faster approach.
+- Reflection, backlog-candidate persistence, and task summary all run inside the
+  daemon thread started by `_run_post_task_processing_async` so LLM-heavy work
+  stays off the reply critical path. A hard worker restart mid-reflection can
+  drop the in-flight entry; that's an accepted trade — reflections are
+  best-effort process memory, not durable contract data.
 - Reflection prompt now includes structured review evidence (recent reviewed attempts,
   advisory runs, open obligations, live freshness, continuations) so blocked-review lessons
   affect process memory instead of collapsing into a generic failure note.
@@ -917,7 +932,7 @@ the constitutional guard is that the file itself must remain non-deletable.
 - Pattern register: recurring error classes tracked in `memory/knowledge/patterns.md`
   via LLM, loaded into semi-stable context as "Known error patterns"
 - Secondary reflection/pattern prompts use explicit truncation markers when compacted for prompt size; no silent clipping of these helper summaries.
-- Runs synchronously (not in daemon thread) to avoid data loss on shutdown
+- Daemon-thread post-task processing tolerates worker shutdown — queued `restart_request` events fire after `send_message`/`task_metrics`/`task_done` so the daemon thread has a best-effort window to flush.
 
 ### Crash report injection (agent.py)
 
@@ -960,11 +975,23 @@ the constitutional guard is that the file itself must remain non-deletable.
 - **Models**: delegated to `ouroboros.config.get_review_models()` — the same SSOT
   that powers `repo_commit`'s triad, so plan_task and commit review stay in
   lockstep. Empty `OUROBOROS_REVIEW_MODELS` uses the shipped `SETTINGS_DEFAULTS`
-  triad. In OpenAI-only or Anthropic-only direct-provider setups, if the
-  configured triad doesn't match the exclusive provider prefix, the reviewer
-  list is rewritten to `[main_model] * 3` so plan_task never strands on a
-  wrong-provider reviewer list. `plan_task` then pads to exactly 3 reviewers
-  if fewer are configured.
+  triad (3 distinct OpenRouter models, each voting once).
+  **Quorum requirement (v4.39.0)**: at least **2 distinct reviewer models**
+  after parse/normalize — majority-vote needs independent votes, and the same
+  model voting multiple times produces a fake majority. Single-provider
+  direct-routing setups (OpenAI-only or Anthropic-only) are handled
+  automatically by `server_runtime._normalize_direct_review_models`, which
+  seeds `[main, light, light]` (3 commit-triad slots, 2 unique) so both the
+  commit triad and `plan_task` work out of the box. Users who override both
+  `main` and `light` lanes to the same model, or who configure an explicit
+  list with fewer than 2 unique entries or user-authored duplicates
+  (e.g. `"a,a,b"`), get an explicit `plan_task` `ERROR` pointing at
+  `OUROBOROS_REVIEW_MODELS` with a recovery hint. The pad-to-3 mechanism in
+  `_get_review_models` is retained so upstream callers expecting 3 slots
+  still work, but `_run_plan_review_async` immediately dedupes the padded
+  list (`list(dict.fromkeys(...))`) before launching the parallel reviewers
+  so no model casts more than one vote. Aggregate count therefore reflects
+  2–3 unique reviewers depending on configuration.
 - **Inputs**: `plan` (description of what to change), `goal` (problem being solved), and
   optional `files_to_touch` (repo-relative paths whose HEAD content is injected for context).
 - **Context per reviewer**: full repo pack (same as scope review — no char cap, binary/sensitive
@@ -985,8 +1012,43 @@ the constitutional guard is that the file itself must remain non-deletable.
   file/function/symbol when RISK or FAIL; (4) final `AGGREGATE:` line. The `## PROPOSALS`
   section is mandatory — if a reviewer genuinely sees no better approach, they must
   say so explicitly rather than omit the section.
-- **Aggregate signal — majority-vote (v4.36.2)**: coordination across the 3
-  reviewers is now:
+- **Reviewer quorum validation (v4.39.0)**: `_run_plan_review_async` now
+  rejects reviewer-model lists that cannot support sound majority-vote via
+  two **separate branches** running on two **separate signals** (each
+  regression-guarded independently; keep both branches in sync when
+  changing the contract):
+  1. **User-authored duplicate gate** — runs against the raw
+     `OUROBOROS_REVIEW_MODELS` env string. Rejects lists where the same
+     model appears more than once (e.g. `"a,a,b"`) because the duplicated
+     reviewer would cast two votes and corrupt majority-vote coordination.
+     Exception: when an exclusive direct provider is active AND the raw
+     env equals EXACTLY the shape `direct_provider_review_models_fallback`
+     would emit (`[main, light, light]` or legacy `[main]*N` when light
+     collapses to main), the gate skips because that payload is
+     server-generated (written by `apply_settings_to_env` after
+     `_normalize_direct_review_models` seeds the fallback) and is not a
+     user error. Any *other* duplicate list under the same direct provider
+     — e.g. a user-authored `"anthropic::a,anthropic::a,anthropic::b"` —
+     still fails the gate.
+  2. **Minimum-unique gate** — runs against the resolved
+     `ouroboros.config.get_review_models()` output (post-fallback). Rejects
+     lists with `< 2` distinct models so a one-reviewer vote does not
+     masquerade as a quorum; error message includes a single-provider
+     hint when the intent is clearly `[main]*N` fallback, pointing the
+     user at a workable two-distinct-models-from-same-provider example.
+  Both branches fire BEFORE repo-pack assembly so a misconfigured setup
+  fails fast without expensive I/O. Both return a message naming
+  `OUROBOROS_REVIEW_MODELS` and citing the shipped 3-model example.
+  Regression guard: `tests/test_plan_review_quorum.py` (17 tests: 6
+  quorum-contract cases + 1 gate-fires-before-pack ordering + 2
+  no-duplicate-votes-in-actual-run tests + 4 real-env-var integration
+  tests covering the pad-vs-user-intent split + 3 direct-provider-fallback
+  tests — auto-generated `[main, light, light]` shape passes, explicit
+  user-authored duplicates under direct-provider still fail, raw env with
+  fallback payload does not trip the duplicate gate + 1 OpenRouter
+  user-authored duplicates still rejected).
+- **Aggregate signal — majority-vote (v4.36.2, updated v4.39.0)**: coordination
+  across the 2–3 unique reviewers is now:
   - `GREEN` — every reviewer returned a parseable `AGGREGATE: GREEN`.
   - `REVIEW_REQUIRED` — one or more of: (a) exactly one reviewer flagged
     `REVISE_PLAN` (minority dissent); (b) one or more RISK items were raised;
@@ -1103,13 +1165,19 @@ errors surface via the same observability path.
   Stores advisory runs plus a typed reviewed-attempt ledger, bounded blocking-attempt history,
   open obligations, stale markers, repo/tool/task identities, and reviewed-diff fingerprints.
   Advisory runs have: `snapshot_hash`, `commit_message`, `status`
-  (fresh/stale/bypassed/skipped/parse_failure), `items`, `raw_result` (full, no truncation), audit fields,
+  (fresh / stale / bypassed / skipped / parse_failure / preflight_blocked —
+  the last one added v4.39.0 for syntax-preflight short-circuits; it is
+  explicitly NOT considered fresh by `is_fresh` so `repo_commit` cannot
+  proceed until the underlying SyntaxError is fixed and advisory re-runs),
+  `items`, `raw_result` (full, no truncation), audit fields,
   `snapshot_paths` (optional list of paths used to compute the scoped hash — `None` = whole repo),
   **forensic fields** `readiness_warnings` (list of warnings from the readiness gate),
   `prompt_chars` (size of the advisory prompt sent to the SDK), `model_used` (resolved Anthropic
   model name), `duration_sec` (wall-clock time for the SDK call).
-  Commit attempts additionally carry **forensic fields** `triad_models` (list of 3 model IDs
-  configured for the triad review) and `scope_model` (model ID configured for the scope review).
+  Commit attempts additionally carry **forensic fields** `triad_models` (list of configured
+  reviewer model IDs; exact count driven by `OUROBOROS_REVIEW_MODELS`, minimum 2, ships with 3,
+  capped at `_handle_multi_model_review.MAX_MODELS = 10`) and `scope_model` (model ID configured
+  for the scope review).
   These fields record the *configured* models at the time the review was launched, not necessarily
   the models that successfully responded — they are set before the LLM calls complete so they are
   always present even when a review attempt fails mid-flight. All forensic fields survive save/load
@@ -1212,6 +1280,9 @@ errors surface via the same observability path.
 - `_scope_review_history` carries scope findings across retry rounds. Stored as `{snapshot_key: [entries]}` where `snapshot_key` is a SHA-256 prefix of the staged diff — findings from a prior blocked attempt on a different diff are not shown to the reviewer. Cleared to `{}` on a successful commit. Not in safety-critical registry.py (accessed via `getattr`).
 - **Anti-thrashing via obligation injection (v4.35.1)**: `_build_review_history_section` in both `review.py` (triad) and `scope_review.py` accepts an optional `open_obligations` parameter. When non-empty obligations are present, each obligation's `obligation_id`, `item`, and a sanitized 120-char reason excerpt are injected into the history section (obligation text is sanitized by `format_obligation_excerpt` in `review_helpers.py`: newlines collapsed, secrets redacted via `redact_prompt_secrets`). Two mandatory instructions are appended: (1) "The JSON `verdict` field is the authoritative signal — withdrawal notes in `reason` text are silently ignored"; (2) "Do NOT rephrase previous findings under a different item name — use the SAME item name as the prior obligation." The same two rules are also injected into `claude_advisory_review.py::_build_advisory_prompt` at **step 5a unconditionally** (applies on every advisory run regardless of obligation presence) AND reinforced at step 6 sub-items (e) and (f) for the obligation-specific case. The call sites in `_run_unified_review` (triad) and `_build_scope_prompt` (scope) load obligations from durable review state unconditionally — triad no longer gates on a volatile in-memory counter so obligations survive process restarts; scope loads best-effort when `drive_root` is available. Both wrapped in `try/except` (non-fatal hint). Regression guard: `tests/test_review_anti_thrashing.py` (18 tests: 15 unit + 3 integration).
 - **Scope-history label rendering (v4.32.0 epistemic-integrity fix)**: `_build_scope_history_section` in `scope_review.py` renders each retained round via the `_scope_round_label` helper. Label derivation: `blocked=True` → `BLOCKED`; otherwise the entry's `status` field decides — `responded` (or missing/empty) → `PASSED`, any other status (`budget_exceeded`, `omitted`, `parse_failure`, `error`, `empty_response`) → uppercase status as the label. Prevents degraded rounds with empty finding lists from being rendered as `PASSED` purely because `blocked=False`, which would have looked indistinguishable from a clean pass to the next scope reviewer. Regression guard: `tests/test_review_observability.py::test_scope_history_section_*` (6 tests covering the helper and all rendering branches).
+- **Convergence rule injection (v4.38.0 anti-scope-creep)**: `_build_review_history_section` in both `review.py` (triad) and `scope_review.py` append a shared `_CONVERGENCE_RULE_TEXT` (defined in `review_helpers.py` so both reviewers render the identical line) when `len(history) >= 2`, i.e. from the 3rd attempt onward. The rule reads: "CONVERGENCE RULE (attempt 3+): Do NOT raise new critical findings on code that was not changed between this attempt and the previous attempt. New critical findings are allowed only on genuinely new code introduced in this revision. Pre-existing issues in unchanged code are advisory at most." Observed motivation: reviewers were generating fresh critical findings on unchanged code through attempts 4–8, compounding cost and never converging (task `e9f9ad1f` spent ~$38 on a 50-line change this way before being manually halted). **Known limitation**: the trigger is keyed off volatile `ctx._review_history`; if the worker restarts mid-chain, the in-memory count resets and the rule re-engages from the next attempt-3 onward. A durable-state variant keyed off `AdvisoryReviewState.get_blocking_history(repo_key)` was prototyped during v4.39.0 review iterations but reverted: scoping it correctly either required expanding `_build_scope_prompt` beyond DEVELOPMENT.md's 8-parameter limit, or relying on repo-wide `blocking_history` which produced false positives on unrelated commits in the same repo. Restarts mid-retry-chain are rare in production, so the in-memory-only trigger was chosen as the minimum-scope fix matching the original task spec. Regression guard: `tests/test_review_convergence_rule.py` (19 tests: 7 contract cases × 2 reviewer modules + 3 scope-only-retry-path tests + 2 shared-constant invariants — absence on attempts 1–2, presence on 3+, text-stability pin, triad-vs-scope identical-line invariant, scope-only retry on attempt 3 injects rule once, no rule duplication when both triad and scope histories would trigger it).
+- **Advisory syntax preflight (v4.38.0 cheap gate before Claude SDK)**: `_syntax_preflight_staged_py_files` in `claude_advisory_review.py` runs `compile(source, path, "exec", dont_inherit=True)` on each staged `.py` file before the Claude SDK advisory call. On `SyntaxError` it returns `⚠️ PREFLIGHT_BLOCKED: syntax errors: <file>:<line>: <msg>` and skips the SDK call entirely (saving the ~$1.3 spend that otherwise would have been wasted on un-parseable code). Non-agent-repo workflows (target repo missing `ouroboros/__init__.py`) bypass the gate since target Python version may differ from the one we run under. No `__pycache__` is produced (`dont_inherit=True`) and no subprocess is started. Staged deletions and non-`.py` files are tolerated silently. Invocation site: `_run_claude_advisory` immediately after `build_advisory_changed_context` returns `resolved_paths`, before `_build_advisory_prompt`. Regression guard: `tests/test_advisory_preflight.py` (14 tests: non-agent-skip, valid, single-error, multi-error, non-py-ignored, staged-deletion-tolerated, no-__pycache__, empty-list, mixed-valid-broken, plus end-to-end `_handle_advisory_pre_review` routing that surfaces `status="preflight_blocked"` instead of misclassifying as `parse_failure`, plus durable AdvisoryRunRecord persistence for preflight-blocked runs + `is_fresh` exclusion of preflight-blocked, plus 2 SDK-integration tests skipped when `claude_agent_sdk` is not installed).
+- **Per-finding commit-disposition discipline (v4.38.0)**: `prompts/SYSTEM.md` "Commit review" section now asks for an explicit verdict (`fix now` / `defer` via `update_scratchpad` / `disagree` via `review_rebuttal` with a one-sentence reason) for EACH critical and advisory finding in the block message, before the next `repo_commit`. This is **prompt-level discipline, not runtime-enforced** — the commit gate does not parse the agent's response for dispositions; a missing disposition does not by itself re-block the commit. The enforcement lives in the next review round: a skipped finding typically remains unaddressed in code, which the next reviewer catches. Paired with a "dependent multi-file changes stay in one commit" rule (coupled signatures, types, imports, version carriers, feature + VERSION + README + ARCHITECTURE) to stop fragmented commits multiplying review-cycle cost and producing transiently broken intermediate states. Existing grouping-by-root-cause and individual-finding-enumeration paragraphs preserved — new rules are additive, not replacements.
 - History snapshot taken before parallel launch so scope sees consistent state regardless of triad execution order.
 - Applies to both `_repo_commit_push` and `_repo_write_commit` (legacy path).
 - Orchestration logic extracted to `ouroboros/tools/parallel_review.py` (P5 Minimalism — relieves git.py size pressure).

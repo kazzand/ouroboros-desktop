@@ -44,7 +44,13 @@ def test_apply_runtime_provider_defaults_autofills_official_openai_models():
     assert normalized["OUROBOROS_MODEL_CODE"] == "openai::gpt-5.4"
     assert normalized["OUROBOROS_MODEL_LIGHT"] == "openai::gpt-5.4-mini"
     assert normalized["OUROBOROS_MODEL_FALLBACK"] == "openai::gpt-5.4-mini"
-    assert normalized["OUROBOROS_REVIEW_MODELS"] == ",".join(["openai::gpt-5.4"] * 3)
+    # v4.39.0: direct-provider fallback now seeds `[main, light, light]` —
+    # 3 commit-triad slots (preserving the documented 3-reviewer contract)
+    # with 2 unique models (so `plan_task`'s quorum gate passes). Replaces
+    # the old `[main] * 3` fallback that broke `plan_task` first-run.
+    assert normalized["OUROBOROS_REVIEW_MODELS"] == (
+        "openai::gpt-5.4,openai::gpt-5.4-mini,openai::gpt-5.4-mini"
+    )
 
 
 def test_apply_runtime_provider_defaults_migrates_saved_openai_values():
@@ -69,7 +75,10 @@ def test_apply_runtime_provider_defaults_migrates_saved_openai_values():
     assert normalized["OUROBOROS_MODEL_CODE"] == "openai::gpt-5.4"
     assert normalized["OUROBOROS_MODEL_LIGHT"] == "openai::gpt-5.4-mini"
     assert normalized["OUROBOROS_MODEL_FALLBACK"] == "openai::gpt-5.4-mini"
-    assert normalized["OUROBOROS_REVIEW_MODELS"] == ",".join(["openai::gpt-5.4"] * 3)
+    # v4.39.0: `[main, light, light]` fallback — 3 commit-triad slots + 2 unique.
+    assert normalized["OUROBOROS_REVIEW_MODELS"] == (
+        "openai::gpt-5.4,openai::gpt-5.4-mini,openai::gpt-5.4-mini"
+    )
 
 
 def test_apply_runtime_provider_defaults_keeps_explicit_official_openai_review_models():
@@ -111,7 +120,12 @@ def test_apply_runtime_provider_defaults_normalizes_anthropic_only_setup():
     assert normalized["OUROBOROS_MODEL_CODE"] == "anthropic::claude-opus-4-6"
     assert normalized["OUROBOROS_MODEL_LIGHT"] == "anthropic::claude-sonnet-4-6"
     assert normalized["OUROBOROS_MODEL_FALLBACK"] == "anthropic::claude-sonnet-4-6"
-    assert normalized["OUROBOROS_REVIEW_MODELS"] == ",".join(["anthropic::claude-opus-4-6"] * 3)
+    # v4.39.0: `[main, light, light]` — 3 commit-triad slots, 2 unique.
+    assert normalized["OUROBOROS_REVIEW_MODELS"] == (
+        "anthropic::claude-opus-4-6,"
+        "anthropic::claude-sonnet-4-6,"
+        "anthropic::claude-sonnet-4-6"
+    )
 
 
 def test_apply_runtime_provider_defaults_normalizes_anthropic_only_setup_with_shipped_defaults():
@@ -139,7 +153,12 @@ def test_apply_runtime_provider_defaults_normalizes_anthropic_only_setup_with_sh
     assert normalized["OUROBOROS_MODEL_CODE"] == "anthropic::claude-opus-4-7"
     assert normalized["OUROBOROS_MODEL_LIGHT"] == "anthropic::claude-sonnet-4-6"
     assert normalized["OUROBOROS_MODEL_FALLBACK"] == "anthropic::claude-sonnet-4-6"
-    assert normalized["OUROBOROS_REVIEW_MODELS"] == ",".join(["anthropic::claude-opus-4-7"] * 3)
+    # v4.39.0: `[main, light, light]` — 3 commit-triad slots, 2 unique.
+    assert normalized["OUROBOROS_REVIEW_MODELS"] == (
+        "anthropic::claude-opus-4-7,"
+        "anthropic::claude-sonnet-4-6,"
+        "anthropic::claude-sonnet-4-6"
+    )
 
 
 def test_apply_runtime_provider_defaults_skips_non_official_or_custom_configs():

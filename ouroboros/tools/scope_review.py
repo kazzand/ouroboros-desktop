@@ -38,6 +38,7 @@ from ouroboros.tools.review_helpers import (
     format_prompt_code_block,
     _ANTI_THRASHING_RULE_VERDICT,
     _ANTI_THRASHING_RULE_ITEM_NAME,
+    _CONVERGENCE_RULE_TEXT,
 )
 from ouroboros.utils import run_cmd, utc_now_iso, append_jsonl, estimate_tokens
 
@@ -157,6 +158,7 @@ _HISTORY_ADVISORY_LIMIT = 5  # max advisory findings shown per round
 
 
 def _build_review_history_section(history: list, open_obligations: list = None) -> str:
+    """See `ouroboros.tools.review._build_review_history_section` for semantics."""
     if not history and not open_obligations:
         return ""
     lines = ["## Previous triad review rounds\n"]
@@ -203,8 +205,14 @@ def _build_review_history_section(history: list, open_obligations: list = None) 
 
     lines.append("\n**IMPORTANT RULES FOR THIS REVIEW:**")
     lines.append(f"1. {_ANTI_THRASHING_RULE_VERDICT}")
+    rule_idx = 2
     if open_obligations:
-        lines.append(f"2. {_ANTI_THRASHING_RULE_ITEM_NAME}")
+        lines.append(f"{rule_idx}. {_ANTI_THRASHING_RULE_ITEM_NAME}")
+        rule_idx += 1
+    # Convergence rule fires from the 3rd attempt onward — same semantics as
+    # the triad reviewer (`len(history) >= 2`).
+    if history and len(history) >= 2:
+        lines.append(f"{rule_idx}. {_CONVERGENCE_RULE_TEXT}")
     return "\n".join(lines)
 
 
@@ -470,8 +478,28 @@ def _build_scope_prompt(
             _open_obs_for_scope = _rs.get_open_obligations(repo_key=_repo_key)
         except Exception:
             pass  # Non-fatal: best-effort hint
-    history_section = _build_review_history_section(review_history or [], open_obligations=_open_obs_for_scope)
+    history_section = _build_review_history_section(
+        review_history or [], open_obligations=_open_obs_for_scope,
+    )
     scope_history_section = _build_scope_history_section(scope_review_history)
+
+    # Scope-only retry path (v4.39.0): if the same commit has been blocked
+    # repeatedly by scope review while triad passed, `review_history` is
+    # empty but `scope_review_history` grows. The convergence rule is
+    # emitted only from `_build_review_history_section` based on
+    # `review_history`, so scope-only chains would silently skip it.
+    # Inject the rule once here when `scope_review_history >= 2` and
+    # the triad-history section didn't already include it.
+    if (
+        scope_review_history
+        and len(scope_review_history) >= 2
+        and _CONVERGENCE_RULE_TEXT not in history_section
+    ):
+        scope_history_section = (
+            (scope_history_section.rstrip() + "\n\n")
+            if scope_history_section
+            else ""
+        ) + f"**IMPORTANT: {_CONVERGENCE_RULE_TEXT}**\n"
 
     try:
         diff_text = run_cmd(["git", "diff", "--cached"], cwd=repo_dir)

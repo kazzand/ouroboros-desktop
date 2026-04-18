@@ -156,6 +156,41 @@ def resolve_effort(task_type: str) -> str:
     return raw if raw in _VALID_EFFORTS else default
 
 
+def direct_provider_review_models_fallback(provider: str) -> list[str]:
+    """Return the exact review-models list a direct-provider fallback would emit.
+
+    Mirrors `server_runtime._normalize_direct_review_models`. Public so callers
+    (e.g. `plan_task`'s quorum validator) can recognise the exact shape the
+    auto-fallback would have produced and distinguish it from user-authored
+    duplicate lists. Returns `[]` when `provider` is not one of the supported
+    exclusive direct providers or when the main-model lane is not
+    provider-prefixed.
+    """
+    if provider not in ("openai", "anthropic"):
+        return []
+    main_model = str(
+        os.environ.get("OUROBOROS_MODEL", SETTINGS_DEFAULTS["OUROBOROS_MODEL"]) or ""
+    ).strip()
+    main_model = migrate_model_value(provider, main_model)
+    provider_prefix = f"{provider}::"
+    if not main_model.startswith(provider_prefix):
+        return []
+    from ouroboros.provider_models import (
+        OPENAI_DIRECT_DEFAULTS, ANTHROPIC_DIRECT_DEFAULTS,
+    )
+    _defaults = {
+        "openai": OPENAI_DIRECT_DEFAULTS,
+        "anthropic": ANTHROPIC_DIRECT_DEFAULTS,
+    }.get(provider, {})
+    user_light_raw = str(os.environ.get("OUROBOROS_MODEL_LIGHT", "") or "").strip()
+    user_light = migrate_model_value(provider, user_light_raw) if user_light_raw else ""
+    default_light = migrate_model_value(provider, _defaults.get("light", ""))
+    light_slot = user_light if user_light.startswith(provider_prefix) else default_light
+    if light_slot and light_slot != main_model:
+        return [main_model, light_slot, light_slot]
+    return [main_model] * _DIRECT_PROVIDER_REVIEW_RUNS
+
+
 def get_review_models() -> list[str]:
     """Return the configured pre-commit review model list."""
     default_str = SETTINGS_DEFAULTS["OUROBOROS_REVIEW_MODELS"]
@@ -173,7 +208,12 @@ def get_review_models() -> list[str]:
 
     migrated = [migrate_model_value(provider, model) for model in models]
     if not migrated or len(migrated) < 2 or any(not model.startswith(provider_prefix) for model in migrated):
-        return [main_model] * _DIRECT_PROVIDER_REVIEW_RUNS
+        # v4.39.0: mirror `server_runtime._normalize_direct_review_models` —
+        # the quorum-safe fallback shape is `[main, light, light]` (3 slots,
+        # 2 unique) so both commit triad and plan_task work out of the box.
+        # When light is missing or collapses to main (user overrode both
+        # lanes identically), degrade to the legacy `[main] * N` shape.
+        return direct_provider_review_models_fallback(provider)
     return migrated
 
 

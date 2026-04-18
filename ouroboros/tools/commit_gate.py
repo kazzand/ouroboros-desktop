@@ -415,6 +415,23 @@ def _check_advisory_freshness(ctx: ToolContext, commit_message: str,
             "Or bypass: repo_commit(commit_message='...', skip_advisory_pre_review=True) (audited)."
         )
 
+    # Explicit preflight_blocked branch (v4.39.0): advisory SDK was skipped
+    # because a staged `.py` file has a SyntaxError. The raw_result contains
+    # the concrete file:line:msg; surface that instead of the generic stale
+    # message so the agent sees exactly what to fix.
+    if matching_run and matching_run.status == "preflight_blocked":
+        preflight_detail = (matching_run.raw_result or "").strip()
+        # The sentinel starts with "⚠️ PREFLIGHT_BLOCKED: syntax errors:" and
+        # is already formatted for humans; pass through verbatim.
+        return (
+            f"⚠️ ADVISORY_PRE_REVIEW_REQUIRED: Last advisory run for this snapshot "
+            f"was blocked by the syntax preflight (hash={snapshot_hash[:12]}, "
+            f"ts={matching_run.ts}). The Claude SDK advisory was skipped because a "
+            f"staged `.py` file has a SyntaxError.\n\n"
+            f"{preflight_detail}\n\n"
+            "Re-run after fixing: advisory_pre_review(commit_message='...')"
+        )
+
     if latest and latest.status == "stale" and state.last_stale_from_edit_ts:
         stale_reason = (f"Advisory invalidated by worktree edit at "
                         f"{state.last_stale_from_edit_ts}. Re-run advisory after all edits.")  # full ts

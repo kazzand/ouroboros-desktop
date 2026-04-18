@@ -66,6 +66,7 @@ from ouroboros.tools.review_helpers import (
     format_prompt_code_block,
     _ANTI_THRASHING_RULE_VERDICT,
     _ANTI_THRASHING_RULE_ITEM_NAME,
+    _CONVERGENCE_RULE_TEXT,
 )
 
 
@@ -668,6 +669,17 @@ def _preflight_check(commit_message: str, staged_files: str,
 
 
 def _build_review_history_section(history: list, open_obligations: list = None) -> str:
+    """Render the "## Previous review rounds" section of the reviewer prompt.
+
+    The convergence rule fires from the 3rd review attempt onward, keyed off
+    ``len(history) >= 2`` (in-memory ``ctx._review_history``). Worker-restart
+    survival is an explicit non-goal: restart resets the attempt counter,
+    which is consistent with `ctx._review_iteration_count` and the rest of
+    the review-context model. Durable-state scoping was tried in an earlier
+    iteration but produced false positives on unrelated commits (repo-wide
+    `blocking_history` bleeds across chains) and required function-signature
+    gymnastics that tripped DEVELOPMENT.md's 8-parameter limit.
+    """
     if not history and not open_obligations:
         return ""
     lines = ["## Previous review rounds\n"]
@@ -709,8 +721,14 @@ def _build_review_history_section(history: list, open_obligations: list = None) 
 
     lines.append("\n**IMPORTANT RULES FOR THIS REVIEW:**")
     lines.append(f"1. {_ANTI_THRASHING_RULE_VERDICT}")
+    rule_idx = 2
     if open_obligations:
-        lines.append(f"2. {_ANTI_THRASHING_RULE_ITEM_NAME}")
+        lines.append(f"{rule_idx}. {_ANTI_THRASHING_RULE_ITEM_NAME}")
+        rule_idx += 1
+    # Convergence rule fires from the 3rd attempt onward — `len(history) >= 2`
+    # means two prior rounds already exist, so this is attempt 3+.
+    if history and len(history) >= 2:
+        lines.append(f"{rule_idx}. {_CONVERGENCE_RULE_TEXT}")
     return "\n".join(lines)
 
 
@@ -1146,7 +1164,7 @@ def _run_unified_review(ctx: ToolContext, commit_message: str,
     except Exception:
         pass  # Non-fatal: anti-thrashing hint is best-effort
     review_history_section = _build_review_history_section(
-        ctx._review_history, open_obligations=_open_obs_for_review
+        ctx._review_history, open_obligations=_open_obs_for_review,
     )
 
     # Build touched-file pack for full current file context

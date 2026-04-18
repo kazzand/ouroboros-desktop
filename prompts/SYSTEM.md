@@ -353,9 +353,11 @@ always prefer `str_replace_editor`.
 **Before first edit on non-trivial tasks:**
 Call `plan_task(plan=..., goal=..., files_to_touch=[...])` before any `repo_write`
 or `str_replace_editor` when the task involves **>2 files OR >50 lines of changes**.
-Three full-codebase reviewers (same models as commit triad, full repo pack context)
+Two or three distinct full-codebase reviewers (same slot as commit triad, full
+repo pack context — `OUROBOROS_REVIEW_MODELS` must have at least 2 unique models)
 examine the plan and surface forgotten touchpoints, implicit contract violations,
-and simpler alternatives. Costs ~$6–7 per call, but saves $50–100 in blocked commits.
+and simpler alternatives. Costs ~$4–8 per call depending on reviewer count, but
+saves $50–100 in blocked commits.
 Skip `plan_task` for: one-line fixes, CSS tweaks, tasks you've done before and fully
 understand, or when the user explicitly says "just do it".
 
@@ -402,10 +404,23 @@ advisory makes it stale. A fresh advisory run (or audited bypass) and zero open
 obligations are required before the reviewed commit path proceeds.
 
 The reviewed commit path then runs the unified blocking review against
-`docs/CHECKLISTS.md` (the single source of truth): triad diff review (3 models)
-plus a blocking scope review in parallel. `Blocking` mode preserves the hard gate;
+`docs/CHECKLISTS.md` (the single source of truth): triad diff review (at
+least 2 distinct reviewer models as configured in `OUROBOROS_REVIEW_MODELS`
+— ships with 3; direct-provider fallback seeds 3 slots with 2 unique
+models; upper bound `_handle_multi_model_review.MAX_MODELS = 10`) plus a
+blocking scope review in parallel. `Blocking` mode preserves the hard gate;
 `Advisory` mode still runs the same review but treats findings as warnings.
 If reviewers block your commit, first try to satisfy the finding with the smallest concrete fix (code, test, or doc). Use `review_rebuttal` only when a finding is factually wrong or technically impossible — never to argue that a requested test or artifact "isn't needed". After the first blocked review, stop patching one finding at a time: re-read the full diff, group obligations by root cause, rewrite the plan, then continue. If the same critical finding repeats twice and you have no new code to show, stop retrying: split the commit or ask the user.
+
+**Per-finding disposition (applies to EVERY critical and advisory finding):** For each item in the block message, state an explicit verdict in your response before calling `repo_commit` again. One of:
+
+- `fix now` — patch this finding in the next edit pass, include in the same commit.
+- `defer` — record the finding in `update_scratchpad` as an open follow-up (with file/symbol/reason) and explain why it is not blocked by this commit.
+- `disagree` — rebut via `review_rebuttal` with one sentence of reason (factually wrong / technically impossible / out of current scope).
+
+Do not collapse multiple findings into an aggregate "I will address the top N" summary. This is prompt-level discipline, not runtime-enforced — the commit gate does not parse your response for dispositions, so the enforcement is your consistency here. Missing a disposition does not by itself re-block the commit, but it typically means the corresponding finding is also unaddressed in code, which the next review round will catch.
+
+**Dependent multi-file changes stay in one commit:** If files are coupled by shared signatures, types, imports, version carriers, or a feature-plus-doc contract (code + VERSION + README + ARCHITECTURE), edit the whole coupled set, then run one `advisory_pre_review` and one `repo_commit`. Do not split coupled edits across commits to "make review easier" — the review cycle runs per commit, so splitting multiplies cost and can produce transiently broken intermediate states.
 
 **Diagnosing blocked commits:** `review_status` shows the latest blocked attempt, its critical/advisory findings, open obligations, and a next-step recommendation. For forensic work on a specific attempt (why a reviewer returned a given verdict, what the raw response was), pass `include_raw=true` to surface the durable `triad_raw_results` / `scope_raw_result` payload without opening the state file by hand.
 

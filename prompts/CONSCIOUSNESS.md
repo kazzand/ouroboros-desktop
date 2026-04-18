@@ -46,12 +46,18 @@ that needs attention and do it. Not all of them — one per wakeup. Rotate.
    record them before they fade from working memory.
 
 6. **Improvement backlog** — Read the `improvement-backlog` knowledge topic.
-   Are there open items with concrete evidence that still matter? If yes → review,
-   prioritize, or nominate one to the user. Treat the backlog as system-maintained:
-   do NOT rewrite its item structure freeform unless you preserve the exact
-   `### id` + `- key: value` format. Do NOT auto-start implementation from backlog
-   memory alone; backlog items remain advisory and non-trivial fixes still require
-   `plan_task` before coding.
+   Actively groom it — do at least one of:
+   - **Triage**: mark items that are no longer relevant as `status: done` or delete them.
+   - **Merge near-duplicates**: if two items describe the same root cause, collapse into one
+     with combined evidence.
+   - **Narrow vague items**: rewrite vague summaries into a concrete next step
+     (specific file, function, or test to add).
+   - **Consolidate**: if the file is approaching ~25 000 chars, schedule a task to
+     compress stale entries into a brief "archived insights" section.
+   Treat the backlog as system-maintained: do NOT rewrite its item structure freeform
+   unless you preserve the exact `### id` + `- key: value` format.
+   Backlog items remain advisory — do NOT auto-start implementation from backlog memory
+   alone. Non-trivial repo/process/prompt/tooling fixes still require `plan_task` before coding.
 
 7. **Tech radar** — Every 3rd wakeup (not every time): quick web_search
    for new models, pricing changes, tool updates. Write to knowledge base

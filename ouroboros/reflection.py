@@ -1,7 +1,8 @@
 """
 Ouroboros — Execution Reflection (Process Memory).
 
-Generates brief LLM summaries of task execution when errors occurred.
+Generates brief LLM summaries of task execution when errors occurred OR
+when the task was non-trivial (high round count or high cost).
 Stored in task_reflections.jsonl and loaded into the next task's context,
 giving Ouroboros visibility into its own process across task boundaries.
 
@@ -32,6 +33,11 @@ def _truncate_with_notice(text: Any, limit: int) -> str:
 
 log = logging.getLogger(__name__)
 
+# Thresholds for triggering reflection on non-trivial (but error-free) tasks.
+# Tune by changing these constants — no logic edits needed.
+NONTRIVIAL_ROUNDS_THRESHOLD: int = 15
+NONTRIVIAL_COST_THRESHOLD: float = 5.0
+
 _ERROR_MARKERS = frozenset({
     "REVIEW_BLOCKED",
     "TESTS_FAILED",
@@ -49,9 +55,11 @@ _ERROR_MARKERS = frozenset({
 
 REFLECTIONS_FILENAME = "task_reflections.jsonl"
 
-_REFLECTION_PROMPT = """\
+# ── Prompt variants ──────────────────────────────────────────────────────────
+
+_REFLECTION_PROMPT_ERROR = """\
 You are reviewing a completed task execution trace for Ouroboros, a self-modifying AI agent.
-The task had errors. Write a concise 150-250 word reflection covering:
+The task had errors or blocking events. Write a concise 150-250 word reflection covering:
 
 1. What was the goal?
 2. What specific errors/blocks occurred?
@@ -61,7 +69,24 @@ The task had errors. Write a concise 150-250 word reflection covering:
 Be concrete — cite specific file names, tool names, error messages. No platitudes.
 If structured review evidence exists, incorporate the critical/advisory findings and
 open obligations into the root-cause analysis. Mention them individually with their
-severity and item/tag identity rather than collapsing them into a generic "review failed".
+severity and item/tag identity rather than collapsing them into a generic "review failed".\
+"""
+
+_REFLECTION_PROMPT_NONTRIVIAL = """\
+You are reviewing a completed task execution trace for Ouroboros, a self-modifying AI agent.
+The task was non-trivial (high round count or high cost) but completed without hard errors.
+Write a concise 150-250 word reflection covering:
+
+1. What was the goal?
+2. What took the most rounds/cost? Where was the friction?
+3. Were there weak assumptions, unnecessary detours, or suboptimal tool choices?
+4. What would make a similar task cheaper or faster next time?
+
+Be concrete — cite specific file names, tool names, decision points. No platitudes.\
+"""
+
+# Shared tail appended to both variants — contains the {format} fields.
+_REFLECTION_PROMPT_TAIL = """
 
 Then, if there is at least one concrete deferred improvement worth tracking, append a final line:
 BACKLOG_CANDIDATES_JSON: [...]
@@ -100,15 +125,42 @@ Rules for candidates:
 Write the reflection now. Plain text, no markdown headers except the exact final BACKLOG_CANDIDATES_JSON line.
 """
 
+# Convenience composites used by generate_reflection().
+_REFLECTION_PROMPT_ERROR_FULL = _REFLECTION_PROMPT_ERROR + _REFLECTION_PROMPT_TAIL
+_REFLECTION_PROMPT_NONTRIVIAL_FULL = _REFLECTION_PROMPT_NONTRIVIAL + _REFLECTION_PROMPT_TAIL
 
-def should_generate_reflection(llm_trace: Dict[str, Any]) -> bool:
+# Legacy alias — kept so any external caller that imports the old name still works.
+_REFLECTION_PROMPT = _REFLECTION_PROMPT_ERROR_FULL
+
+
+# ── Trigger logic ────────────────────────────────────────────────────────────
+
+def should_generate_reflection(
+    llm_trace: Dict[str, Any],
+    *,
+    rounds: int = 0,
+    cost_usd: float = 0.0,
+) -> bool:
     """Check if a task's execution warrants an automatic reflection.
 
-    Returns True when tool calls had errors or results contained
-    known blocking markers (REVIEW_BLOCKED, TESTS_FAILED, etc.).
-    """
-    tool_calls = llm_trace.get("tool_calls") or []
+    Returns True when ANY of the following apply:
 
+    * Tool calls had errors or non-OK structured status.
+    * Results contained known blocking markers (REVIEW_BLOCKED, TESTS_FAILED, …).
+    * ``rounds`` >= NONTRIVIAL_ROUNDS_THRESHOLD — many-round tasks deserve a look.
+    * ``cost_usd`` >= NONTRIVIAL_COST_THRESHOLD — expensive tasks deserve a look.
+
+    The threshold triggers fire even for clean (error-free) tasks so that
+    systemic process friction is captured, not just hard failures.
+    """
+    # Threshold triggers — fast path, no iteration needed.
+    if rounds >= NONTRIVIAL_ROUNDS_THRESHOLD:
+        return True
+    if cost_usd >= NONTRIVIAL_COST_THRESHOLD:
+        return True
+
+    # Error / marker triggers — original logic unchanged.
+    tool_calls = llm_trace.get("tool_calls") or []
     for tc in tool_calls:
         if not isinstance(tc, dict):
             continue
@@ -122,6 +174,23 @@ def should_generate_reflection(llm_trace: Dict[str, Any]) -> bool:
 
     return False
 
+
+def _has_error_evidence(llm_trace: Dict[str, Any]) -> bool:
+    """Return True when the trace contains tool errors or blocking markers."""
+    tool_calls = llm_trace.get("tool_calls") or []
+    for tc in tool_calls:
+        if not isinstance(tc, dict):
+            continue
+        if tc.get("is_error") or str(tc.get("status") or "").strip().lower() not in ("", "ok"):
+            return True
+        result_str = str(tc.get("result", ""))
+        for marker in _ERROR_MARKERS:
+            if marker in result_str:
+                return True
+    return False
+
+
+# ── Error detail helpers ─────────────────────────────────────────────────────
 
 def _collect_error_details(llm_trace: Dict[str, Any], cap: int = 3000) -> str:
     """Extract error tool results from the trace, up to *cap* chars."""
@@ -170,6 +239,8 @@ def _detect_markers(llm_trace: Dict[str, Any]) -> List[str]:
     return sorted(found)
 
 
+# ── Core reflection generator ────────────────────────────────────────────────
+
 def generate_reflection(
     task: Dict[str, Any],
     llm_trace: Dict[str, Any],
@@ -179,6 +250,10 @@ def generate_reflection(
     review_evidence: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Call the light LLM to produce an execution reflection.
+
+    Selects the error-focused prompt when the trace contains hard errors or
+    blocking markers; otherwise uses the non-trivial-task prompt (triggered
+    by rounds/cost threshold).
 
     Returns a structured dict ready for appending to the reflections JSONL.
     """
@@ -200,7 +275,13 @@ def generate_reflection(
     except Exception:
         review_evidence_text = "(review evidence unavailable)"
 
-    prompt = _REFLECTION_PROMPT.format(
+    # Choose prompt based on whether the trace has hard errors.
+    if _has_error_evidence(llm_trace) or markers:
+        prompt_template = _REFLECTION_PROMPT_ERROR_FULL
+    else:
+        prompt_template = _REFLECTION_PROMPT_NONTRIVIAL_FULL
+
+    prompt = prompt_template.format(
         goal=goal or "(no goal text)",
         trace_summary=_truncate_with_notice(trace_summary, 2000),
         error_details=error_details,
@@ -255,7 +336,8 @@ def generate_reflection(
             reflection_text = raw_reflection_text.strip()
             backlog_candidates = []
 
-        # Track cost — reflection runs in daemon thread path, so update directly.
+        # Track cost directly (bypass ctx.pending_events) — reflection runs
+        # outside the main tool-event loop and has no pending_events reference.
         if refl_usage:
             try:
                 from supervisor.state import update_budget_from_usage
@@ -298,6 +380,8 @@ def append_reflection(drive_root: pathlib.Path, entry: Dict[str, Any]) -> None:
         except Exception:
             log.debug("Pattern register update failed (non-critical)", exc_info=True)
 
+
+# ── Pattern register ─────────────────────────────────────────────────────────
 
 _PATTERNS_PROMPT = """\
 You maintain a Pattern Register for Ouroboros, a self-modifying AI agent.
@@ -365,7 +449,8 @@ def _update_patterns(drive_root: pathlib.Path, entry: Dict[str, Any]) -> None:
         reasoning_effort="low",
         max_tokens=4096,
     )
-    # Track cost — patterns update runs in daemon thread path, so update directly.
+    # Track cost directly (bypass ctx.pending_events) — pattern update runs
+    # outside the main tool-event loop and has no pending_events reference.
     if patterns_usage:
         try:
             from supervisor.state import update_budget_from_usage

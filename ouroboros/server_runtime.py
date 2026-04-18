@@ -86,7 +86,43 @@ def _normalize_direct_review_models(settings: dict, provider: str) -> str:
 
     has_foreign_models = any(not model.startswith(provider_prefix) for model in migrated_models)
     if not migrated_models or len(migrated_models) < 2 or has_foreign_models:
-        return _serialize_model_list([main_model] * _DIRECT_PROVIDER_REVIEW_RUNS)
+        # v4.39.0: seed a quorum-safe direct-provider fallback that still
+        # fills all three commit-triad slots: `[main, light, light]`
+        # (3 entries, 2 unique models).
+        #
+        # - Commit triad in `_run_unified_review` sees 3 reviewers — unchanged
+        #   from the pre-v4.39.0 contract documented in DEVELOPMENT.md and
+        #   ARCHITECTURE.md (`three models review the staged diff`).
+        # - plan_task in `_run_plan_review_async` dedupes to 2 unique reviewers
+        #   and passes the v4.39.0 quorum gate.
+        # - The duplicated `light` slot is a minor redundancy in the commit
+        #   triad's third vote — majority-vote already tolerates it, and the
+        #   old fallback `[main] * 3` had even more duplication.
+        #
+        # `light_slot` is derived from the user's actual
+        # `OUROBOROS_MODEL_LIGHT` first (so a custom lane like
+        # `openai::o4-mini` is honoured); only when that setting is empty
+        # or points at a foreign-provider model do we fall back to the
+        # shipped `_DIRECT_PROVIDER_AUTO_DEFAULTS` light for this provider.
+        # If the resolved light still collapses to the same model as main
+        # (user explicitly overrode both lanes identically), degrade to the
+        # legacy `[main] * _DIRECT_PROVIDER_REVIEW_RUNS` shape — commit
+        # triad still works, `plan_task` emits its quorum-error hint.
+        user_light_raw = _setting_text(settings, "OUROBOROS_MODEL_LIGHT")
+        user_light = migrate_model_value(provider, user_light_raw) if user_light_raw else ""
+        provider_defaults = _DIRECT_PROVIDER_AUTO_DEFAULTS.get(provider, {})
+        default_light = migrate_model_value(
+            provider, provider_defaults.get("OUROBOROS_MODEL_LIGHT", "")
+        )
+        if user_light and user_light.startswith(provider_prefix):
+            light_slot = user_light
+        else:
+            light_slot = default_light
+        if light_slot and light_slot != main_model:
+            fallback = [main_model, light_slot, light_slot]
+        else:
+            fallback = [main_model] * _DIRECT_PROVIDER_REVIEW_RUNS
+        return _serialize_model_list(fallback)
     return _serialize_model_list(migrated_models)
 
 

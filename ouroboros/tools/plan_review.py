@@ -1,8 +1,11 @@
 """plan_review.py — Pre-implementation design review tool.
 
-Runs 3 parallel full-codebase reviews of a proposed implementation plan
-BEFORE any code is written. Each reviewer sees the entire repository (same as
-scope review) plus the plan description and the files to be touched.
+Runs 2-3 parallel full-codebase reviews of a proposed implementation plan
+BEFORE any code is written (2 when `OUROBOROS_REVIEW_MODELS` has exactly two
+distinct models, 3 when it has three distinct models; single-model and
+duplicate configurations are rejected by the v4.39.0 quorum gate). Each
+reviewer sees the entire repository (same as scope review) plus the plan
+description and the files to be touched.
 
 Purpose: surface forgotten touchpoints, implicit contract violations, and
 simpler alternatives *before* the first edit — preventing the iterative
@@ -63,15 +66,18 @@ def get_tools():
             schema={
                 "name": "plan_task",
                 "description": (
-                    "Run a pre-implementation design review of a proposed plan using 3 parallel "
-                    "full-codebase reviewers. Call this BEFORE writing any code for non-trivial tasks "
-                    "(>2 files or >50 lines of changes). Each reviewer sees the entire repository "
-                    "plus your plan description and the files you plan to touch. They will identify "
-                    "forgotten touchpoints, implicit contract violations, simpler alternatives, and "
-                    "Bible/architecture compliance issues — before you've written a single line. "
-                    "Uses the 3 models configured in OUROBOROS_REVIEW_MODELS (same as commit triad). "
-                    "Returns structured feedback from all 3 reviewers with detailed explanations and "
-                    "alternative approaches. Non-blocking: you decide what to do with the feedback."
+                    "Run a pre-implementation design review of a proposed plan using 2–3 distinct "
+                    "parallel full-codebase reviewers. Call this BEFORE writing any code for "
+                    "non-trivial tasks (>2 files or >50 lines of changes). Each reviewer sees the "
+                    "entire repository plus your plan description and the files you plan to touch. "
+                    "They will identify forgotten touchpoints, implicit contract violations, simpler "
+                    "alternatives, and Bible/architecture compliance issues — before you've written "
+                    "a single line. Uses the distinct models configured in OUROBOROS_REVIEW_MODELS "
+                    "(same slot as the commit triad). Requires at least 2 unique models for "
+                    "majority-vote coordination; returns ERROR with a settings hint on single-model "
+                    "or duplicate-model configurations. Returns structured feedback from every "
+                    "unique reviewer with detailed explanations and alternative approaches. "
+                    "Non-blocking: you decide what to do with the feedback."
                 ),
                 "parameters": {
                     "type": "object",
@@ -153,10 +159,97 @@ async def _run_plan_review_async(
 ) -> str:
     repo_dir = ctx.repo_dir
 
-    # --- Load review models (same 3 as commit triad) ---
-    models = _get_review_models()
-    if len(models) < 1:
-        return "ERROR: No review models configured. Set OUROBOROS_REVIEW_MODELS in settings."
+    # --- Quorum validation ---
+    # Two separate checks, each on its own signal:
+    #
+    # (1) User-authored duplicates are rejected against the RAW env var so a
+    #     user who wrote `"a,a,b"` gets the hard error the task spec asks
+    #     for. We must NOT validate duplicates against
+    #     `config.get_review_models()` output because direct-provider
+    #     fallback intentionally emits `[main, light, light]` (3 slots,
+    #     2 unique) to satisfy the commit triad — those duplicates are
+    #     server-generated, not user-authored.
+    #
+    # (2) Minimum-unique count runs on `config.get_review_models()` output
+    #     (post-fallback) so single-provider setups that resolve to 2
+    #     unique models after fallback still pass.
+    import os as _os
+    from ouroboros import config as _cfg
+
+    raw_env = _os.environ.get("OUROBOROS_REVIEW_MODELS", "") or ""
+    raw_user_list = [m.strip() for m in raw_env.split(",") if m.strip()]
+    # The "no user-authored duplicates" rule must NOT fire when the raw env
+    # contains exactly the auto-generated direct-provider fallback shape
+    # (`[main, light, light]` or legacy `[main] * N`) — that payload is
+    # persisted into `OUROBOROS_REVIEW_MODELS` by `apply_settings_to_env`
+    # after `_normalize_direct_review_models` seeds the fallback, so the raw
+    # env string looks like user-authored duplicates even though the agent
+    # never wrote it. We only skip the check for THAT exact shape — any
+    # other duplicate list (e.g. explicit user-authored `a,a,b` on a
+    # direct-provider setup) must still fail the gate so majority-vote
+    # coordination stays sound.
+    exclusive_direct = _cfg._exclusive_direct_remote_provider_env()
+    fallback_shape: list[str] = (
+        _cfg.direct_provider_review_models_fallback(exclusive_direct)
+        if exclusive_direct else []
+    )
+    is_auto_generated_fallback = bool(
+        fallback_shape and raw_user_list == fallback_shape
+    )
+    if (
+        raw_user_list
+        and not is_auto_generated_fallback
+        and len(set(raw_user_list)) != len(raw_user_list)
+    ):
+        duplicates = sorted({
+            m for m in raw_user_list if raw_user_list.count(m) > 1
+        })
+        return (
+            "ERROR: plan_task has duplicate reviewer models in "
+            "OUROBOROS_REVIEW_MODELS — majority-vote is unsound when the "
+            f"same model votes more than once. Duplicates: {duplicates}. "
+            "Fix the setting so each model appears exactly once."
+        )
+
+    resolved_models = list(_cfg.get_review_models() or [])
+    if not resolved_models:
+        return (
+            "ERROR: No review models configured. Set OUROBOROS_REVIEW_MODELS "
+            "in settings."
+        )
+
+    unique_resolved = list(dict.fromkeys(resolved_models))
+    # Majority-vote coordination requires >=2 distinct reviewers.
+    if len(unique_resolved) < 2:
+        single_provider_hint = ""
+        if (
+            resolved_models
+            and all(m == resolved_models[0] for m in resolved_models)
+            and len(resolved_models) >= 2
+        ):
+            single_provider_hint = (
+                " If you are on a single-provider setup (OpenAI-only or "
+                "Anthropic-only direct routing), configure distinct "
+                "values for OUROBOROS_MODEL and OUROBOROS_MODEL_LIGHT so "
+                "the direct-provider fallback seeds `[main, light, light]`, "
+                "or add a second model explicitly via OUROBOROS_REVIEW_MODELS."
+            )
+        return (
+            "ERROR: plan_task requires at least 2 unique reviewer models for "
+            f"majority-vote coordination. Got {len(unique_resolved)} unique "
+            f"model(s) from {resolved_models!r}. Fix OUROBOROS_REVIEW_MODELS "
+            "in settings (example: 'openai/gpt-5.4,"
+            "google/gemini-3.1-pro-preview,anthropic/claude-opus-4.7')."
+            + single_provider_hint
+        )
+
+    # Quorum passed — now run on the UNIQUE reviewer set, not the padded list
+    # from `_get_review_models`. Padding would let the same model cast more
+    # than one vote (e.g. `[a, b, b]` from `[a, b]` env or `[main, light, light]`
+    # from direct-provider fallback) and corrupt majority-vote coordination.
+    # Running 2 unique reviewers is stricter and produces a sound majority;
+    # the docs promise "2-3 unique reviewers".
+    models = list(dict.fromkeys(_get_review_models()))
 
     # --- Build prompt components ---
     checklist = _load_plan_checklist()
@@ -535,14 +628,16 @@ def _build_system_prompt(
         "  `docs/ARCHITECTURE.md` updates — the plan has no code yet. Focus on design correctness",
         "  and elegance, not commit hygiene. Commit-gate reviewers handle that later.",
         "",
-        "## Aggregate level — majority-vote coordination across 3 reviewers",
+        "## Aggregate level — majority-vote coordination across 2-3 distinct reviewers",
         "",
         "- `AGGREGATE: REVISE_PLAN` should be used ONLY when you are confident the plan has a",
         "  concrete structural problem that warrants a redesign. The coordinator escalates to final",
-        "  `REVISE_PLAN` only when at least 2 of 3 reviewers independently flag it — a lone dissenting",
-        "  `REVISE_PLAN` will surface as `REVIEW_REQUIRED` with your dissent noted. This is deliberate:",
-        "  `plan_review` is a coordinative signal, not a block. Use `REVIEW_REQUIRED` for real but",
-        "  non-structural risks; reserve `REVISE_PLAN` for defects worth blocking the plan on.",
+        "  `REVISE_PLAN` only when at least 2 distinct reviewers independently flag it — a lone",
+        "  dissenting `REVISE_PLAN` will surface as `REVIEW_REQUIRED` with your dissent noted",
+        "  (with 2-reviewer setups, \"≥2 reviewers\" means both reviewers agreed). This is",
+        "  deliberate: `plan_review` is a coordinative signal, not a block. Use `REVIEW_REQUIRED`",
+        "  for real but non-structural risks; reserve `REVISE_PLAN` for defects worth blocking the",
+        "  plan on.",
         "",
         "---",
         "",
