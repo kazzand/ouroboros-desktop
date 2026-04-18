@@ -75,9 +75,12 @@ Run this walkthrough honestly before every `advisory_pre_review` call for a
 finish ALL edits → Pre-Commit Self-Check → advisory_pre_review → repo_commit
 ```
 
-This section is **not loaded by reviewers** — it exists here so the agent's
+This section is **not injected as a named checklist section by the review prompts** — it exists here so the agent's
 pre-flight checklist lives in the same single source of truth as the review
-checklists it guards.
+checklists it guards. When `docs/CHECKLISTS.md` itself appears in a commit's
+touched files, reviewers will see it as part of the `Current touched files`
+pack, but it is not loaded as a standalone checklist the way the Repo Commit
+or Intent/Scope checklists are.
 
 | # | Check | How |
 |---|-------|-----|
@@ -87,10 +90,25 @@ checklists it guards.
 | 4 | Shared log / memory / replay format changed? | Grep every reader and writer first. JSONL logs (`events.jsonl`, `task_reflections.jsonl`, replay indexes), durable state files (`advisory_review.json`, `review_continuations/*.json`), and canonical-vs-derived memory pairs (patterns-register journal / `patterns.md`, improvement-backlog items) must stay coherent across every consumer. |
 | 5 | New validation guard, input filter, or edge-case check? | Before the first commit attempt, name three concrete ways it could break: wrong bounds, legitimate inputs it silently blocks, platform-specific edge cases. If you cannot name three, think longer. One honest minute here is cheaper than one reviewer round. |
 | 6 | New tool added? | `get_tools()` exports it, `prompts/SYSTEM.md` tool tables mention it, the handler signature matches the declared schema, and (if it mutates repo state) it is routed through the reviewed commit path rather than ad-hoc `run_shell`. |
+| 7 | Tests green before first `repo_commit`? | Run `pytest -x` on the narrowest relevant target(s) you can name before the first `advisory_pre_review` / `repo_commit` attempt. If a new `.py` file is added under `ouroboros/` or `supervisor/`, **always** run `pytest tests/test_smoke.py` first — module-size and function-count violations are cheap to catch locally and expensive in review. A red test suite before the first commit attempt has caused repeated $2-5 blocked-review cycles. |
+| 8 | Adding a `README.md` version row? | BIBLE.md P7 hard cap: ≤ 2 major, ≤ 5 minor, ≤ 5 patch visible entries. Categories are mutually exclusive: major = `X.0.0` (minor=0, patch=0); minor = `X.Y.0` (patch=0, Y≠0); patch = all other `X.Y.Z` (Z≠0). Count existing rows in the category you are adding to. Easy check: `run_shell(["python", "-c", "import sys; from ouroboros.tools.release_sync import check_history_limit; warns=check_history_limit(open('README.md').read()); print(warns or 'OK')"])` — if it prints warnings, trim the oldest row in the over-limit category **in the same edit** before committing. |
 
 Rule: read before write. Never reconstruct `VERSION`, `pyproject.toml`
 `version`, or the README badge from memory — one stale reconstruction creates
 a `self_consistency` FAIL that an entire advisory cycle is then spent on.
+
+**After a blocked reviewed commit (`repo_commit` / `repo_write_commit`) — mandatory regrouping before the next attempt:**
+When a reviewed commit returns critical findings, the reflex is to patch the single
+flagged finding and retry. That pattern reliably produces 5-10 blocked rounds.
+The correct procedure before **every** retry:
+1. List all open obligations (`review_status` tool or the Review Continuity context section).
+2. Group them by root cause — one underlying problem often generates 2-4 separately-named obligations from reviewer rephrasing.
+3. Write a short plan in a progress message: one paragraph naming each root-cause group and the single code/doc change that resolves it.
+4. Only then open any file and edit.
+
+This step takes 2-3 minutes and has saved $20-50 in blocked-review cycles in practice.
+The rule is already nominally in `prompts/SYSTEM.md` and `review.py::_build_critical_block_message`,
+but without it appearing here as a procedural step it stays theoretical rather than reflexive.
 
 ---
 

@@ -384,9 +384,12 @@ If health invariants show "RESCUE SNAPSHOT AVAILABLE", inspect the snapshot with
 `data_read` and decide whether to re-apply `changes.diff` via `run_shell`.
 
 **Pre-advisory sanity check (run before calling `advisory_pre_review`):**
-See `docs/CHECKLISTS.md::Pre-Commit Self-Check` — a 6-row table with a "How"
+See `docs/CHECKLISTS.md::Pre-Commit Self-Check` — an 8-row table with a "How"
 column (version sync, behavior→VERSION bump, scenario-level test coverage,
-shared-format grep, guard/filter three-breakage-rule, new tool registration).
+shared-format grep, guard/filter three-breakage-rule, new tool registration,
+green tests before first commit, changelog P7-limit). Also contains the
+"After a blocked reviewed commit" mandatory-regrouping procedure
+(applies to both `repo_commit` and `repo_write_commit`).
 Walk through it honestly each time, then call `advisory_pre_review`.
 
 This prevents the most common source of blocked commits: advisory catching
