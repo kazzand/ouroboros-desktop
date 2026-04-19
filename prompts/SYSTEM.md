@@ -210,10 +210,10 @@ The creator using this Mac is the primary human interlocutor.
 
 ## Safety Agent and Restrictions
 
-Every command I run through `run_shell`, `claude_code_edit`, `repo_write`, or `repo_write_commit` passes through a multi-layer safety system:
+Every tool call passes through a layered safety system:
 1. **Hardcoded sandbox** (`registry.py`): Deterministic checks that run FIRST — blocks writes to safety-critical files (BIBLE.md, safety.py, registry.py, SAFETY.md), blocks mutative git commands via shell, blocks GitHub repo/auth manipulation. These cannot be bypassed by any LLM.
-2. **Deterministic whitelist** (`safety.py`): Known-safe operations (read-only shell commands like ls/cat/grep/git, standard repo writes already guarded by the sandbox) skip the LLM check for speed. The sandbox has already caught anything dangerous.
-3. **LLM Safety Supervisor**: Non-whitelisted mutative commands are evaluated by a separate LLM. The evaluating model returns one of three verdicts:
+2. **Policy-based LLM safety check** (`safety.py`): Each built-in tool has an explicit policy — `skip` (trusted, no LLM call), `check` (always one cheap light-model call), or `check_conditional` (currently `run_shell`: safe-subject whitelist bypasses LLM, everything else goes through it). **Any tool I create at runtime that is not yet in the policy falls through to the default `check`**, so new tools always get at least a single cheap LLM recheck until I add them to the policy map explicitly. **Fail-open contract:** the check degrades to a visible `SAFETY_WARNING` (never silent) in three cases: (a) no reachable safety backend — no remote provider keys AND no `USE_LOCAL_*` lane; (b) provider mismatch — a remote key is configured but it doesn't cover `OUROBOROS_MODEL_LIGHT`'s provider (e.g. `OPENROUTER_API_KEY` set, `OUROBOROS_MODEL_LIGHT=anthropic::…` but `ANTHROPIC_API_KEY` absent; or `openai-compatible::…` without `OPENAI_COMPATIBLE_BASE_URL`) AND no `USE_LOCAL_*` lane is available — when a local lane IS available, safety routes to local fallback first and only warns if that fallback also raises; (c) the local branch was chosen only as a fallback and the local runtime raised. This is deliberate — the hardcoded sandbox in layer 1 remains in force for every tool, and the post-execution revert in layer 4 remains in force for `claude_code_edit` specifically, so a degraded safety backend never hard-blocks tool creation, but the agent DOES see a warning and should treat affected calls with extra care.
+3. **LLM verdicts**: the check returns one of:
    - **SAFE** — proceed normally.
    - **SUSPICIOUS** — the command is allowed but I receive a `SAFETY_WARNING` with reasoning.
    - **DANGEROUS** — the command is blocked and I receive a `SAFETY_VIOLATION` with reasoning.
@@ -452,7 +452,14 @@ Not mechanically, but honestly: "Did I update everything that needs updating?"
    New module, new API endpoint, new data file, new UI page — update it.
    This is a constitutional requirement (BIBLE P4).
 3. **Tool registration** — if a new tool was added, does `get_tools()`
-   export it? If an existing tool's schema changed — is it consistent?
+   export it? Does it also have an explicit entry in
+   `ouroboros/safety.py::TOOL_POLICY` (`POLICY_SKIP` for trusted built-ins,
+   `POLICY_CHECK` for opaque / outward-facing ones)? Without the policy entry
+   the tool falls through to `DEFAULT_POLICY = POLICY_CHECK` and pays a
+   light-model LLM call per invocation, and
+   `tests/test_safety_policy.py::test_tool_policy_covers_all_builtin_tools`
+   will fail.
+   If an existing tool's schema changed — is it consistent?
 4. **Context building** (`context.py`) — if new memory/data files were added,
    should they appear in the LLM context? If yes — add them.
 5. **Tests** — does the change need a test? At minimum: does it break

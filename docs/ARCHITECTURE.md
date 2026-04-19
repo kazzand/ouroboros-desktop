@@ -1,4 +1,4 @@
-# Ouroboros v4.39.2 — Architecture & Reference
+# Ouroboros v4.40.0 — Architecture & Reference
 
 This document describes every component, page, button, API endpoint, and data flow.
 It is the single source of truth for how the system works. Keep it updated.
@@ -43,7 +43,7 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on localhost:8765
       ├── pricing.py           ← Model pricing, cost estimation, usage events
       ├── llm.py               ← Multi-provider LLM routing (OpenRouter/OpenAI/compatible/Cloud.ru/Anthropic)
       ├── model_catalog_api.py ← Optional provider model catalog endpoint
-      ├── safety.py            ← Dual-layer LLM security supervisor
+      ├── safety.py            ← Policy-based LLM safety check
       ├── consciousness.py     ← Background thinking loop (with progress emission)
       ├── consolidator.py      ← Block-wise dialogue consolidation (dialogue_blocks.json)
       ├── memory.py            ← Scratchpad, identity, chat history
@@ -589,7 +589,7 @@ backward compatibility but is not the runtime authority.
 - Read-only tools can run in parallel (ThreadPoolExecutor)
 - Browser tools use thread-sticky executor (Playwright greenlet affinity)
 - All tools have hard timeout (default 600s, per-tool overrides for browser/search/vision); `OUROBOROS_TOOL_TIMEOUT_SEC` in `settings.json` is the runtime SSOT override read on each tool call. The actual timeout is `max(settings_value, per_tool_declared)` so tools declaring a higher minimum (e.g. `claude_code_edit` at 1200s) are never silently capped by a lower global default.
-- Multi-layer safety: hardcoded sandbox (registry.py) → deterministic whitelist → LLM safety supervisor
+- Layered safety: hardcoded sandbox (registry.py) → policy-based LLM safety check (safety.py `TOOL_POLICY`, single light-model call; unknown tools fall through to `DEFAULT_POLICY = check`)
 - Tool results use explicit per-tool caps with visible truncation markers (`repo_read`/`data_read`/`knowledge_read`/`run_shell`: 80k, default: 15k chars). Cognitive reads (`memory/*`, prompts, BIBLE/docs, commit/review outputs) are exempt from silent clipping.
 - `run_shell` now treats non-zero exits as explicit failed tool outcomes and records exit/signal metadata in the tool trace.
 - `run_shell` recovers `cmd` passed as a string via a three-step cascade: `json.loads` (JSON array strings) → `ast.literal_eval` (Python literal lists) → `shlex.split` (plain shell strings). Only truly unrecoverable input returns `SHELL_ARG_ERROR`. The `cmd` parameter schema remains `type: array` (intended contract), but the runtime gracefully handles LLM misformatting.
@@ -846,13 +846,11 @@ finding at a time. Suppresses the "blind retry" pattern.
 
 ### Safety system (safety.py + registry.py)
 
-Multi-layer security:
-1. **Hardcoded sandbox** (registry.py): deterministic blocks on safety-critical file writes, mutative git via shell, GitHub repo/auth commands. Runs BEFORE any LLM check.
-2. **Deterministic whitelist** (safety.py): known-safe operations (read-only shell commands, repo writes already guarded by sandbox) skip LLM for speed.
-3. **LLM Layer 1 (fast)**: Light model checks remaining tool calls for SAFE/SUSPICIOUS/DANGEROUS.
-4. **LLM Layer 2 (deep)**: If flagged, heavy model re-evaluates with "are you sure?" nudge.
-5. **Post-execution revert**: After claude_code_edit, modifications to safety-critical files are automatically reverted.
-- Safety LLM calls now emit standard `llm_usage` events, so safety costs and failures appear in the same audit/health pipeline as other model calls.
+Layered security:
+1. **Hardcoded sandbox** (registry.py): deterministic blocks on safety-critical file writes, mutative git via shell, GitHub repo/auth commands. Runs BEFORE any LLM check and cannot be bypassed by any LLM.
+2. **Policy-based LLM check** (safety.py): each built-in tool has an explicit entry in `TOOL_POLICY` — `skip` (trusted, no LLM call), `check` (always one light-model call), or `check_conditional` (currently `run_shell`: safe-subject whitelist bypasses LLM, otherwise LLM check). Unknown tools (e.g. newly-created agent tools not yet in the policy) fall through to `DEFAULT_POLICY = check`, so any new tool still gets at least one cheap recheck per call until it is added to the map. The check is a single light-model call (`OUROBOROS_MODEL_LIGHT`, default `anthropic/claude-sonnet-4.6`) returning SAFE/SUSPICIOUS/DANGEROUS. **Fail-open contract** — `_resolve_safety_routing()` returns `(use_local, is_fallback, skip_reason)` and `_run_llm_check()` returns `(True, "⚠️ SAFETY_WARNING: …")` instead of blocking in three cases: (a) `skip_reason` is set when no remote provider key is configured AND no `USE_LOCAL_*` lane is enabled, or when a remote key is set but it doesn't cover `OUROBOROS_MODEL_LIGHT`'s provider (e.g. OpenRouter key only + `anthropic::…` light model without `ANTHROPIC_API_KEY`) and no local lane is available; (b) the local branch was chosen as a fallback (provider-mismatch with a `USE_LOCAL_*` lane enabled, or provider-less runtime with local routing) and the local transport itself raises; (c) when `USE_LOCAL_LIGHT` is explicitly opted in, local is primary (not fallback) and a local failure remains a real `SAFETY_VIOLATION` — no silent degradation of an explicitly-configured path. The hardcoded sandbox (layer 1) still applies to every fail-open call; the `claude_code_edit` post-execution revert (layer 3) still applies to that specific tool.
+3. **Post-execution revert**: After claude_code_edit, modifications to safety-critical files are automatically reverted.
+- Safety LLM calls emit standard `llm_usage` events, so safety costs and failures appear in the same audit/health pipeline as other model calls.
 `identity.md` is intentionally mutable (self-creation) and can be rewritten radically;
 the constitutional guard is that the file itself must remain non-deletable.
 

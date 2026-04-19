@@ -207,7 +207,7 @@ Before every commit, verify the following:
 - [ ] No gratuitous abstract layers (Bible P5)
 
 #### Structural Rules
-- [ ] New Tool? `get_tools()` exports it using the `ToolEntry` pattern from `registry.py`.
+- [ ] New Tool? `get_tools()` exports it using the `ToolEntry` pattern from `registry.py`, AND an explicit entry is added to `ouroboros/safety.py::TOOL_POLICY` (`POLICY_SKIP` for trusted built-ins, `POLICY_CHECK` for opaque or outward-facing ones). Without the policy entry the tool falls through to `DEFAULT_POLICY = POLICY_CHECK` and pays a light-model LLM call per invocation, and the `test_tool_policy_covers_all_builtin_tools` invariant will fail.
 - [ ] New Gateway (if extracted)? Contains no business logic, only transport.
 - [ ] New memory/data files? Should they appear in LLM context (`context.py`)?
 
