@@ -233,7 +233,7 @@ export function renderSettingsPage() {
                             <div class="form-field">
                                 <label>Pre-commit Review Models</label>
                                 <input id="s-review-models" placeholder="model1,model2,model3">
-                                <div class="settings-inline-note">Comma-separated review models (triad). In OpenAI-only or Anthropic-only direct-provider mode, the list is auto-normalized to `[main, light, light]` (3 slots, 2 unique) so both the commit triad and plan_task (which requires >=2 distinct models for majority-vote) work out of the box. OpenAI-compatible and Cloud.ru setups are not auto-normalized and must configure the list explicitly.</div>
+                                <div class="settings-inline-note">Comma-separated review models (triad). In OpenAI-only or Anthropic-only direct-provider mode, the list is auto-normalized to [main, light, light] (3 slots, 2 unique) so both the commit triad and plan_task (which requires >=2 distinct models for majority-vote) work out of the box. OpenAI-compatible and Cloud.ru setups are not auto-normalized and must configure the list explicitly.</div>
                             </div>
                         </div>
                         <div class="form-grid two">
