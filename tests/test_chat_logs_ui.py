@@ -680,18 +680,21 @@ def test_sync_history_appends_disconnected_unfinished_cards_at_end():
         "liveCardRecords sweep must appear after pass-2 message loop"
 
 
-def test_chat_send_button_bottom_aligned():
-    """Send group wrapper must use bottom:8px alignment so all send controls stay
-    aligned with the paperclip button when the textarea grows to multiple lines."""
+def test_chat_send_group_vertically_centered():
+    """Send group wrapper must use top:50% + translateY(-50%) so all send controls
+    stay vertically centered inside the textarea, including when it grows to
+    multiple lines (v4.39.1 switched from bottom:8px to true vertical centering)."""
     css = _read("web/style.css")
 
-    # The absolute positioning now lives on .chat-send-group, not .chat-send-inline.
+    # The absolute positioning lives on .chat-send-group, not .chat-send-inline.
     rule_start = css.index(".chat-send-group {")
     rule_end = css.index("\n}", rule_start) + 2
     rule_body = css[rule_start:rule_end]
 
-    assert "bottom: 8px" in rule_body, \
-        ".chat-send-group must use bottom: 8px to align with paperclip button"
+    assert "top: 50%" in rule_body, \
+        ".chat-send-group must use top: 50% for vertical centering (v4.39.1)"
+    assert "translateY(-50%)" in rule_body, \
+        ".chat-send-group must use translateY(-50%) for vertical centering (v4.39.1)"
     assert "position: absolute" in rule_body, \
         ".chat-send-group must be position: absolute"
     # The Send button itself must NOT re-introduce absolute positioning
@@ -700,22 +703,21 @@ def test_chat_send_button_bottom_aligned():
     send_body = css[send_start:send_end]
     assert "position: absolute" not in send_body, \
         ".chat-send-inline must not use position: absolute (handled by parent .chat-send-group)"
-    assert "top: 50%" not in send_body, \
-        ".chat-send-inline must NOT use top: 50% vertical centering"
-    assert "translateY(-50%)" not in send_body, \
-        ".chat-send-inline must NOT use translateY(-50%) vertical centering"
 
 
-def test_chat_attach_button_bottom_aligned():
-    """Paperclip button must also use bottom positioning so both buttons stay aligned."""
+def test_chat_attach_button_vertically_centered():
+    """Paperclip button must use the same top:50% + translateY(-50%) centering as
+    .chat-send-group so both buttons stay aligned inside the textarea (v4.39.1)."""
     css = _read("web/style.css")
 
     rule_start = css.index(".chat-attach-btn {")
     rule_end = css.index("\n}", rule_start) + 2
     rule_body = css[rule_start:rule_end]
 
-    assert "bottom:" in rule_body, \
-        ".chat-attach-btn must use bottom positioning to align with Send button"
+    assert "top: 50%" in rule_body, \
+        ".chat-attach-btn must use top: 50% for vertical centering (v4.39.1)"
+    assert "translateY(-50%)" in rule_body, \
+        ".chat-attach-btn must use translateY(-50%) for vertical centering (v4.39.1)"
 
 
 # --- Plan mode send tests ---
