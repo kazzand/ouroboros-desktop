@@ -352,6 +352,7 @@ def test_next_step_guidance_stale_parse_failure_reports_stale_not_parse_failure(
         stale_from_edit=True,          # worktree was edited AFTER parse_failure
         stale_from_edit_ts="2026-04-05T10:00",
         open_obs=[],
+        open_debts=[],
         effective_is_fresh=False,
     )
 
@@ -395,6 +396,7 @@ def test_next_step_guidance_stale_with_open_obligations_requires_reaudit(tmp_pat
         stale_from_edit=True,
         stale_from_edit_ts="2026-04-05T10:00",
         open_obs=open_obs,
+        open_debts=[],
         effective_is_fresh=False,
     )
 
@@ -434,6 +436,7 @@ def test_next_step_guidance_parse_failure_with_open_obligations_preserves_parse_
         stale_from_edit=False,
         stale_from_edit_ts=None,
         open_obs=open_obs,
+        open_debts=[],
         effective_is_fresh=False,
     )
 
@@ -442,6 +445,48 @@ def test_next_step_guidance_parse_failure_with_open_obligations_preserves_parse_
     assert "re-read the full diff" in lowered
     assert "group obligations by root cause" in lowered
     assert "rewrite the plan" in lowered
+
+
+def test_next_step_guidance_fresh_with_only_open_debts_mentions_debt_not_zero_obligations():
+    """Debt-only guidance should describe unresolved debt directly."""
+    from ouroboros.tools.claude_advisory_review import _next_step_guidance
+    from ouroboros.review_state import AdvisoryReviewState, AdvisoryRunRecord, CommitReadinessDebtItem, _utc_now
+
+    state = AdvisoryReviewState()
+    fresh_run = AdvisoryRunRecord(
+        snapshot_hash="currenthash",
+        commit_message="current commit",
+        status="fresh",
+        ts=_utc_now(),
+    )
+    state.runs.append(fresh_run)
+    open_debts = [CommitReadinessDebtItem(
+        debt_id="crd-0001",
+        category="readiness_warning",
+        title="Readiness warning debt",
+        summary="Manual verification still required before commit.",
+        severity="warning",
+        repo_key="repo",
+        fingerprint="readiness_warning:attempt:abc",
+        source="review_state",
+        source_obligation_ids=[],
+        status="detected",
+    )]
+
+    guidance = _next_step_guidance(
+        latest=fresh_run,
+        state=state,
+        stale_from_edit=False,
+        stale_from_edit_ts=None,
+        open_obs=[],
+        open_debts=open_debts,
+        effective_is_fresh=True,
+    )
+
+    lowered = guidance.lower()
+    assert "commit-readiness debt item" in lowered
+    assert "repo_commit will be blocked" in lowered
+    assert "0 open obligation" not in lowered
 
 
 # ---------------------------------------------------------------------------
@@ -687,17 +732,31 @@ def test_resolve_item_pass_does_not_clear_other_same_item_obligation(tmp_path):
     must NOT clear all of them — only an explicit obligation_id PASS may target
     a specific one.  Item-name fallback applies only when exactly one obligation
     exists for that item."""
-    from ouroboros.review_state import AdvisoryReviewState
+    from ouroboros.review_state import AdvisoryReviewState, ObligationItem
     from ouroboros.tools.claude_advisory_review import _resolve_matching_obligations
 
     state = AdvisoryReviewState()
-    # Two separate code_quality findings with different reasons → two obligations
-    state.add_blocking_attempt(_make_blocking_attempt(critical_findings=[
-        {"verdict": "FAIL", "severity": "critical", "item": "code_quality",
-         "reason": "Bug in foo.py line 42"},
-        {"verdict": "FAIL", "severity": "critical", "item": "code_quality",
-         "reason": "Race condition in bar.py"},
-    ]))
+    # Simulate a legacy/migrated state with two open obligations under the same checklist item.
+    state.open_obligations.extend([
+        ObligationItem(
+            obligation_id="obl-0001",
+            fingerprint="finding:legacy-a",
+            item="code_quality",
+            severity="critical",
+            reason="Bug in foo.py line 42",
+            source_attempt_ts="2026-04-18T00:00:00Z",
+            source_attempt_msg="legacy attempt 1",
+        ),
+        ObligationItem(
+            obligation_id="obl-0002",
+            fingerprint="finding:legacy-b",
+            item="code_quality",
+            severity="critical",
+            reason="Race condition in bar.py",
+            source_attempt_ts="2026-04-18T00:01:00Z",
+            source_attempt_msg="legacy attempt 2",
+        ),
+    ])
     open_obs = state.get_open_obligations()
     assert len(open_obs) == 2, f"Expected 2 obligations, got {len(open_obs)}"
 
@@ -718,16 +777,30 @@ def test_resolve_item_pass_does_not_clear_other_same_item_obligation(tmp_path):
 
 def test_resolve_obligation_id_pass_clears_only_targeted_obligation(tmp_path):
     """Explicit obligation_id in the advisory PASS clears only that specific obligation."""
-    from ouroboros.review_state import AdvisoryReviewState
+    from ouroboros.review_state import AdvisoryReviewState, ObligationItem
     from ouroboros.tools.claude_advisory_review import _resolve_matching_obligations
 
     state = AdvisoryReviewState()
-    state.add_blocking_attempt(_make_blocking_attempt(critical_findings=[
-        {"verdict": "FAIL", "severity": "critical", "item": "code_quality",
-         "reason": "Bug in foo.py line 42"},
-        {"verdict": "FAIL", "severity": "critical", "item": "code_quality",
-         "reason": "Race condition in bar.py"},
-    ]))
+    state.open_obligations.extend([
+        ObligationItem(
+            obligation_id="obl-0101",
+            fingerprint="finding:legacy-1",
+            item="code_quality",
+            severity="critical",
+            reason="Bug in foo.py line 42",
+            source_attempt_ts="2026-04-18T00:00:00Z",
+            source_attempt_msg="legacy attempt 1",
+        ),
+        ObligationItem(
+            obligation_id="obl-0102",
+            fingerprint="finding:legacy-2",
+            item="code_quality",
+            severity="critical",
+            reason="Race condition in bar.py",
+            source_attempt_ts="2026-04-18T00:01:00Z",
+            source_attempt_msg="legacy attempt 2",
+        ),
+    ])
     open_obs = state.get_open_obligations()
     assert len(open_obs) == 2
     target = open_obs[0]

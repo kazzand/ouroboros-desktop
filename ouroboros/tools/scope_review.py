@@ -27,6 +27,7 @@ from ouroboros.tools.registry import ToolContext
 from ouroboros.tools.review_helpers import (
     build_full_repo_pack,
     build_goal_section,
+    build_rebuttal_section as _shared_build_rebuttal_section,
     build_scope_section,
     build_touched_file_pack,
     load_checklist_section,
@@ -36,9 +37,11 @@ from ouroboros.tools.review_helpers import (
     _SENSITIVE_NAMES,
     format_obligation_excerpt,
     format_prompt_code_block,
+    normalize_reviewer_items,
     _ANTI_THRASHING_RULE_VERDICT,
     _ANTI_THRASHING_RULE_ITEM_NAME,
     _CONVERGENCE_RULE_TEXT,
+    _HISTORY_VERIFICATION_ONLY_RULE,
 )
 from ouroboros.utils import run_cmd, utc_now_iso, append_jsonl, estimate_tokens
 
@@ -140,21 +143,21 @@ def _load_dev_guide(repo_dir: pathlib.Path) -> str:
     return "(DEVELOPMENT.md not found)"
 
 
-def _trim_with_omission(items: list, limit: int, label: str) -> tuple:
-    """Return (shown_items, omission_note_or_None) with explicit OMISSION NOTE when truncated.
-
-    Replaces bare `items[:N]` slices in review-output paths so all shortening
-    is named and visible (DEVELOPMENT.md: no hardcoded [:N] truncation for review artifacts).
-    """
-    if len(items) <= limit:
-        return items, None
-    omitted = len(items) - limit
-    note = f"⚠️ OMISSION NOTE: {omitted} {label} omitted (showing last {limit})."
-    return items[-limit:], note
-
-
-_HISTORY_ROUNDS_LIMIT = 3  # max previous rounds shown to scope reviewer
-_HISTORY_ADVISORY_LIMIT = 5  # max advisory findings shown per round
+def _format_history_entry(entry: object, *, default_severity: str = "advisory") -> str:
+    if isinstance(entry, dict):
+        severity = str(entry.get("severity", default_severity) or default_severity).upper()
+        tags = []
+        if entry.get("tag"):
+            tags.append(str(entry.get("tag")))
+        if entry.get("model"):
+            tags.append(f"model={entry.get('model')}")
+        if entry.get("obligation_id"):
+            tags.append(f"obligation={entry.get('obligation_id')}")
+        label = str(entry.get("item") or entry.get("reason") or "?")
+        reason = str(entry.get("reason", "") or "").strip()
+        tag_prefix = " ".join(f"[{tag}]" for tag in tags)
+        return f"[{severity}] {tag_prefix} {label}: {reason}".strip()
+    return str(entry)
 
 
 def _build_review_history_section(history: list, open_obligations: list = None) -> str:
@@ -163,22 +166,14 @@ def _build_review_history_section(history: list, open_obligations: list = None) 
         return ""
     lines = ["## Previous triad review rounds\n"]
     if history:
-        shown_rounds, rounds_note = _trim_with_omission(history, _HISTORY_ROUNDS_LIMIT, "earlier round(s)")
-        if rounds_note:
-            lines.append(rounds_note + "\n")
-        for entry in shown_rounds:
+        for entry in history:
             lines.append(f"### Round {entry.get('attempt', '?')}")
             if entry.get("critical"):
                 for f in entry["critical"]:
-                    lines.append(f"- CRITICAL: {f}")
+                    lines.append(f"- CRITICAL: {_format_history_entry(f, default_severity='critical')}")
             if entry.get("advisory"):
-                shown_adv, adv_note = _trim_with_omission(
-                    entry["advisory"], _HISTORY_ADVISORY_LIMIT, "advisory finding(s)"
-                )
-                for f in shown_adv:
-                    lines.append(f"- Advisory: {f}")
-                if adv_note:
-                    lines.append(f"  {adv_note}")
+                for f in entry["advisory"]:
+                    lines.append(f"- Advisory: {_format_history_entry(f)}")
             lines.append("")
 
     if open_obligations:
@@ -209,6 +204,8 @@ def _build_review_history_section(history: list, open_obligations: list = None) 
     if open_obligations:
         lines.append(f"{rule_idx}. {_ANTI_THRASHING_RULE_ITEM_NAME}")
         rule_idx += 1
+    lines.append(f"{rule_idx}. {_HISTORY_VERIFICATION_ONLY_RULE}")
+    rule_idx += 1
     # Convergence rule fires from the 3rd attempt onward — same semantics as
     # the triad reviewer (`len(history) >= 2`).
     if history and len(history) >= 2:
@@ -419,13 +416,26 @@ def _build_scope_history_section(scope_review_history: Optional[list]) -> str:
     rounds = []
     for i, entry in enumerate(scope_review_history, 1):
         label = _scope_round_label(entry)
-        summary = entry.get("summary") or "(no summary)"
-        rounds.append(f"Round {i}: {label}\n{summary}")
+        parts = [f"Round {i}: {label}"]
+        critical_findings = list(entry.get("critical_findings") or [])
+        advisory_findings = list(entry.get("advisory_findings") or [])
+        if critical_findings:
+            parts.append("Critical findings:")
+            for finding in critical_findings:
+                parts.append(f"- {_format_history_entry(finding, default_severity='critical')}")
+        if advisory_findings:
+            parts.append("Advisory findings:")
+            for finding in advisory_findings:
+                parts.append(f"- {_format_history_entry(finding)}")
+        if not critical_findings and not advisory_findings:
+            parts.append(str(entry.get("summary") or "(no summary)"))
+        rounds.append("\n".join(parts))
     return (
         "\n## Prior scope review rounds (your previous findings for this commit)\n\n"
         + "\n\n---\n".join(rounds)
         + "\n\nAddress any previously raised issues. If the same issue persists, "
         "mark it FAIL again with a reference to the prior round.\n"
+        f"\nIMPORTANT: {_HISTORY_VERIFICATION_ONLY_RULE}\n"
         f"\nIMPORTANT: {_ANTI_THRASHING_RULE_VERDICT}\n"
     )
 
@@ -461,10 +471,7 @@ def _build_scope_prompt(
     scope_section = build_scope_section(scope)
     dev_guide = _load_dev_guide(repo_dir)
     critical_calibration = CRITICAL_FINDING_CALIBRATION  # noqa: F841 — used in f-string below
-    rebuttal_section = (
-        f"\n## Developer's rebuttal to previous review feedback\n\n{review_rebuttal}\n\n"
-        "Reconsider previous FAIL verdict(s) in light of this argument.\n"
-    ) if review_rebuttal else ""
+    rebuttal_section = _shared_build_rebuttal_section(review_rebuttal)
     # Load open obligations for anti-thrashing hint.
     # Always load (not gated on review_history): scope may block independently of triad,
     # so scope obligations should be visible even when triad history is empty.
@@ -583,6 +590,7 @@ in the "item" field; one entry each, no duplicates, no substitutions):
 
 Each element must have:
 - "item" (one of the eight identifiers above — verbatim, case-sensitive)
+- optional "obligation_id" when resolving or re-checking a previously surfaced obligation
 - "verdict": "PASS" or "FAIL"
 - "severity": "critical" or "advisory"
 - "reason":
@@ -597,6 +605,9 @@ Severity rules:
 - If you cannot point to an exact touchpoint, use "advisory".
 - Scope affects only unchanged legacy code outside the diff. The diff itself is always fully reviewable.
 - For cross-surface / prose-vs-code mismatches apply the `Critical surface whitelist` in `docs/CHECKLISTS.md` — only release metadata, tool schema, module map, behavioural documentation, and safety contracts qualify as critical; commentary and narrative prose mismatches are advisory.
+
+If an open obligation record above already names an `obligation_id` for this root cause,
+reuse that exact `obligation_id`. Do NOT invent a new id for the same root cause.
 
 ## Anti pattern-lock guard
 
@@ -666,7 +677,7 @@ def _parse_scope_json(raw: str) -> Optional[list]:
     try:
         obj = json.loads(text)
         if isinstance(obj, list):
-            return obj
+            return normalize_reviewer_items(obj)
     except (json.JSONDecodeError, ValueError):
         pass
     start, end = text.find("["), text.rfind("]")
@@ -674,7 +685,7 @@ def _parse_scope_json(raw: str) -> Optional[list]:
         try:
             obj = json.loads(text[start:end + 1])
             if isinstance(obj, list):
-                return obj
+                return normalize_reviewer_items(obj)
         except (json.JSONDecodeError, ValueError):
             pass
     return None
@@ -731,6 +742,9 @@ def _classify_scope_findings(items: list) -> tuple:
             "reason": str(item.get("reason", "")),
             "model": "scope_reviewer",
         }
+        obligation_id = str(item.get("obligation_id", "") or "")
+        if obligation_id:
+            finding["obligation_id"] = obligation_id
         if severity == "critical":
             critical_findings.append(finding)
         else:

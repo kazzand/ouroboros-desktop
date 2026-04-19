@@ -89,6 +89,103 @@ def test_revert_commit_registered():
     assert "revert_commit" in names
 
 
+def test_non_committing_review_cycle_exists_and_reuses_shared_stage_cycle():
+    git_mod = _get_git_module()
+    source = inspect.getsource(git_mod._run_non_committing_review_cycle)
+    assert "_run_reviewed_stage_cycle" in source
+    assert '"reviewed"' in source
+    assert '"review_only"' in source
+    assert '["git", "reset", "HEAD"]' in source
+    assert '["git", "commit"' not in source
+
+
+def test_non_committing_review_cycle_runtime_unstages_on_success(monkeypatch):
+    git_mod = _get_git_module()
+    reset_calls = []
+    recorded = []
+    released = []
+
+    monkeypatch.setattr(git_mod, "_check_overlapping_review_attempt", lambda ctx: None)
+    monkeypatch.setattr(git_mod, "_acquire_git_lock", lambda ctx: "lock-token")
+    monkeypatch.setattr(git_mod, "_release_git_lock", lambda lock: released.append(lock))
+    monkeypatch.setattr(
+        git_mod,
+        "_run_reviewed_stage_cycle",
+        lambda *args, **kwargs: {
+            "status": "passed",
+            "message": "stage cycle passed",
+            "pre_fingerprint": {"fingerprint": "pre"},
+            "post_fingerprint": {"fingerprint": "post"},
+        },
+    )
+    monkeypatch.setattr(
+        git_mod,
+        "_record_commit_attempt",
+        lambda *args, **kwargs: recorded.append(
+            {"status": args[2], "phase": kwargs.get("phase")}
+        ),
+    )
+    monkeypatch.setattr(
+        git_mod,
+        "run_cmd",
+        lambda cmd, cwd=None: reset_calls.append((tuple(cmd), cwd)) or "",
+    )
+
+    ctx = types.SimpleNamespace(repo_dir="/tmp/repo")
+    outcome = git_mod._run_non_committing_review_cycle(ctx, "test commit")
+
+    assert outcome["status"] == "passed"
+    assert "Commit was not created" in outcome["message"]
+    assert ctx._scope_review_history == {}
+    assert recorded == [{"status": "reviewed", "phase": "review_only"}]
+    assert released == ["lock-token"]
+    assert reset_calls == [(("git", "reset", "HEAD"), "/tmp/repo")]
+
+
+def test_non_committing_review_cycle_runtime_unstages_on_block(monkeypatch):
+    git_mod = _get_git_module()
+    reset_calls = []
+    released = []
+
+    monkeypatch.setattr(git_mod, "_check_overlapping_review_attempt", lambda ctx: None)
+    monkeypatch.setattr(git_mod, "_acquire_git_lock", lambda ctx: "lock-token")
+    monkeypatch.setattr(git_mod, "_release_git_lock", lambda lock: released.append(lock))
+    monkeypatch.setattr(
+        git_mod,
+        "_run_reviewed_stage_cycle",
+        lambda *args, **kwargs: {
+            "status": "blocked",
+            "message": "review blocked",
+            "block_reason": "critical_findings",
+        },
+    )
+    monkeypatch.setattr(
+        git_mod,
+        "run_cmd",
+        lambda cmd, cwd=None: reset_calls.append((tuple(cmd), cwd)) or "",
+    )
+
+    ctx = types.SimpleNamespace(repo_dir="/tmp/repo")
+    outcome = git_mod._run_non_committing_review_cycle(ctx, "test commit")
+
+    assert outcome["status"] == "blocked"
+    assert outcome["block_reason"] == "critical_findings"
+    assert released == ["lock-token"]
+    assert reset_calls == [(("git", "reset", "HEAD"), "/tmp/repo")]
+
+
+def test_repo_commit_push_uses_shared_reviewed_stage_cycle():
+    git_mod = _get_git_module()
+    source = inspect.getsource(git_mod._repo_commit_push)
+    assert "_run_reviewed_stage_cycle" in source
+
+
+def test_repo_write_commit_uses_shared_reviewed_stage_cycle():
+    git_mod = _get_git_module()
+    source = inspect.getsource(git_mod._repo_write_commit)
+    assert "_run_reviewed_stage_cycle" in source
+
+
 # --- SAFETY_CRITICAL_PATHS checks ---
 
 def test_restore_to_head_blocks_safety_critical():
@@ -365,25 +462,25 @@ def test_advisory_freshness_check_exists_in_git():
 
 
 def test_advisory_gate_in_repo_commit_push():
-    """_repo_commit_push must call _check_advisory_freshness before _run_parallel_review."""
+    """The shared reviewed stage must gate review on advisory freshness."""
     git_mod = _get_git_module()
-    source = inspect.getsource(git_mod._repo_commit_push)
+    source = inspect.getsource(git_mod._run_reviewed_stage_cycle)
     assert "_check_advisory_freshness" in source
     # Advisory gate must come before parallel review (which contains unified review)
     advisory_pos = source.find("_check_advisory_freshness")
     review_pos = source.find("_run_parallel_review")
-    assert advisory_pos != -1, "_check_advisory_freshness not found in _repo_commit_push"
-    assert review_pos != -1, "_run_parallel_review not found in _repo_commit_push"
+    assert advisory_pos != -1, "_check_advisory_freshness not found in _run_reviewed_stage_cycle"
+    assert review_pos != -1, "_run_parallel_review not found in _run_reviewed_stage_cycle"
     assert advisory_pos < review_pos, "Advisory gate must precede parallel review"
     # Verify _run_parallel_review contains _run_unified_review
     parallel_source = inspect.getsource(git_mod._run_parallel_review)
     assert "_run_unified_review" in parallel_source
 
 
-def test_advisory_gate_in_repo_write_commit():
-    """_repo_write_commit must call _check_advisory_freshness (legacy path not a bypass)."""
+def test_advisory_gate_lives_in_shared_reviewed_stage_cycle():
+    """Legacy repo_write_commit must inherit the advisory gate via the shared stage helper."""
     git_mod = _get_git_module()
-    source = inspect.getsource(git_mod._repo_write_commit)
+    source = inspect.getsource(git_mod._run_reviewed_stage_cycle)
     assert "_check_advisory_freshness" in source
 
 
@@ -455,6 +552,53 @@ def test_advisory_freshness_passes_with_fresh_run(tmp_path):
     # Hash is stable — drive_root is outside repo_dir, no git status pollution
     result = git_mod._check_advisory_freshness(ctx, commit_message)
     assert result is None, f"Expected gate to pass but got: {result}"
+
+
+def test_advisory_freshness_blocks_on_open_commit_readiness_debt(tmp_path):
+    """Fresh advisory is not enough when commit-readiness debt remains open."""
+    import subprocess
+
+    git_mod = _get_git_module()
+    rs_mod = _get_review_state_module()
+
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    drive_root = tmp_path / "drive"
+    drive_root.mkdir()
+    (drive_root / "state").mkdir()
+    (drive_root / "logs").mkdir()
+    subprocess.run(["git", "init"], cwd=str(repo_dir), capture_output=True)
+
+    commit_message = "test commit"
+    snapshot_hash = rs_mod.compute_snapshot_hash(repo_dir, commit_message)
+    repo_key = rs_mod.make_repo_key(repo_dir)
+
+    state = rs_mod.AdvisoryReviewState()
+    state.add_run(rs_mod.AdvisoryRunRecord(
+        snapshot_hash=snapshot_hash,
+        commit_message=commit_message,
+        status="fresh",
+        ts="2026-01-01T00:00:00",
+        repo_key=repo_key,
+        readiness_warnings=["Manual verification still required before commit."],
+    ))
+    state._sync_commit_readiness_debts(repo_key=repo_key)
+    assert len(state.get_open_commit_readiness_debts(repo_key=repo_key)) == 1
+    rs_mod.save_state(drive_root, state)
+
+    class FakeCtx:
+        pass
+
+    ctx = FakeCtx()
+    ctx.repo_dir = repo_dir
+    ctx.drive_root = drive_root
+    ctx.task_id = "test-task"
+    ctx.drive_logs = lambda: drive_root / "logs"
+
+    result = git_mod._check_advisory_freshness(ctx, commit_message)
+    assert result is not None
+    assert "ADVISORY_PRE_REVIEW_REQUIRED" in result
+    assert "Commit-readiness debt" in result
 
 
 def test_advisory_freshness_is_repo_scoped(tmp_path):
@@ -739,7 +883,7 @@ def test_advisory_prompt_no_blocking_history_when_succeeded(tmp_path):
         repo_dir, "test commit", drive_root=drive_root
     )
 
-    assert "Unresolved obligations from previous blocking rounds" not in prompt
+    assert "## Unresolved obligations from previous blocking rounds" not in prompt
 
 
 def test_advisory_prompt_no_blocking_history_without_drive_root(tmp_path):
@@ -752,7 +896,7 @@ def test_advisory_prompt_no_blocking_history_without_drive_root(tmp_path):
     subprocess.run(["git", "init"], cwd=str(repo_dir), capture_output=True)
 
     prompt = adv_mod._build_advisory_prompt(repo_dir, "test commit")
-    assert "Unresolved obligations from previous blocking rounds" not in prompt
+    assert "## Unresolved obligations from previous blocking rounds" not in prompt
 
 
 def test_advisory_prompt_strictness_formulations():

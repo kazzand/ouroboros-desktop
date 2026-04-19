@@ -414,6 +414,45 @@ def test_collect_review_evidence_scopes_open_obligations_to_repo(tmp_path):
     assert evidence["current_repo"]["stale_reason"] == ""
     assert evidence["current_repo"]["stale_ts"] == ""
     assert evidence["open_obligations"] == []
+    assert evidence["commit_readiness_debts"] == []
+
+
+def test_collect_review_evidence_includes_commit_readiness_debt(tmp_path):
+    from ouroboros.review_evidence import collect_review_evidence
+    from ouroboros.review_state import AdvisoryReviewState, CommitAttemptRecord, make_repo_key, save_state
+
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir(parents=True)
+    (repo_dir / ".git").mkdir()
+    (repo_dir / "tracked.py").write_text("print('hi')\n", encoding="utf-8")
+
+    repo_key = make_repo_key(repo_dir)
+    state = AdvisoryReviewState()
+    for idx, reason in enumerate(["missing tests", "coverage still missing"], start=1):
+        state.record_attempt(CommitAttemptRecord(
+            ts=f"2026-04-07T10:0{idx}:00+00:00",
+            commit_message=f"blocked {idx}",
+            status="blocked",
+            repo_key=repo_key,
+            tool_name="repo_commit",
+            task_id=f"task-{idx}",
+            attempt=idx,
+            block_reason="critical_findings",
+            critical_findings=[{
+                "item": "tests_affected",
+                "reason": reason,
+                "severity": "critical",
+                "verdict": "FAIL",
+            }],
+            readiness_warnings=["Start retry from review debt."],
+        ))
+    save_state(tmp_path, state)
+
+    evidence = collect_review_evidence(tmp_path, repo_dir=repo_dir)
+
+    assert evidence["current_repo"]["repo_commit_ready"] is False
+    assert len(evidence["commit_readiness_debts"]) >= 1
+    assert evidence["commit_readiness_debts"][0]["category"] in {"obligation_repeat", "readiness_warning"}
 
 
 def test_truncate_with_notice_uses_utils_ssot():

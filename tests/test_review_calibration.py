@@ -307,15 +307,18 @@ class TestSelfVerificationInBlockedMessage:
 # ---------------------------------------------------------------------------
 
 class TestObligationGrouping:
-    """Obligations accumulate without merging. Same fingerprint = timestamp update only.
-    Different reasons = separate obligations. Deduplication is the agent's responsibility."""
+    """Obligation identity uses stable public ids plus fingerprints.
+
+    Distinct same-item findings stay separate by default, while explicit
+    obligation ids still let reviewers point a retry back at the same issue.
+    """
 
     def _make_state(self):
         from ouroboros.review_state import AdvisoryReviewState
         return AdvisoryReviewState()
 
-    def test_two_code_quality_findings_become_two_obligations(self):
-        """Different reasons → different fingerprints → separate obligations (no moving-target)."""
+    def test_canonical_checklist_item_distinct_reasons_stay_separate(self):
+        """Two different same-item findings must not collapse into one obligation."""
         state = self._make_state()
         attempt = _make_attempt("fix something", [
             {"verdict": "FAIL", "severity": "critical", "item": "code_quality", "reason": "Bug in foo.py"},
@@ -324,10 +327,13 @@ class TestObligationGrouping:
         state._update_obligations_from_attempt(attempt)
         open_obs = state.get_open_obligations()
         cq_obs = [o for o in open_obs if o.item.lower() == "code_quality"]
-        assert len(cq_obs) == 2, f"Expected 2 obligations, got {len(cq_obs)}: {[o.reason for o in cq_obs]}"
-        reasons = {o.reason for o in cq_obs}
-        assert any("foo.py" in r for r in reasons)
-        assert any("bar.py" in r for r in reasons)
+        assert len(cq_obs) == 2
+        assert {o.obligation_id for o in cq_obs} == {"obl-0001", "obl-0002"}
+        assert all(o.fingerprint.startswith("finding:code_quality:") for o in cq_obs)
+        assert {o.reason for o in cq_obs} == {
+            "Bug in foo.py",
+            "Missing error handling in bar.py",
+        }
 
     def test_different_items_produce_separate_obligations(self):
         state = self._make_state()
@@ -376,8 +382,8 @@ class TestObligationGrouping:
         # Must not duplicate: "Bug in foo.py | Bug in foo.py"
         assert cq_obs[0].reason.count("Bug in foo.py") == 1
 
-    def test_different_reason_on_retry_creates_new_obligation(self):
-        """Different reason on retry → new fingerprint → separate obligation."""
+    def test_different_reason_on_retry_creates_new_obligation_without_roundtrip_id(self):
+        """Without reviewer round-tripping obligation_id, a rephrased finding stays distinct."""
         state = self._make_state()
         attempt1 = _make_attempt("fix v1", [
             {"verdict": "FAIL", "severity": "critical", "item": "code_quality", "reason": "Bug in foo.py"},
@@ -392,9 +398,11 @@ class TestObligationGrouping:
         open_obs = state.get_open_obligations()
         cq_obs = [o for o in open_obs if o.item.lower() == "code_quality"]
         assert len(cq_obs) == 2
-        reasons = {o.reason for o in cq_obs}
-        assert any("foo.py" in r for r in reasons)
-        assert any("missing test" in r.lower() for r in reasons)
+        assert {o.obligation_id for o in cq_obs} == {"obl-0001", "obl-0002"}
+        assert {o.reason for o in cq_obs} == {
+            "Bug in foo.py",
+            "Also missing test",
+        }
 
     def test_pass_finding_not_included_as_obligation(self):
         state = self._make_state()
@@ -428,24 +436,23 @@ class TestObligationGrouping:
         # Reason should appear exactly once, not "reason | reason"
         assert cq_obs[0].reason.count(reason) == 1
 
-    def test_a_then_a_and_b_produces_two_obligations(self):
-        """Fingerprint keying: attempt1 has finding A, attempt2 has A (same) + B (new).
-        Result: one obligation for A (merged), one NEW obligation for B = 2 total."""
+    def test_noncanonical_items_still_split_into_multiple_obligations(self):
+        """Reviewer-specific bug_* items still use a separate fingerprint path."""
         state = self._make_state()
         attempt1 = _make_attempt("fix v1", [
-            {"verdict": "FAIL", "severity": "critical", "item": "code_quality", "reason": "Bug in foo.py"},
+            {"verdict": "FAIL", "severity": "critical", "item": "bug_1", "reason": "Bug in foo.py"},
         ])
         state._update_obligations_from_attempt(attempt1)
 
         attempt2 = _make_attempt("fix v2", [
-            {"verdict": "FAIL", "severity": "critical", "item": "code_quality", "reason": "Bug in foo.py"},
-            {"verdict": "FAIL", "severity": "critical", "item": "code_quality", "reason": "Missing bar.py"},
+            {"verdict": "FAIL", "severity": "critical", "item": "bug_1", "reason": "Bug in foo.py"},
+            {"verdict": "FAIL", "severity": "critical", "item": "bug_2", "reason": "Missing bar.py"},
         ])
         state._update_obligations_from_attempt(attempt2)
 
-        cq_obs = [o for o in state.get_open_obligations() if o.item.lower() == "code_quality"]
-        assert len(cq_obs) == 2
-        reasons = {o.reason for o in cq_obs}
+        bug_obs = [o for o in state.get_open_obligations() if o.item.lower().startswith("bug_")]
+        assert len(bug_obs) == 2
+        reasons = {o.reason for o in bug_obs}
         # Each reason appears exactly once (no "A | A" or "A | B" in a single obligation)
         assert any("Bug in foo.py" in r and "Missing bar.py" not in r for r in reasons)
         assert any("Missing bar.py" in r for r in reasons)
@@ -477,6 +484,30 @@ class TestObligationGrouping:
         # Reason must be exactly the original string — no pipe-joined duplicates
         assert cq_obs[0].reason == reason
         assert "|" not in cq_obs[0].reason
+
+    def test_explicit_obligation_id_wins_on_retry(self):
+        state = self._make_state()
+        first = _make_attempt("attempt 1", [
+            {"verdict": "FAIL", "severity": "critical", "item": "bug_1", "reason": "Bug in foo.py"},
+        ])
+        state._update_obligations_from_attempt(first)
+        existing = state.get_open_obligations()[0]
+
+        second = _make_attempt("attempt 2", [
+            {
+                "verdict": "FAIL",
+                "severity": "critical",
+                "item": "code_quality",
+                "obligation_id": existing.obligation_id,
+                "reason": "Reviewer rephrased the same root cause",
+            },
+        ])
+        state._update_obligations_from_attempt(second)
+
+        open_obs = state.get_open_obligations()
+        assert len(open_obs) == 1
+        assert open_obs[0].obligation_id == existing.obligation_id
+        assert open_obs[0].reason == "Bug in foo.py"
 
 
 # ---------------------------------------------------------------------------

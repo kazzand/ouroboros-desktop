@@ -1,4 +1,4 @@
-# Ouroboros v4.40.3 — Architecture & Reference
+# Ouroboros v4.40.4 — Architecture & Reference
 
 This document describes every component, page, button, API endpoint, and data flow.
 It is the single source of truth for how the system works. Keep it updated.
@@ -137,7 +137,7 @@ Dockerfile                    ← Docker image (web UI runtime)
 │   ├── settings.json   ← User settings (API keys, models, budget)
 │   ├── state/
 │   │   ├── state.json  ← Runtime state (spent_usd, session_id, branch, etc.)
-│   │   ├── advisory_review.json ← Durable advisory/review ledger (runs, attempts, obligations)
+│   │   ├── advisory_review.json ← Durable advisory/review ledger (runs, attempts, obligations, commit-readiness debts)
 │   │   ├── queue_snapshot.json
 │   │   └── review_continuations/ ← Per-task blocked-review continuation payloads (+ quarantined corrupt files under `corrupt/`)
 │   ├── memory/
@@ -800,13 +800,13 @@ obligation open by abstracting a fixed concrete issue.
 
 ### Obligation accumulation (P3, `ouroboros/review_state.py::_update_obligations_from_attempt`)
 
-Each critical finding is identified by a stable fingerprint `sha256(f"{item}:{reason}")[:12]`.
-Every unique `(item, reason)` pair creates a **separate obligation** — obligations are never
-merged or collapsed. LLMs rephrase reasons slightly across attempts, so the same root cause may
-appear as multiple obligations with different fingerprints. This is intentional: deduplication
-is the agent's responsibility via `review_rebuttal`, not code-level merging. An identical
-finding repeated across attempts (same fingerprint) only updates the timestamp — reason
-text stays stable.
+Each critical finding gets a stable public `obligation_id` plus a separate internal
+fingerprint. By default the fingerprint is keyed by normalized checklist item + normalized
+reason text, so every distinct same-item finding creates a **separate obligation** while an
+identical repeated finding reuses the same obligation. When a reviewer explicitly returns an
+existing `obligation_id`, that public id wins even if the reason text is rephrased on retry.
+This keeps distinct bugs from collapsing together without losing the ability to round-trip a
+known obligation across review attempts.
 
 `_resolve_matching_obligations` in `ouroboros/tools/claude_advisory_review.py` resolves
 by both `obligation_id` (primary) and `item.lower()` (fallback for legacy saved state),
@@ -958,8 +958,9 @@ the constitutional guard is that the file itself must remain non-deletable.
 - As of v3.22.0, all docs are always in static context: BIBLE.md (180k), ARCHITECTURE.md (60k), DEVELOPMENT.md (30k), README.md (10k), CHECKLISTS.md (5k).
 - `Health Invariants` are placed at the start of the dynamic context block, before drive state/runtime/recent sections, so warnings influence planning before the model reads the noisier tail sections.
 - Main task context now injects a dedicated `Review Continuity` section between runtime and recent-history sections:
-  live repo gate status, stale markers, bypass reasons, open obligations, open review continuations,
-  and the recent review ledger.
+  live repo gate status, stale markers, bypass reasons, open obligations, open commit-readiness debt,
+  `retry_anchor` (currently `commit_readiness_debt` when debt is open), open review continuations, and
+  the recent review ledger.
 - `build_recent_sections()` keeps recent dialogue broad, but task-scopes recent progress/tools/events when `task_id` is available.
 - `build_health_invariants()` is split into focused helpers and now also surfaces recent provider/routing errors plus local context overflows.
 - Local-model path no longer silently slices the live system prompt. It compacts non-core sections explicitly and raises an overflow error if core context still cannot fit.
@@ -1128,14 +1129,24 @@ errors surface via the same observability path.
   `_ADVISORY_PROMPT_MAX_CHARS` (~1.6M chars / ~400K tokens — Claude Code has a 1M token
   context, so 400K tokens leaves healthy headroom), advisory is skipped with a
   non-blocking `⚠️ ADVISORY_SKIPPED:` warning instead of timing out silently.
-- **Obligation-based blocking history injection** (v4.12.0): when previous `repo_commit`
-  calls were blocked, their `critical_findings` are accumulated as structured `ObligationItem`
-  entries in durable state. When open obligations exist, the advisory prompt includes an
-  "Unresolved obligations from previous blocking rounds" section listing each obligation by id,
+- **Obligation-based blocking history injection** (v4.12.0, expanded in v4.40.4): when previous
+  `repo_commit` calls were blocked, their `critical_findings` are accumulated as structured
+  `ObligationItem` entries in durable state. Each obligation now has a stable public
+  `obligation_id` (`obl-XXXX`) plus a separate internal `fingerprint`; identical findings reuse the
+  same obligation, while distinct same-item findings stay separate unless the reviewer explicitly
+  round-trips the prior `obligation_id`. When open obligations exist, the advisory prompt includes
+  an "Unresolved obligations from previous blocking rounds" section listing each obligation by id,
   item, severity, and reason. Advisory MUST explicitly address each obligation by checklist item
-  name — a generic PASS without addressing obligations is a weak signal (expected but not
-  enforced at code level). Blocking history and open obligations are repo-scoped. The prompt
-  section is omitted entirely when no obligations are open.
+  name — a generic PASS without addressing obligations is a weak signal (expected but not enforced
+  at code level). Blocking history and open obligations are repo-scoped. The prompt section is
+  omitted entirely when no obligations are open.
+- **Commit-readiness debt layer** (v4.40.4): recurring blocked-review signals are also mirrored into
+  repo-scoped `CommitReadinessDebtItem` entries with statuses
+  `detected -> queued -> reopened/verified`. Debt observations are synthesized from repeated open
+  obligations, stale-advisory markers, and readiness warnings. `agent_task_pipeline.build_review_context()`
+  injects a dedicated "Commit-readiness debt (start retry here)" section and sets
+  `retry_anchor=commit_readiness_debt` whenever debt is open so the agent starts retries from the
+  recurring blockers instead of rediscovering them from scratch.
 - **Obligation resolution**: `_resolve_matching_obligations()` runs on every parseable advisory
   result (regardless of whether other items fail). An obligation is marked resolved only when the
   advisory emits an unambiguous PASS for its checklist item (PASS present AND no FAIL for the same
@@ -1147,12 +1158,15 @@ errors surface via the same observability path.
   `_str_replace_editor`, `claude_code_edit`, and mutating `run_shell` / commit paths.
   `add_run()` clears this flag when any advisory runs for the current snapshot (including `parse_failure`).
 - **`review_status`** tool: read-only diagnostic showing advisory freshness, open obligations,
-  staleness-from-edit, last commit attempt state, and a concrete next-step recommendation.
-  Returns structured JSON with: `latest_advisory_status`, `latest_advisory_hash`, `stale_from_edit`,
-  `open_obligations_count`, `next_step`, plus `last_commit_attempt` details when blocked/failed.
-  When open obligations exist after a blocked review, the next-step guidance now explicitly
-  instructs the agent to re-read the full diff, group obligations by root cause, rewrite the plan,
-  and only then continue instead of patching one finding at a time.
+  open commit-readiness debt, staleness-from-edit, last commit attempt state, and a concrete
+  next-step recommendation. Returns structured JSON with: `latest_advisory_status`,
+  `latest_advisory_hash`, `stale_from_edit`, `open_obligations_count`,
+  `commit_readiness_debts_count`, `repo_commit_ready`, `retry_anchor` (`commit_readiness_debt`
+  when debt is open, otherwise `null`), `next_step`, plus
+  `last_commit_attempt` details when blocked/failed. When open obligations or open debt exist
+  after a blocked review, the next-step guidance explicitly instructs the agent to re-read the
+  full diff, group obligations by root cause, rewrite the plan, and only then continue instead of
+  patching one finding at a time.
   **Verbose mode** (v4.33.0): passing `include_raw=true` attaches a `raw_evidence` block for the
   targeted commit attempt containing the full per-actor records — `triad_raw_results` (per triad
   model: `model_id`, `status`, `raw_text`, `parsed_items`, `tokens_in/out`, `cost_usd`) and
@@ -1193,8 +1207,14 @@ errors surface via the same observability path.
   `late_result_pending`, `pre_review_fingerprint`, `post_review_fingerprint`, `fingerprint_status`,
   `degraded_reasons`, and `(repo_key, tool_name, task_id, attempt)` identity.
   New fields: `blocking_history` (last 10 blocked attempts), `open_obligations` (list of
-  `ObligationItem` with `obligation_id`, `item`, `severity`, `reason`, `source_attempt_ts`, `source_attempt_msg`, `status`, `resolved_by`, `repo_key`),
-  `last_stale_from_edit_ts` / `last_stale_reason` / `last_stale_repo_key`, plus explicit lock-backed state updates.
+  `ObligationItem` with `obligation_id`, `fingerprint`, `item`, `severity`, `reason`,
+  `source_attempt_ts`, `source_attempt_msg`, `status`, `resolved_by`, `repo_key`,
+  `created_ts`, `updated_ts`), `commit_readiness_debts` (list of `CommitReadinessDebtItem` with
+  `debt_id`, `category`, `title`, `summary`, `severity`, `fingerprint`, `source`,
+  `source_obligation_ids`, `evidence`, `status`, `repo_key`, `first_seen_at`, `last_seen_at`,
+  `updated_at`, `verified_at`, `occurrence_count`, `consecutive_observations`),
+  `next_obligation_seq`, `next_commit_readiness_debt_seq`, and `last_stale_from_edit_ts` /
+  `last_stale_reason` / `last_stale_repo_key`, plus explicit lock-backed state updates.
   **Epistemic-integrity fields** (v4.32.0): `triad_raw_results` (list of per-model actor dicts:
   `model_id`, `status` — `"responded"` | `"error"` | `"parse_failure"`, `raw_text` — full
   untruncated response, `parsed_items`, `tokens_in`, `tokens_out`, `cost_usd`) and
@@ -1214,10 +1234,13 @@ errors surface via the same observability path.
   and `_handle_review_status` (review_status tool) surface compact `triad_actors` / `scope_actor`
   summaries (model_id + status only, raw text not injected into context) so the agent can see
   which reviewer errored or parse-failed without loading full raw responses.
-  `add_blocking_attempt()` populates open obligations from `critical_findings`; `on_successful_commit()`
-  clears all obligations. Advisory invalidation is repo-scoped and triggered automatically by successful
+  `add_blocking_attempt()` populates open obligations from `critical_findings` and then syncs
+  repo-scoped commit-readiness debt observations. `on_successful_commit()` clears repo-scoped
+  obligations and marks matching debt verified so historical blocked attempts do not keep the repo
+  permanently unready. Advisory invalidation is repo-scoped and triggered automatically by successful
   mutations from `_repo_write`, `_str_replace_editor`, `claude_code_edit`, mutating `run_shell`, and
-  reviewed commit flows when they change worktree state.
+  reviewed commit flows when they change worktree state. `_check_advisory_freshness()` also treats
+  open commit-readiness debt as a blocking signal, so the commit gate and `review_status` agree.
   **Forensic fields on terminal attempt records** (`triad_models`, `scope_model`): set by the reviewer
   orchestration layer immediately after resolving the configured model IDs and before awaiting LLM results.
   These fields are present on any terminal attempt record (`blocked`, `succeeded`, `failed`) where the
@@ -1234,12 +1257,13 @@ errors surface via the same observability path.
   the corruption signal.
 - **`_collect_review_findings`** (v4.32.0): returns a 4-tuple `(critical_fails, advisory_warns, errored_models, triad_raw_results)`. The fourth element is a list of per-model actor dicts (`model_id`, `status`, `raw_text`, `parsed_items`, `tokens_in`, `tokens_out`, `cost_usd`); status is `"responded"` on successful parse, `"parse_failure"` on unparseable output, `"error"` on API/timeout failure. All actor records are stored on `ctx._last_triad_raw_results`; ctx also receives `_review_degraded_reasons` entries when partial participation occurs (≥1 model errors while quorum is still met). **Parse_failure routing fix (v4.32.0)**: `parse_failure` entries go into `advisory_warns` (not `critical_fails`) so a 2-responded + 1-parse_failure triad does not block the commit when quorum is met — the quorum check (`sum(status=="responded") < 2`) is the correct gate for unusable evidence. Transport errors (`verdict="ERROR"`) still go to `errored_models`. **Quorum fix (v4.32.0)**: `_run_unified_review` counts `successful_reviewers` as `sum(status=="responded")` from `triad_raw_results` — both `parse_failure` and `error` actors are excluded from quorum. `_build_preflight_staged` extracted from `_run_unified_review` to keep that function under the 250-line method gate (P5).
 - **`review_evidence.py`**: structured collector that snapshots review ledger state, live advisory freshness,
-  open obligations, and continuations into `task_results`, task summaries, and
+  open obligations, open commit-readiness debt, and continuations into `task_results`, task summaries, and
   execution reflections. When `repo_dir` / `repo_key` is known, open obligations and stale markers stay
   repo-scoped; when `task_id` is present, `recent_attempts` stays task-scoped rather than silently
   falling back to another task's repo history.
   Output dict fields: `recent_attempts` (scoped commit attempts), `recent_advisory_runs` (repo-scoped),
-  `open_obligations`, `continuations`, `corrupt_continuations`, `current_repo` (live advisory status),
+  `open_obligations`, `commit_readiness_debts`, `continuations`, `corrupt_continuations`,
+  `current_repo` (live advisory status),
   plus **omission counters** `omitted_attempts`, `omitted_advisory_runs`, `omitted_obligations`,
   `omitted_continuations` (count of entries trimmed by their respective `max_*` budget params),
   `omitted_corrupt` (count of corrupt continuation files beyond the fixed visible cap of 3), and

@@ -357,6 +357,8 @@ class TestAdvisoryReviewStatusInContext:
 
         assert "## Review Continuity" in dynamic_text
         assert "repo_commit_ready=no" in dynamic_text
+        assert "retry_anchor=commit_readiness_debt" in dynamic_text
+        assert "Commit-readiness debt" in dynamic_text
         assert "bypass_reason=manual audit override" in dynamic_text
         assert "stale_marker=2026-04-07T10:00:00" in dynamic_text
         assert "### Open review continuations" in dynamic_text
@@ -417,6 +419,79 @@ class TestAdvisoryReviewStatusInContext:
         assert "repo_commit_ready=yes" in dynamic_text
         assert "foreign_issue" not in dynamic_text
         assert "repo b blocked" not in dynamic_text
+
+    def test_review_continuity_context_keeps_open_obligations_without_runs(self, tmp_path):
+        from ouroboros.agent_task_pipeline import build_review_context
+        from ouroboros.review_state import (
+            AdvisoryReviewState,
+            ObligationItem,
+            make_repo_key,
+            save_state,
+        )
+
+        env = self._make_env(tmp_path)
+        (tmp_path / "repo" / ".git").mkdir(parents=True, exist_ok=True)
+        (tmp_path / "repo" / "tracked.py").write_text("print('hi')\n", encoding="utf-8")
+
+        repo_key = make_repo_key(tmp_path / "repo")
+        state = AdvisoryReviewState(
+            open_obligations=[
+                ObligationItem(
+                    obligation_id="obl-0001",
+                    item="tests_affected",
+                    severity="critical",
+                    reason="Coverage still missing",
+                    source_attempt_ts="2026-04-07T10:00:00+00:00",
+                    source_attempt_msg="blocked commit",
+                    repo_key=repo_key,
+                    fingerprint="finding:tests_affected:abc123",
+                )
+            ]
+        )
+        save_state(tmp_path, state)
+
+        dynamic_text = build_review_context(env)
+        assert "## Review Continuity" in dynamic_text
+        assert "open_obligations=1" in dynamic_text
+        assert "[obl-0001] tests_affected: Coverage still missing" in dynamic_text
+
+    def test_review_continuity_context_keeps_all_debt_evidence(self, tmp_path):
+        from ouroboros.agent_task_pipeline import build_review_context
+        from ouroboros.review_state import (
+            AdvisoryReviewState,
+            CommitReadinessDebtItem,
+            make_repo_key,
+            save_state,
+        )
+
+        env = self._make_env(tmp_path)
+        (tmp_path / "repo" / ".git").mkdir(parents=True, exist_ok=True)
+        (tmp_path / "repo" / "tracked.py").write_text("print('hi')\n", encoding="utf-8")
+
+        repo_key = make_repo_key(tmp_path / "repo")
+        state = AdvisoryReviewState(
+            commit_readiness_debts=[
+                CommitReadinessDebtItem(
+                    debt_id="debt-0001",
+                    category="repeated_obligation",
+                    title="Commit readiness debt",
+                    summary="Repeated tests blocker",
+                    repo_key=repo_key,
+                    source_obligation_ids=["obl-0001"],
+                    evidence=[
+                        "first evidence",
+                        "second evidence",
+                        "third evidence",
+                    ],
+                )
+            ]
+        )
+        save_state(tmp_path, state)
+
+        dynamic_text = build_review_context(env)
+        assert "first evidence" in dynamic_text
+        assert "second evidence" in dynamic_text
+        assert "third evidence" in dynamic_text
 
 
 def test_runtime_section_includes_improvement_backlog_digest(tmp_path):

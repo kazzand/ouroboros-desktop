@@ -56,9 +56,25 @@ def _scope_history_entry(scope_result) -> dict:
     """
     parts = []
     if scope_result.critical_findings:
-        parts.append("Critical: " + "; ".join(f["item"] for f in scope_result.critical_findings))
+        parts.append(
+            "Critical: " + "; ".join(
+                (
+                    f"{f['item']} ({f.get('obligation_id')})"
+                    if f.get("obligation_id") else f["item"]
+                )
+                for f in scope_result.critical_findings
+            )
+        )
     if scope_result.advisory_findings:
-        parts.append("Advisory: " + "; ".join(f["item"] for f in scope_result.advisory_findings))
+        parts.append(
+            "Advisory: " + "; ".join(
+                (
+                    f"{f['item']} ({f.get('obligation_id')})"
+                    if f.get("obligation_id") else f["item"]
+                )
+                for f in scope_result.advisory_findings
+            )
+        )
     status = getattr(scope_result, "status", None) or "responded"
     # Build summary: for non-responded statuses, lead with the status signal
     # so empty finding lists are not misread as clean PASS on retry.
@@ -97,6 +113,8 @@ def _format_advisory_entry(entry) -> str:
             tags.append(str(entry.get("tag")))
         if entry.get("model"):
             tags.append(f"model={entry.get('model')}")
+        if entry.get("obligation_id"):
+            tags.append(f"obligation={entry.get('obligation_id')}")
         label = str(entry.get("item") or entry.get("reason") or "?")
         reason = str(entry.get("reason", "") or "")
         tag_prefix = " ".join(f"[{tag}]" for tag in tags)
@@ -115,7 +133,6 @@ def run_parallel_review(ctx, commit_message, *, goal="", scope="", review_rebutt
     prior blocked attempt on a different diff are not shown to the reviewer.
     """
     from ouroboros.tools.review import _run_unified_review
-    from ouroboros.tools.scope_review import _trim_with_omission
 
     # Reset forensic fields at the start of each parallel review attempt
     # so stale values from a previous attempt are never persisted on early exit.
@@ -189,24 +206,7 @@ def run_parallel_review(ctx, commit_message, *, goal="", scope="", review_rebutt
         existing = getattr(ctx, '_scope_review_history', None) or {}
         if not isinstance(existing, dict):
             existing = {}
-        _SCOPE_HISTORY_LIMIT = 5  # max retained scope history entries per snapshot key
-        # _trim_with_omission is imported alongside run_scope_review above
-        trimmed, omission_note = _trim_with_omission(
-            updated, _SCOPE_HISTORY_LIMIT, "earlier scope-review round(s)"
-        )
-        if omission_note:
-            # Prepend a visible sentinel so _build_scope_history_section renders
-            # the omission note — a debug-only log is not visible to the scope reviewer.
-            sentinel = {
-                "status": "omitted",
-                "blocked": False,
-                "summary": omission_note,
-                "critical_findings": [],
-                "advisory_findings": [],
-            }
-            existing[snapshot_key] = [sentinel] + trimmed
-        else:
-            existing[snapshot_key] = trimmed
+        existing[snapshot_key] = updated
         ctx._scope_review_history = existing
         # Store canonical scope actor record for durable persistence in CommitAttemptRecord
         ctx._last_scope_raw_result = {
@@ -250,21 +250,27 @@ def aggregate_review_verdict(review_err, scope_result, triad_block_reason, triad
     # Build scope advisory items for ctx surfacing (regardless of blocked/not)
     if scope_result is not None:
         for f in (scope_result.critical_findings or []):
-            _scope_advisory_items.append({
+            item = {
                 "severity": "critical",
                 "tag": "scope",
                 "item": str(f.get("item", "") or ""),
                 "reason": str(f.get("reason", "") or ""),
                 "verdict": "FAIL",
-            })
+            }
+            if f.get("obligation_id"):
+                item["obligation_id"] = str(f.get("obligation_id"))
+            _scope_advisory_items.append(item)
         for f in (scope_result.advisory_findings or []):
-            _scope_advisory_items.append({
+            item = {
                 "severity": "advisory",
                 "tag": "scope",
                 "item": str(f.get("item", "") or ""),
                 "reason": str(f.get("reason", "") or ""),
                 "verdict": "FAIL",
-            })
+            }
+            if f.get("obligation_id"):
+                item["obligation_id"] = str(f.get("obligation_id"))
+            _scope_advisory_items.append(item)
 
     if review_err:
         _combined_blocked = True
@@ -299,17 +305,10 @@ def aggregate_review_verdict(review_err, scope_result, triad_block_reason, triad
         combined_msg = _combined_messages[0]
 
     if triad_advisory and not review_err:
-        from ouroboros.tools.scope_review import _trim_with_omission
-        _ADVISORY_DISPLAY_LIMIT = 5
-        shown_adv, adv_omission_note = _trim_with_omission(
-            triad_advisory, _ADVISORY_DISPLAY_LIMIT, "advisory finding(s)"
-        )
         adv_text = "\n".join(
             f"  ⚠️ Advisory: {_format_advisory_entry(a)}"
-            for a in shown_adv
+            for a in triad_advisory
         )
-        if adv_omission_note:
-            adv_text += f"\n  {adv_omission_note} All findings stored in review state."
         combined_msg += f"\n\n---\nTriad advisory findings:\n{adv_text}"
 
     return True, combined_msg, block_reason, _combined_findings, _scope_advisory_items

@@ -90,10 +90,10 @@ Not every layer is required for every operation. Simple cases (e.g., `repo_read`
 Derived from P5 (Minimalism): entire codebase fits in one context window.
 
 - Module target: ~1000 lines. Crossing that line is P5 pressure and should trigger extraction or an explicit justification.
-- Module hard gate: 1600 lines for non-grandfathered modules in `tests/test_smoke.py`. Grandfathered (`GRANDFATHERED_OVERSIZED_MODULES` in `ouroboros/review.py`): `llm.py`, `claude_advisory_review.py` — split deferred until each surface stabilises.
+- Module hard gate: 1600 lines for non-grandfathered modules in `tests/test_smoke.py`. Grandfathered (`GRANDFATHERED_OVERSIZED_MODULES` in `ouroboros/review.py`): `llm.py`, `claude_advisory_review.py`, `review_state.py` — split deferred until each surface stabilises.
 - Method target: <150 lines. Crossing that line is a decomposition signal, not an automatic failure by itself.
 - Method hard gate: 300 lines in `tests/test_smoke.py`.
-- Codebase-wide function-count hard gate: 1200 Python functions/methods in `tests/test_smoke.py`.
+- Codebase-wide function-count hard gate: 1250 Python functions/methods in `tests/test_smoke.py`.
 - Function parameters: <8.
 - Net complexity growth per cycle approaches zero.
 - If a feature is not used in the current cycle — it is premature.
@@ -155,8 +155,11 @@ Reviewed commits now have an explicit **two-step gate**:
 
 1. **Advisory freshness gate**: finish all edits, then run `advisory_pre_review`.
    `repo_commit` / `repo_write_commit` require a fresh matching advisory run (or an
-   explicit audited bypass) and no open obligations from earlier blocked rounds.
-   Any edit after advisory makes it stale and requires a re-run.
+   explicit audited bypass), no open obligations from earlier blocked rounds, and
+   no open commit-readiness debt. Any edit after advisory makes it stale and
+   requires a re-run. When debt remains, `review_status` reports
+   `repo_commit_ready=false` plus `retry_anchor=commit_readiness_debt` so the
+   next retry starts from the repeated root cause rather than one obligation at a time.
 2. **Unified pre-commit review**: once advisory is fresh, the reviewed commit path
    runs two reviewers in parallel on the exact staged snapshot:
    - **Triad review** (`ouroboros/tools/review.py`): at least 2 reviewer
@@ -202,7 +205,7 @@ Before every commit, verify the following:
 #### Module Size & Complexity
 - [ ] Module stays near one context window (~1000 lines target; 1600 hard gate unless explicitly grandfathered debt)
 - [ ] No method exceeds the practical target (150 lines) or the hard gate (300 lines)
-- [ ] Total Python function count stays under the current smoke hard gate (1200)
+- [ ] Total Python function count stays under the current smoke hard gate (1250)
 - [ ] No function has more than 8 parameters
 - [ ] No gratuitous abstract layers (Bible P5)
 

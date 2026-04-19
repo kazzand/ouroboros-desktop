@@ -243,6 +243,32 @@ class TestScopeFailClosed:
         assert "bbb" in prompt
 
 
+def test_scope_history_keeps_all_rounds_and_structured_ids():
+    mod = _get_module("ouroboros.tools.scope_review")
+    history = [
+        {
+            "attempt": idx,
+            "critical": [{
+                "item": f"bug_{idx}",
+                "severity": "critical",
+                "reason": f"bug {idx}",
+                "obligation_id": f"obl-00{idx}",
+            }],
+            "advisory": [{
+                "item": f"advice_{idx}",
+                "severity": "advisory",
+                "reason": f"advice {idx}",
+            }],
+        }
+        for idx in range(1, 5)
+    ]
+    out = mod._build_review_history_section(history, open_obligations=None)
+    assert "Round 1" in out
+    assert "Round 4" in out
+    assert "⚠️ OMISSION NOTE" not in out
+    assert "obligation=obl-001" in out
+
+
 class TestRunScopeReviewFailClosed:
     """End-to-end fail-closed tests that execute run_scope_review()."""
 
@@ -474,9 +500,9 @@ class TestGitWiring:
         assert "scope" in sig.parameters
 
     def test_scope_review_wired_in_commit(self):
-        """_repo_commit_push must call _run_parallel_review which runs scope review."""
+        """The shared reviewed stage must call the parallel review helper."""
         git = _get_module("ouroboros.tools.git")
-        source = inspect.getsource(git._repo_commit_push)
+        source = inspect.getsource(git._run_reviewed_stage_cycle)
         assert "_run_parallel_review" in source
         # The parallel helper must contain both triad and scope review
         parallel_source = inspect.getsource(git._run_parallel_review)
@@ -486,12 +512,13 @@ class TestGitWiring:
         assert "ThreadPoolExecutor" in parallel_source
 
     def test_repo_write_commit_not_bypass_scope(self):
-        """Legacy _repo_write_commit also calls _run_parallel_review (parallel)."""
+        """Legacy _repo_write_commit must reach scope review via the shared stage helper."""
         git = _get_module("ouroboros.tools.git")
         source = inspect.getsource(git._repo_write_commit)
-        assert "_check_advisory_freshness" in source
-        # Scope review must be wired in legacy path too via _run_parallel_review
-        assert "_run_parallel_review" in source
+        assert "_run_reviewed_stage_cycle" in source
+        shared_source = inspect.getsource(git._run_reviewed_stage_cycle)
+        assert "_check_advisory_freshness" in shared_source
+        assert "_run_parallel_review" in shared_source
         parallel_source = inspect.getsource(git._run_parallel_review)
         assert "run_scope_review" in parallel_source
         assert "ThreadPoolExecutor" in parallel_source

@@ -700,21 +700,25 @@ class TestReviewInCommitPipeline:
     def test_repo_commit_calls_unified_review(self):
         git_mod = _get_git_module()
         source = inspect.getsource(git_mod._repo_commit_push)
-        assert "_run_parallel_review" in source
+        assert "_run_reviewed_stage_cycle" in source
+        shared_source = inspect.getsource(git_mod._run_reviewed_stage_cycle)
+        assert "_run_parallel_review" in shared_source
         parallel_source = inspect.getsource(git_mod._run_parallel_review)
         assert "_run_unified_review" in parallel_source
 
     def test_repo_write_commit_calls_unified_review(self):
         git_mod = _get_git_module()
         source = inspect.getsource(git_mod._repo_write_commit)
-        assert "_run_parallel_review" in source
+        assert "_run_reviewed_stage_cycle" in source
+        shared_source = inspect.getsource(git_mod._run_reviewed_stage_cycle)
+        assert "_run_parallel_review" in shared_source
         parallel_source = inspect.getsource(git_mod._run_parallel_review)
         assert "_run_unified_review" in parallel_source
 
     def test_blocked_review_unstages(self):
         """When review blocks, git reset HEAD must be called."""
         git_mod = _get_git_module()
-        source = inspect.getsource(git_mod._repo_commit_push)
+        source = inspect.getsource(git_mod._run_reviewed_stage_cycle)
         assert 'git", "reset", "HEAD"' in source
 
     def test_review_rebuttal_forwarded(self):

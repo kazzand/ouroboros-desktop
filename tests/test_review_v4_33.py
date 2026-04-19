@@ -210,15 +210,26 @@ class TestRunToDictStatusAware:
 
 class TestBuildReviewContextRelaxed:
     def test_multiple_critical_findings_surfaced(self):
-        """v4.33.0: up to 3 critical findings per continuation (was 1)."""
+        """v4.33.0 contract preserved via v4.40.4 refactor: up to 3 critical/advisory
+        findings per continuation, up to 5 continuations. The caps now live in named
+        constants (`_PER_FINDING_CAP`, `_CONTINUATION_CAP`) with explicit
+        `⚠️ OMISSION NOTE` markers instead of bare `[:N]` slices (DEVELOPMENT.md /
+        CHECKLISTS 2(f): no silent truncation of cognitive artifacts). The
+        behavioural contract is unchanged — up to 3 findings per category, up to 5
+        continuations visible."""
         import inspect
         from ouroboros import agent_task_pipeline
 
         source = inspect.getsource(agent_task_pipeline.build_review_context)
-        # Must iterate (not index-0-only) over critical_findings
-        assert "critical_findings[:3]" in source
-        assert "advisory_findings[:3]" in source
-        assert "scoped_continuations[:5]" in source
+        # Caps still enforced (identical numeric contract)
+        assert "_PER_FINDING_CAP = 3" in source
+        assert "_CONTINUATION_CAP = 5" in source
+        # Findings lists must be iterated per-category (not index-0-only)
+        assert "item.critical_findings" in source
+        assert "item.advisory_findings" in source
+        assert "scoped_continuations" in source
+        # Slicing must be explicit-omission-note style, not silent
+        assert "OMISSION NOTE" in source
 
 
 # ── Soft circuit-breaker hint lowered to attempt 3 ─────────────────────────

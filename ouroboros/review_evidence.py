@@ -51,6 +51,7 @@ def collect_review_evidence(
         current_run = state.find_by_hash(snapshot_hash, repo_key=repo_key or None)
 
     open_obligations = state.get_open_obligations(repo_key=repo_key or None)
+    open_debts = state.get_open_commit_readiness_debts(repo_key=repo_key or None)
     continuations, corrupt = list_review_continuations(drive_root_path)
     if task_id:
         scoped_continuations = [item for item in continuations if item.task_id == task_id]
@@ -74,6 +75,7 @@ def collect_review_evidence(
                 current_run is not None
                 and current_run.status in ("fresh", "bypassed", "skipped")
                 and not open_obligations
+                and not open_debts
             ),
             "bypass_reason": str(getattr(current_run, "bypass_reason", "") or ""),
             "stale_reason": str(getattr(state, "last_stale_reason", "") or "") if stale_matches_repo else "",
@@ -85,6 +87,7 @@ def collect_review_evidence(
         "omitted_advisory_runs": max(0, len(repo_runs) - max_runs) if max_runs > 0 else len(repo_runs),
         "open_obligations": [_obligation_to_dict(item) for item in (open_obligations[:max_obligations] if max_obligations is not None else open_obligations)],
         "omitted_obligations": max(0, len(open_obligations) - max_obligations) if max_obligations is not None else 0,
+        "commit_readiness_debts": [_debt_to_dict(item) for item in open_debts],
         "continuations": [_continuation_to_dict(item) for item in scoped_continuations[:max_continuations]],
         "omitted_continuations": max(0, len(scoped_continuations) - max_continuations),
         "corrupt_continuations": [str(item) for item in corrupt[:3]],
@@ -94,6 +97,7 @@ def collect_review_evidence(
         evidence["recent_attempts"],
         evidence["recent_advisory_runs"],
         evidence["open_obligations"],
+        evidence["commit_readiness_debts"],
         evidence["continuations"],
         evidence["corrupt_continuations"],
         evidence["current_repo"]["advisory_status"] not in ("", "missing"),
@@ -228,10 +232,13 @@ def _run_to_dict(item: Any) -> Dict[str, Any]:
 def _obligation_to_dict(item: Any) -> Dict[str, Any]:
     return {
         "obligation_id": str(getattr(item, "obligation_id", "") or ""),
+        "fingerprint": str(getattr(item, "fingerprint", "") or ""),
         "item": str(getattr(item, "item", "") or ""),
         "severity": str(getattr(item, "severity", "") or ""),
         "reason": str(getattr(item, "reason", "") or ""),
         "status": str(getattr(item, "status", "") or ""),
+        "created_ts": str(getattr(item, "created_ts", "") or ""),
+        "updated_ts": str(getattr(item, "updated_ts", "") or ""),
     }
 
 
@@ -247,4 +254,20 @@ def _continuation_to_dict(item: Any) -> Dict[str, Any]:
         "advisory_findings": list(getattr(item, "advisory_findings", []) or []),
         "readiness_warnings": [str(x) for x in (getattr(item, "readiness_warnings", []) or [])],
         "updated_ts": str(getattr(item, "updated_ts", "") or ""),
+    }
+
+
+def _debt_to_dict(item: Any) -> Dict[str, Any]:
+    return {
+        "debt_id": str(getattr(item, "debt_id", "") or ""),
+        "category": str(getattr(item, "category", "") or ""),
+        "title": str(getattr(item, "title", "") or ""),
+        "summary": str(getattr(item, "summary", "") or ""),
+        "status": str(getattr(item, "status", "") or ""),
+        "severity": str(getattr(item, "severity", "") or ""),
+        "source": str(getattr(item, "source", "") or ""),
+        "repo_key": str(getattr(item, "repo_key", "") or ""),
+        "source_obligation_ids": [str(x) for x in (getattr(item, "source_obligation_ids", []) or [])],
+        "evidence": [str(x) for x in (getattr(item, "evidence", []) or [])],
+        "updated_at": str(getattr(item, "updated_at", "") or ""),
     }

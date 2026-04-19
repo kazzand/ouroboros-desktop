@@ -478,7 +478,12 @@ def test_repo_commit_blocks_when_staged_diff_changes_after_review(tmp_path):
              {"ok": True, "fingerprint": "before-fp", "status": "ok", "reason": ""},
              {"ok": True, "fingerprint": "after-fp", "status": "ok", "reason": ""},
          ]), \
-         patch("ouroboros.tools.git.run_cmd", side_effect=["", "", "M foo.py"]):
+         patch("ouroboros.tools.git.run_cmd", side_effect=[
+             "",               # git checkout
+             "",               # git add -A
+             "M foo.py",       # git status --porcelain
+             "foo.py\n",       # git diff --cached --name-only (advisory scope)
+         ]):
         result = _repo_commit_push(ctx, "test commit")
 
     assert "REVIEW_REVALIDATION_FAILED" in result
@@ -604,30 +609,24 @@ def test_repo_write_commit_preserves_blocked_review_findings(tmp_path):
     }]
 
     with patch("ouroboros.tools.git._check_overlapping_review_attempt", return_value=None), \
-         patch("ouroboros.tools.git._record_commit_attempt") as mock_record, \
          patch("ouroboros.tools.git._acquire_git_lock", return_value=object()), \
          patch("ouroboros.tools.git._release_git_lock"), \
          patch("ouroboros.tools.git._invalidate_advisory"), \
-         patch("ouroboros.tools.git._check_advisory_freshness", return_value=None), \
          patch(
-             "ouroboros.tools.git._run_parallel_review",
-             return_value=("REVIEW_BLOCKED: fix the docs first", None, "critical_findings", []),
-         ), \
-         patch("ouroboros.tools.git._fingerprint_staged_diff", side_effect=[
-             {"ok": True, "fingerprint": "same-fp", "status": "ok", "reason": ""},
-             {"ok": True, "fingerprint": "same-fp", "status": "ok", "reason": ""},
-         ]), \
+             "ouroboros.tools.git._run_reviewed_stage_cycle",
+             return_value={
+                 "status": "blocked",
+                 "message": "REVIEW_BLOCKED: fix the docs first",
+                 "block_reason": "critical_findings",
+             },
+         ) as mock_stage_cycle, \
          patch("ouroboros.tools.git.write_text"), \
-         patch("ouroboros.tools.git.run_cmd", side_effect=["", "", ""]) as mock_run:
+         patch("ouroboros.tools.git.run_cmd", side_effect=[""]) as mock_run:
         result = _repo_write_commit(ctx, "foo.py", "x = 1\n", "test commit")
 
     assert "REVIEW_BLOCKED: fix the docs first" in result
-    assert "REVIEW_REVALIDATION_FAILED" not in result
-    assert mock_run.call_args_list[-1].args[0] == ["git", "reset", "HEAD"]
-    last_call = mock_record.call_args_list[-1]
-    assert last_call.kwargs["block_reason"] == "critical_findings"
-    assert last_call.kwargs["critical_findings"] == ctx._last_review_critical_findings
-    assert last_call.kwargs["fingerprint_status"] == "matched"
+    assert mock_stage_cycle.call_args.kwargs["paths"] == ["foo.py"]
+    assert mock_run.call_args_list[0].args[0] == ["git", "checkout", ctx.branch_dev]
 
 
 def test_repo_commit_blocks_when_fingerprint_unavailable(tmp_path):
@@ -654,7 +653,12 @@ def test_repo_commit_blocks_when_fingerprint_unavailable(tmp_path):
              "status": "unavailable",
              "reason": "git diff --cached failed",
          }), \
-         patch("ouroboros.tools.git.run_cmd", side_effect=["", "", "M foo.py"]):
+         patch("ouroboros.tools.git.run_cmd", side_effect=[
+             "",               # git checkout
+             "",               # git add -A
+             "M foo.py",       # git status --porcelain
+             "foo.py\n",       # git diff --cached --name-only (advisory scope)
+         ]):
         result = _repo_commit_push(ctx, "test commit")
 
     assert "REVIEW_REVALIDATION_FAILED" in result

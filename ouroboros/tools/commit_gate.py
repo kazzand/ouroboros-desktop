@@ -338,8 +338,23 @@ def _check_advisory_freshness(ctx: ToolContext, commit_message: str,
 
     snapshot_hash = compute_snapshot_hash(repo_dir, commit_message, paths=paths)
     state = load_state(drive_root)
-    # Pass only when snapshot is fresh AND no open obligations remain.
-    if state.is_fresh(snapshot_hash, repo_key=repo_key) and not state.get_open_obligations(repo_key=repo_key):
+    open_obs = state.get_open_obligations(repo_key=repo_key)
+    open_debts = state.get_open_commit_readiness_debts(repo_key=repo_key)
+
+    def _render_obligations() -> list[str]:
+        return [
+            f"  [{o.obligation_id}] {o.item}: {_truncate_review_reason(o.reason, limit=80)}"
+            for o in open_obs
+        ]
+
+    def _render_debts() -> list[str]:
+        return [
+            f"  [{debt.debt_id}] {debt.category}: {_truncate_review_reason(debt.summary, limit=80)}"
+            for debt in open_debts
+        ]
+
+    # Pass only when snapshot is fresh AND no open review debt remains.
+    if state.is_fresh(snapshot_hash, repo_key=repo_key) and not open_obs and not open_debts:
         return None
 
     if skip_advisory_pre_review:
@@ -377,18 +392,61 @@ def _check_advisory_freshness(ctx: ToolContext, commit_message: str,
             ))
 
         update_state(drive_root, _mutate)
-        return None  # audited bypass
 
-    # Advisory is fresh for this snapshot — check if obligations remain
-    open_obs = state.get_open_obligations(repo_key=repo_key)
-    if state.is_fresh(snapshot_hash, repo_key=repo_key) and open_obs:
-        lines = [f"⚠️ ADVISORY_PRE_REVIEW_REQUIRED: Advisory is current (hash={snapshot_hash[:12]}) "
-                 f"but {len(open_obs)} open obligation(s) from previous blocking rounds must be resolved.\n",
-                 "Unresolved obligations:"]
-        # No [:N] cap — show all obligations so the agent sees every unresolved item.
-        lines += [f"  [{o.obligation_id}] {o.item}: {_truncate_review_reason(o.reason, limit=80)}"
-                  for o in open_obs]
-        lines.append("\nFix the flagged issues and re-run advisory_pre_review so it can mark them PASS.")
+        # Bypass short-circuits the "no fresh advisory for this snapshot" check
+        # (the legitimate operator-authorized override) — but it MUST NOT
+        # silently clear open obligations or commit-readiness debt. Otherwise
+        # `repo_commit_ready=false` surfaced by `review_status` would disagree
+        # with the actual commit gate, and an explicit bypass could land a
+        # commit that violates durable anti-thrashing signals. The bypass has
+        # already been audited to events.jsonl above; now we still enforce the
+        # unresolved obligation/debt check inline (same message shape as the
+        # fresh-but-unresolved branch below).
+        if open_obs or open_debts:
+            debt_parts = []
+            if open_obs:
+                debt_parts.append(f"{len(open_obs)} open obligation(s)")
+            if open_debts:
+                debt_parts.append(f"{len(open_debts)} commit-readiness debt item(s)")
+            lines = [
+                f"⚠️ ADVISORY_PRE_REVIEW_REQUIRED: Advisory bypass audited "
+                f"(hash={snapshot_hash[:12]}), but {' and '.join(debt_parts)} remain "
+                f"unresolved. Bypass does NOT clear durable anti-thrashing signals.\n"
+            ]
+            if open_obs:
+                lines.append("Unresolved obligations:")
+                lines += _render_obligations()
+            if open_debts:
+                lines.append("\nCommit-readiness debt:")
+                lines += _render_debts()
+            lines.append(
+                "\nFix the flagged issues and run advisory_pre_review so it can "
+                "verify them PASS before bypassing again."
+            )
+            return "\n".join(lines)
+
+        return None  # audited bypass, nothing unresolved
+
+    # Advisory is fresh for this snapshot — check if obligations or debt remain.
+    if state.is_fresh(snapshot_hash, repo_key=repo_key) and (open_obs or open_debts):
+        debt_parts = []
+        if open_obs:
+            debt_parts.append(f"{len(open_obs)} open obligation(s)")
+        if open_debts:
+            debt_parts.append(f"{len(open_debts)} commit-readiness debt item(s)")
+        lines = [
+            f"⚠️ ADVISORY_PRE_REVIEW_REQUIRED: Advisory is current (hash={snapshot_hash[:12]}) "
+            f"but {' and '.join(debt_parts)} remain unresolved.\n"
+        ]
+        if open_obs:
+            lines.append("Unresolved obligations:")
+            # No [:N] cap — show all obligations so the agent sees every unresolved item.
+            lines += _render_obligations()
+        if open_debts:
+            lines.append("\nCommit-readiness debt:")
+            # No [:N] cap — show all debts so the agent can start retries from them.
+            lines += _render_debts()
+        lines.append("\nFix the flagged issues and re-run advisory_pre_review so it can verify them PASS.")
         lines.append("Or bypass: repo_commit(commit_message='...', skip_advisory_pre_review=True) (audited).")
         return "\n".join(lines)
 
@@ -445,16 +503,21 @@ def _check_advisory_freshness(ctx: ToolContext, commit_message: str,
     if open_obs:
         lines = [f"\nOpen obligations ({len(open_obs)}):"]
         # No [:N] cap — all obligations shown so nothing is silently hidden.
-        lines += [f"  [{o.obligation_id}] {o.item}: {_truncate_review_reason(o.reason, limit=80)}"
-                  for o in open_obs]
+        lines += _render_obligations()
         lines.append("  → advisory_pre_review will verify each obligation is resolved.")
         obs_section = "\n".join(lines)
+    debt_section = ""
+    if open_debts:
+        debt_lines = [f"\nCommit-readiness debt ({len(open_debts)}):"]
+        debt_lines += _render_debts()
+        debt_lines.append("  → clear or rebut these debt items before the next reviewed attempt.")
+        debt_section = "\n".join(debt_lines)
 
     return (
         f"⚠️ ADVISORY_PRE_REVIEW_REQUIRED: No fresh advisory run found for this snapshot "
         f"(hash={snapshot_hash[:12]}).\n"
         f"{stale_reason}\n"
-        f"{obs_section}\n\n"
+        f"{obs_section}{debt_section}\n\n"
         "Correct workflow:\n"
         "  1. Finish ALL edits first\n"
         "  2. advisory_pre_review(commit_message='your message')   ← run AFTER all edits\n"

@@ -50,8 +50,11 @@ from ouroboros.tools.review_helpers import (
     CRITICAL_FINDING_CALIBRATION,
     get_advisory_runtime_diagnostics as _get_runtime_diagnostics,
     format_advisory_sdk_error as _format_advisory_error,
+    normalize_reviewer_obligation_id,
+    strip_obligation_suffix,
     _ANTI_THRASHING_RULE_VERDICT,
     _ANTI_THRASHING_RULE_ITEM_NAME,
+    _HISTORY_VERIFICATION_ONLY_RULE,
 )
 from ouroboros.utils import (
     append_jsonl,
@@ -118,9 +121,6 @@ def _emit_advisory_usage(
 
 
 _ADVISORY_PROMPT_MAX_CHARS = 1_600_000  # ~400K tokens; non-blocking skip when exceeded
-_OBLIGATION_SUFFIX_RE = re.compile(r"\s*\(obligation\s+([a-f0-9]+)\)\s*$", re.IGNORECASE)
-
-
 def _load_doc(repo_dir: pathlib.Path, relpath: str, fallback: str = "") -> str:
     try:
         p = repo_dir / relpath
@@ -329,8 +329,9 @@ Return ONLY a JSON array. Each element:
 ## Step-by-step instructions
 1. Read the FULL content of every changed file using the Read tool. Do not skip any file.
 2. Check EVERY item from the "Repo Commit Checklist" — do not stop after the first issue.
-3. Pay equal attention to ALL 14 checklist items. bible_compliance and security_issues must be
-   evaluated at the same strictness as the downstream blocking reviewers.
+3. Pay equal attention to EVERY checklist item listed below — do not favour early items.
+   bible_compliance and security_issues must be evaluated at the same strictness as the
+   downstream blocking reviewers.
 4. Look for ALL bugs, logic errors, regressions, race conditions, and violations of BIBLE.md or DEVELOPMENT.md.
 5. Cross-check: do tool descriptions in prompts match actual get_tools() exports?
    Does ARCHITECTURE.md header version match the VERSION file?
@@ -346,12 +347,15 @@ Return ONLY a JSON array. Each element:
       When two or more open obligations share the same item (e.g. two distinct `code_quality`
       findings), you MUST emit a separate JSON entry for EACH one and use the
       `(obligation <id>)` suffix in the `"item"` field to target it precisely:
-        {{"item": "code_quality (obligation abc123def456)", "verdict": "PASS", ...}}
+        {{"item": "code_quality (obligation obl-0001)", "verdict": "PASS", ...}}
       A generic `"item": "code_quality"` entry when multiple same-item obligations are
       open will NOT resolve all of them — only the one matched by `obligation_id` will
       be closed; the rest remain open until explicitly addressed.
-   e. **VERDICT IS AUTHORITATIVE:** {_ANTI_THRASHING_RULE_VERDICT}
-   f. **DO NOT REPHRASE:** {_ANTI_THRASHING_RULE_ITEM_NAME}
+   e. You MAY also provide the stable `obligation_id` explicitly as a top-level JSON field.
+      If both the suffix and the field are present, they must match.
+   f. **VERDICT IS AUTHORITATIVE:** {_ANTI_THRASHING_RULE_VERDICT}
+   g. **DO NOT REPHRASE:** {_ANTI_THRASHING_RULE_ITEM_NAME}
+   h. **VERIFICATION ONLY:** {_HISTORY_VERIFICATION_ONLY_RULE}
 7. Output ONLY the JSON array — no markdown fences, no commentary outside the JSON.
 """
     return prompt
@@ -362,11 +366,14 @@ The following text is the output of an advisory code review. It may contain narr
 reasoning, tool call traces, and a JSON checklist array. Extract ONLY the JSON checklist
 array from this text and return it as a valid JSON array. No prose, no markdown fences.
 
-Each element MUST have ALL of these fields:
+Each element MUST have ALL of these required fields:
   "item":     checklist item name (string)
   "verdict":  "PASS" or "FAIL" (string)
   "severity": "critical" or "advisory" (string, REQUIRED — do not omit even for PASS entries)
   "reason":   brief explanation (string)
+
+Optional field:
+  "obligation_id": stable id for a previously surfaced obligation
 
 If a FAIL entry in the source is missing a severity, infer it from context:
 treat it as "critical" if it involves bugs, security, or constitutional violations,
@@ -858,15 +865,27 @@ def _resolve_matching_obligations(
         item_name = str(i.get("item", "")).strip()
         if not item_name or not verdict:
             continue
-        explicit_obligation_id = str(i.get("obligation_id", "")).strip().lower()
-        match = _OBLIGATION_SUFFIX_RE.search(item_name)
-        normalized_item_name = _OBLIGATION_SUFFIX_RE.sub("", item_name).strip().lower()
+        explicit_obligation_id = normalize_reviewer_obligation_id(i.get("obligation_id", ""))
+        normalized_item_name, suffix_obligation_id = strip_obligation_suffix(item_name)
+        normalized_item_name = normalized_item_name.strip().lower()
         if normalized_item_name:
             item_verdicts.setdefault(normalized_item_name, set()).add(verdict)
+        # When the reviewer supplies BOTH an explicit `obligation_id` field and
+        # an `(obligation <id>)` suffix embedded in `item`, they must agree. A
+        # mismatch means the entry is ambiguous — recording both ids would let a
+        # single malformed PASS clear two unrelated obligations (including their
+        # associated commit-readiness debt). Treat such entries as ambiguous and
+        # ignore them for obligation resolution; the item-name fallback still
+        # applies below when it's unambiguous.
+        if explicit_obligation_id and suffix_obligation_id:
+            if explicit_obligation_id.lower() == suffix_obligation_id.lower():
+                obligation_verdicts.setdefault(explicit_obligation_id, set()).add(verdict)
+            # else: mismatch — skip both ids for this entry
+            continue
         if explicit_obligation_id:
             obligation_verdicts.setdefault(explicit_obligation_id, set()).add(verdict)
-        if match:
-            obligation_verdicts.setdefault(match.group(1).lower(), set()).add(verdict)
+        elif suffix_obligation_id:
+            obligation_verdicts.setdefault(suffix_obligation_id, set()).add(verdict)
 
     # Only PASS items that have no FAIL entry for the same item
     unambiguous_pass = {
@@ -903,12 +922,28 @@ def _resolve_matching_obligations(
             resolved_by=f"advisory run {snapshot_hash[:12]}",
             repo_key=repo_key,
         )
+        state._sync_commit_readiness_debts(repo_key=repo_key)
 
 
 def _next_step_guidance(latest: Optional["AdvisoryRunRecord"], state: "AdvisoryReviewState",
                         stale_from_edit: bool, stale_from_edit_ts: Optional[str],
-                        open_obs: list, effective_is_fresh: bool = False) -> str:
+                        open_obs: list, open_debts: list, effective_is_fresh: bool = False) -> str:
     """Return a concrete next-step string based on current advisory state."""
+    unresolved_parts: list[str] = []
+    if open_obs:
+        unresolved_parts.append(f"{len(open_obs)} open obligation(s)")
+    if open_debts:
+        unresolved_parts.append(f"{len(open_debts)} commit-readiness debt item(s)")
+    unresolved_summary = " and ".join(unresolved_parts)
+    debt_prefix = (
+        f"Start from the {len(open_debts)} commit-readiness debt item(s) surfaced by review_status, "
+        "resolve or rebut each one, and only then continue with new edits. "
+        if open_debts else ""
+    )
+    open_obligation_prefix = (
+        f"There are still {len(open_obs)} open obligation(s) from previous blocking rounds. "
+        if open_obs else ""
+    )
     if not effective_is_fresh:
         # preflight_blocked for the exact current snapshot (SDK skipped —
         # a staged .py file has a SyntaxError). Raise it above parse_failure
@@ -924,25 +959,32 @@ def _next_step_guidance(latest: Optional["AdvisoryRunRecord"], state: "AdvisoryR
                 "Last advisory run was blocked by syntax preflight: a staged .py "
                 "file has a SyntaxError. See the file:line:msg in the raw_result. "
                 "Fix the syntax error and re-run advisory_pre_review."
+                + debt_prefix
                 + tail
             )
         # parse_failure for the exact current snapshot (advisory ran but output was unparseable)
         if latest and latest.status == "parse_failure" and not stale_from_edit:
-            if open_obs:
+            if open_obs or open_debts:
+                # Bypass does NOT clear open obligations or commit-readiness
+                # debt — `_check_advisory_freshness` enforces both even when
+                # `skip_advisory_pre_review=True`. Do not suggest bypass here.
                 return (
                     "Last advisory run produced unparseable output (parse_failure). "
-                    f"There are still {len(open_obs)} open obligation(s) from previous blocking rounds. "
-                    "After the first blocked review, stop patching one finding at a time: re-read the full diff, "
-                    "group obligations by root cause, rewrite the plan, finish all remaining edits, then re-run "
-                    "advisory_pre_review(commit_message='...'), or bypass: "
-                    "repo_commit(skip_advisory_pre_review=True) (audited)."
+                    + open_obligation_prefix
+                    + debt_prefix
+                    + "After the first blocked review, stop patching one finding at a time: re-read the full diff, "
+                    + "group obligations by root cause, rewrite the plan, finish all remaining edits, then re-run "
+                    + "advisory_pre_review(commit_message='...'). "
+                    + "Note: `skip_advisory_pre_review=True` will still be blocked by the commit gate while any "
+                    + "obligation or commit-readiness debt is open."
                 )
             return (
                 "Last advisory run produced unparseable output (parse_failure). "
-                "Re-run: advisory_pre_review(commit_message='...'), "
-                "or bypass: repo_commit(skip_advisory_pre_review=True) (audited)."
+                + "Re-run: advisory_pre_review(commit_message='...'), "
+                + "or bypass: repo_commit(skip_advisory_pre_review=True) (audited; bypass only works "
+                + "when no open obligation or commit-readiness debt remains)."
             )
-        if open_obs:
+        if open_obs or open_debts:
             stale_prefix = (
                 f"Advisory was invalidated by a worktree edit at {stale_from_edit_ts}. "
                 if stale_from_edit else
@@ -950,10 +992,11 @@ def _next_step_guidance(latest: Optional["AdvisoryRunRecord"], state: "AdvisoryR
             )
             return (
                 stale_prefix
-                + f"There are still {len(open_obs)} open obligation(s) from previous blocking rounds. "
-                "After the first blocked review, stop patching one finding at a time: re-read the full diff, "
-                "group obligations by root cause, rewrite the plan, finish all remaining edits, then run "
-                "advisory_pre_review(commit_message='...')."
+                + open_obligation_prefix
+                + debt_prefix
+                + "After the first blocked review, stop patching one finding at a time: re-read the full diff, "
+                + "group obligations by root cause, rewrite the plan, finish all remaining edits, then run "
+                + "advisory_pre_review(commit_message='...')."
             )
         if stale_from_edit:
             return (
@@ -966,14 +1009,16 @@ def _next_step_guidance(latest: Optional["AdvisoryRunRecord"], state: "AdvisoryR
         return "Advisory is stale (snapshot changed). Run: advisory_pre_review(commit_message='...')"
 
     # Advisory is effectively fresh — check obligations and findings
-    if open_obs:
+    if open_obs or open_debts:
         return (
-            f"Advisory is current but {len(open_obs)} open obligation(s) remain from "
-            "previous blocking rounds. repo_commit will be blocked until obligations are "
-            "cleared. After the first blocked review, stop patching one "
-            "finding at a time: re-read the full diff, group obligations by root cause, rewrite "
-            "the plan, then continue. Fix the issues, re-run advisory_pre_review so it marks "
-            "them PASS, or bypass: repo_commit(skip_advisory_pre_review=True) (audited)."
+            f"Advisory is current but unresolved review debt remains: {unresolved_summary or 'review debt'}. "
+            "repo_commit will be blocked until that debt is cleared. "
+            + debt_prefix
+            + "After the first blocked review, stop patching one "
+            + "finding at a time: re-read the full diff, group obligations by root cause, rewrite "
+            + "the plan, then continue. Fix the issues and re-run advisory_pre_review so it marks "
+            + "them PASS. Note: `skip_advisory_pre_review=True` will still be blocked by the commit "
+            + "gate while any obligation or commit-readiness debt is open."
         )
 
     if latest and latest.status == "skipped":
@@ -1068,12 +1113,18 @@ def _handle_advisory_pre_review(
         except Exception:
             pass
 
-    # Check if we already have a fresh run for this snapshot.
-    # BUT: if there are open obligations from a blocked commit, force a re-run
-    # even on the same snapshot hash so obligations are explicitly verified.
+    # Check if we already have a fresh run for this snapshot. If open
+    # obligations OR commit-readiness debt exist for this repo, force a re-run
+    # so both are explicitly verified — `already_fresh` must stay aligned with
+    # `_check_advisory_freshness`, which blocks on either signal.
     existing = state.find_by_hash(snapshot_hash, repo_key=repo_key)
     open_obligations = state.get_open_obligations(repo_key=repo_key)
-    if existing and existing.status in ("fresh", "bypassed", "skipped") and not open_obligations:
+    open_debts = state.get_open_commit_readiness_debts(repo_key=repo_key)
+    already_fresh_ok = (
+        existing and existing.status in ("fresh", "bypassed", "skipped")
+        and not open_obligations and not open_debts
+    )
+    if already_fresh_ok:
         return json.dumps({
             "status": "already_fresh",
             "snapshot_hash": snapshot_hash,
@@ -1377,6 +1428,7 @@ def _obligations_payload(open_obs: list) -> list:
     return [
         {
             "obligation_id": ob.obligation_id,
+            "fingerprint": getattr(ob, "fingerprint", ""),
             "item": ob.item,
             "severity": ob.severity,
             "reason": _truncate_review_artifact(ob.reason, limit=200),
@@ -1385,6 +1437,25 @@ def _obligations_payload(open_obs: list) -> list:
             "source_commit": ob.source_attempt_msg,
         }
         for ob in open_obs
+    ]
+
+
+def _commit_readiness_debts_payload(open_debts: list) -> list:
+    return [
+        {
+            "debt_id": debt.debt_id,
+            "category": debt.category,
+            "title": debt.title,
+            "summary": _truncate_review_artifact(debt.summary, limit=220),
+            "status": debt.status,
+            "severity": debt.severity,
+            "source": debt.source,
+            "repo_key": debt.repo_key or None,
+            "source_obligation_ids": list(debt.source_obligation_ids or []),
+            "evidence": list(debt.evidence or []),
+            "updated_at": debt.updated_at,
+        }
+        for debt in open_debts
     ]
 
 
@@ -1473,6 +1544,7 @@ def _handle_review_status(
     # Gate-accurate freshness: look up the run matching the CURRENT hash,
     # not just `latest` — handles restored snapshots where an older fresh run exists.
     open_obs = state.get_open_obligations(repo_key=repo_filter)
+    open_debts = state.get_open_commit_readiness_debts(repo_key=repo_filter)
     matching_run = state.find_by_hash(current_hash, repo_key=repo_filter) if current_hash else None
     effective_is_fresh = bool(
         state.is_fresh(current_hash, repo_key=repo_filter) if current_hash else False
@@ -1532,6 +1604,7 @@ def _handle_review_status(
 
     # Open obligations (already computed above as open_obs for effective_is_fresh)
     obligations_data = _obligations_payload(open_obs)
+    debts_data = _commit_readiness_debts_payload(open_debts)
 
     # Determine readiness and actionable next step (via module-level helper)
 
@@ -1563,7 +1636,7 @@ def _handle_review_status(
         pass  # status_msg set below after effective_status is computed
 
     next_step_msg = _next_step_guidance(guidance_run, state, stale_from_edit, stale_from_edit_ts,
-                                         open_obs, effective_is_fresh=effective_is_fresh)
+                                         open_obs, open_debts, effective_is_fresh=effective_is_fresh)
     # Derive primary status fields from current snapshot (gate-accurate), not from latest run.
     # matching_run is the advisory that matches the live worktree hash (may differ from latest).
     # If a matching run exists for this hash, use its actual status (including "parse_failure")
@@ -1588,7 +1661,10 @@ def _handle_review_status(
         status_msg = f"{status_msg}  |  Current advisory: {effective_status}"
     else:
         status_msg = f"Current advisory: {effective_status}"
+    if open_debts:
+        status_msg = f"{status_msg}  |  Commit-readiness debt: {len(open_debts)}"
 
+    retry_anchor = "commit_readiness_debt" if open_debts else None
     response_body: Dict[str, Any] = {
         "latest_advisory_status": effective_status,
         "latest_advisory_hash": effective_hash,
@@ -1606,6 +1682,10 @@ def _handle_review_status(
         "last_commit_attempt": commit_attempt_data,
         "open_obligations": obligations_data,
         "open_obligations_count": len(obligations_data),
+        "commit_readiness_debts": debts_data,
+        "commit_readiness_debts_count": len(debts_data),
+        "repo_commit_ready": bool(effective_is_fresh and not open_obs and not open_debts),
+        "retry_anchor": retry_anchor,
         "status_summary": status_msg,
         "message": status_msg,  # backward-compat alias for status_summary
         "next_step": next_step_msg,
@@ -1636,12 +1716,15 @@ def get_tools() -> list:
                 "description": (
                     "Run an advisory pre-commit review via Claude Agent SDK (read-only: Read, Grep, Glob only). "
                     "MUST be called before repo_commit. Returns structured JSON findings. "
-                    "Findings are advisory (non-blocking), but the absence of a fresh matching "
-                    "advisory run will block repo_commit. "
+                    "Findings are advisory (non-blocking), but repo_commit is blocked when ANY of the following "
+                    "holds: (a) no fresh matching advisory run for the current staged snapshot, "
+                    "(b) open obligations from prior blocked rounds remain unresolved, or "
+                    "(c) repo-scoped commit-readiness debt is still open (see review_status for details). "
                     "Correct workflow: finish edits -> advisory_pre_review(...) -> repo_commit(...) immediately. "
                     "WARNING: any edit (repo_write/str_replace_editor) after advisory_pre_review "
                     "automatically marks advisory as stale and requires re-running it. "
-                    "Use skip_advisory_pre_review=True to bypass (bypass is durably audited)."
+                    "Use skip_advisory_pre_review=True to bypass the freshness check (bypass is durably audited); "
+                    "the bypass does NOT clear open obligations or commit-readiness debt."
                 ),
                 "parameters": {
                     "type": "object",
@@ -1689,6 +1772,12 @@ def get_tools() -> list:
                     "(reviewing/blocked/succeeded/failed) with block reason and actionable guidance; "
                     "whether advisory is stale because of a worktree edit; "
                     "open obligations from previous blocking rounds; "
+                    "open commit-readiness debt (durable repo-scoped anti-thrashing signal with fields "
+                    "`commit_readiness_debts`, `commit_readiness_debts_count`); "
+                    "`repo_commit_ready` (aligned with the real commit gate: fresh advisory AND no open "
+                    "obligations AND no open debt); "
+                    "`retry_anchor` (non-null, currently `commit_readiness_debt`, when debt is open — "
+                    "start the next retry from that record instead of patching one obligation at a time); "
                     "and a concrete next_step recommendation. "
                     "Pass include_raw=true to surface the full per-actor evidence "
                     "(triad_raw_results, scope_raw_result) for the targeted attempt."

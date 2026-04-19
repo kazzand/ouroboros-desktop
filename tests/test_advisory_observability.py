@@ -265,6 +265,7 @@ def test_next_step_guidance_for_skipped_advisory():
         stale_from_edit=False,
         stale_from_edit_ts=None,
         open_obs=[],
+        open_debts=[],
         effective_is_fresh=True,
     )
     # Must NOT say "fresh" or "no critical findings" — that would mislead
@@ -301,6 +302,7 @@ def test_next_step_guidance_requires_reaudit_when_obligations_remain():
         stale_from_edit=False,
         stale_from_edit_ts=None,
         open_obs=open_obs,
+        open_debts=[],
         effective_is_fresh=True,
     )
     lowered = msg.lower()

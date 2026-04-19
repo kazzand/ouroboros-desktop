@@ -532,13 +532,20 @@ def build_review_context(env: Any) -> str:
 
         state = load_state(pathlib.Path(env.drive_root))
         continuations, corrupt = list_review_continuations(env.drive_root)
-        if not state.advisory_runs and not state.last_commit_attempt and not continuations and not corrupt:
-            return ""
-
         repo_dir = pathlib.Path(env.repo_dir)
         repo_key = make_repo_key(repo_dir)
         snapshot_hash = compute_snapshot_hash(repo_dir)
         open_obs = state.get_open_obligations(repo_key=repo_key)
+        open_debts = state.get_open_commit_readiness_debts(repo_key=repo_key)
+        if (
+            not state.advisory_runs
+            and not state.last_commit_attempt
+            and not continuations
+            and not corrupt
+            and not open_obs
+            and not open_debts
+        ):
+            return ""
 
         current_run = None
         for run in reversed(state.advisory_runs):
@@ -555,6 +562,7 @@ def build_review_context(env: Any) -> str:
             current_run is not None
             and current_run.status in ("fresh", "bypassed", "skipped")
             and not open_obs
+            and not open_debts
         )
         lines.append(f"- repo_key={repo_key}")
         lines.append(f"- snapshot_hash={snapshot_hash[:12] or '(empty)'}")
@@ -574,6 +582,24 @@ def build_review_context(env: Any) -> str:
                 f"{_truncate_with_notice(state.last_stale_reason or 'worktree edit invalidated advisory freshness', 220)}"
             )
 
+        if open_debts:
+            lines.append("- retry_anchor=commit_readiness_debt")
+            lines.append(f"- commit_readiness_debt={len(open_debts)}")
+            lines.append("\n### Commit-readiness debt (start retry here)")
+            for debt in open_debts:
+                summary = _truncate_with_notice(getattr(debt, "summary", ""), 180).replace("\n", " ")
+                lines.append(
+                    f"- [{getattr(debt, 'debt_id', '')}] status={getattr(debt, 'status', '')} "
+                    f"category={getattr(debt, 'category', '')} source={getattr(debt, 'source', '')}"
+                )
+                lines.append(f"  summary={summary}")
+                if getattr(debt, "source_obligation_ids", None):
+                    lines.append(f"  obligation_ids={', '.join(list(debt.source_obligation_ids or []))}")
+                for evidence in list(getattr(debt, "evidence", []) or []):
+                    lines.append(f"  evidence={_truncate_with_notice(evidence, 180).replace(chr(10), ' ')}")
+        else:
+            lines.append("- commit_readiness_debt=0")
+
         if open_obs:
             lines.append(f"- open_obligations={len(open_obs)}")
             for ob in open_obs:
@@ -592,10 +618,18 @@ def build_review_context(env: Any) -> str:
         if scoped_continuations:
             lines.append("\n### Open review continuations")
             scoped_continuations.sort(key=lambda item: str(item.updated_ts or item.created_ts or ""), reverse=True)
-            # v4.33: surface more accumulated context — 5 continuations, up to 3 findings
-            # each, so serial blocked-attempts don't hide evidence that helps the agent
-            # notice persistent-issue patterns (BIBLE P2: fix the class, not the instance).
-            for item in scoped_continuations[:5]:
+            # Cognitive artifact: keep visible list capped (context budget) but emit
+            # explicit OMISSION NOTEs whenever a cap truncates — DEVELOPMENT.md /
+            # CHECKLISTS 2(f): no silent `[:N]` slicing of review-output artifacts.
+            _CONTINUATION_CAP = 5
+            _PER_FINDING_CAP = 3
+            shown_continuations = scoped_continuations[:_CONTINUATION_CAP]
+            if len(scoped_continuations) > _CONTINUATION_CAP:
+                lines.append(
+                    f"⚠️ OMISSION NOTE: {len(scoped_continuations) - _CONTINUATION_CAP} "
+                    f"older continuation(s) omitted (showing {_CONTINUATION_CAP} most recent)."
+                )
+            for item in shown_continuations:
                 task_status = str((load_task_result(env.drive_root, item.task_id) or {}).get("status") or "missing")
                 lines.append(
                     f"- task={item.task_id} status={task_status} source={item.source} "
@@ -605,25 +639,50 @@ def build_review_context(env: Any) -> str:
                 if item.block_reason:
                     lines.append(f"  block_reason={item.block_reason}")
                 if item.readiness_warnings:
-                    for warn in item.readiness_warnings[:3]:
+                    shown = list(item.readiness_warnings)[:_PER_FINDING_CAP]
+                    for warn in shown:
                         warning = _truncate_with_notice(warn, 180).replace("\n", " ")
                         lines.append(f"  readiness_warning={warning}")
+                    if len(item.readiness_warnings) > _PER_FINDING_CAP:
+                        lines.append(
+                            f"  ⚠️ OMISSION NOTE: {len(item.readiness_warnings) - _PER_FINDING_CAP} "
+                            f"additional readiness_warning(s) omitted."
+                        )
                 if item.critical_findings:
-                    for top in item.critical_findings[:3]:
+                    shown = list(item.critical_findings)[:_PER_FINDING_CAP]
+                    for top in shown:
                         label = str(top.get("item") or top.get("reason") or "critical finding")
                         reason = _truncate_with_notice(top.get("reason") or "", 140).replace("\n", " ")
                         lines.append(f"  critical_finding={label}: {reason}")
+                    if len(item.critical_findings) > _PER_FINDING_CAP:
+                        lines.append(
+                            f"  ⚠️ OMISSION NOTE: {len(item.critical_findings) - _PER_FINDING_CAP} "
+                            f"additional critical_finding(s) omitted."
+                        )
                 if item.advisory_findings:
-                    for top in item.advisory_findings[:3]:
+                    shown = list(item.advisory_findings)[:_PER_FINDING_CAP]
+                    for top in shown:
                         label = str(top.get("item") or top.get("reason") or "advisory finding")
                         reason = _truncate_with_notice(top.get("reason") or "", 140).replace("\n", " ")
                         lines.append(f"  advisory_finding={label}: {reason}")
+                    if len(item.advisory_findings) > _PER_FINDING_CAP:
+                        lines.append(
+                            f"  ⚠️ OMISSION NOTE: {len(item.advisory_findings) - _PER_FINDING_CAP} "
+                            f"additional advisory_finding(s) omitted."
+                        )
                 if item.obligation_ids:
                     lines.append(f"  obligation_ids={', '.join(item.obligation_ids)}")
         if corrupt:
             lines.append("\n### Corrupt review continuations")
-            for item in corrupt[:3]:
+            _CORRUPT_CAP = 3
+            shown_corrupt = corrupt[:_CORRUPT_CAP]
+            for item in shown_corrupt:
                 lines.append(f"- {_truncate_with_notice(item, 220)}")
+            if len(corrupt) > _CORRUPT_CAP:
+                lines.append(
+                    f"⚠️ OMISSION NOTE: {len(corrupt) - _CORRUPT_CAP} "
+                    f"additional corrupt entry/entries omitted."
+                )
 
         history = format_status_section(state, repo_dir=repo_dir)
         if history:

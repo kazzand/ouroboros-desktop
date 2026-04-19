@@ -61,12 +61,15 @@ from ouroboros.tools.review_helpers import (
     load_checklist_section as _load_checklist_section_precise,
     build_touched_file_pack,
     build_goal_section,
+    build_rebuttal_section as _shared_build_rebuttal_section,
     CRITICAL_FINDING_CALIBRATION,
     format_obligation_excerpt,
     format_prompt_code_block,
+    normalize_reviewer_items,
     _ANTI_THRASHING_RULE_VERDICT,
     _ANTI_THRASHING_RULE_ITEM_NAME,
     _CONVERGENCE_RULE_TEXT,
+    _HISTORY_VERIFICATION_ONLY_RULE,
 )
 
 
@@ -372,9 +375,13 @@ _REVIEW_PROMPT_TEMPLATE = """\
 
 You must produce a JSON array. Each element has:
 - "item"
+- optional "obligation_id" when you are resolving or re-checking a previously surfaced obligation
 - "verdict": "PASS" or "FAIL"
 - "severity": "critical" or "advisory"
 - "reason": for FAIL — specific file/line, what is wrong, how to fix it
+
+If an open obligation record above already names an `obligation_id` for this root cause,
+reuse that exact `obligation_id`. Do NOT invent a new id when the same root cause persists.
 
 ## Anti pattern-lock guard
 
@@ -427,7 +434,7 @@ def _parse_review_json(raw: str) -> Optional[list]:
     try:
         obj = json.loads(text)
         if isinstance(obj, list):
-            return obj
+            return normalize_reviewer_items(obj)
     except (json.JSONDecodeError, ValueError):
         pass
     start, end = text.find("["), text.rfind("]")
@@ -435,7 +442,7 @@ def _parse_review_json(raw: str) -> Optional[list]:
         try:
             obj = json.loads(text[start:end + 1])
             if isinstance(obj, list):
-                return obj
+                return normalize_reviewer_items(obj)
         except (json.JSONDecodeError, ValueError):
             pass
     return None
@@ -690,11 +697,11 @@ def _build_review_history_section(history: list, open_obligations: list = None) 
             if entry.get("critical"):
                 lines.append("CRITICAL findings:")
                 for f in entry["critical"]:
-                    lines.append(f"- {f}")
+                    lines.append(f"- {_format_review_entry(f, default_severity='critical')}")
             if entry.get("advisory"):
                 lines.append("Advisory findings:")
                 for f in entry["advisory"]:
-                    lines.append(f"- {f}")
+                    lines.append(f"- {_format_review_entry(f)}")
             lines.append("")
 
     if open_obligations:
@@ -725,6 +732,8 @@ def _build_review_history_section(history: list, open_obligations: list = None) 
     if open_obligations:
         lines.append(f"{rule_idx}. {_ANTI_THRASHING_RULE_ITEM_NAME}")
         rule_idx += 1
+    lines.append(f"{rule_idx}. {_HISTORY_VERIFICATION_ONLY_RULE}")
+    rule_idx += 1
     # Convergence rule fires from the 3rd attempt onward — `len(history) >= 2`
     # means two prior rounds already exist, so this is attempt 3+.
     if history and len(history) >= 2:
@@ -744,6 +753,7 @@ def _review_entry(
     model: str = "",
     tag: str = "triad",
     verdict: str = "FAIL",
+    obligation_id: str = "",
 ) -> dict:
     entry = {
         "severity": severity,
@@ -754,6 +764,8 @@ def _review_entry(
     }
     if model:
         entry["model"] = model
+    if obligation_id:
+        entry["obligation_id"] = obligation_id
     return entry
 
 
@@ -799,15 +811,7 @@ def _handle_review_block_or_warning(
 
 
 def _build_rebuttal_section(review_rebuttal: str) -> str:
-    if not review_rebuttal:
-        return ""
-    return (
-        "\n## Developer's rebuttal to previous review feedback\n\n"
-        f"{review_rebuttal}\n\n"
-        "Reconsider previous FAIL verdict(s) in light of this argument. "
-        "If the argument is valid, change your verdict to PASS. "
-        "If not, maintain FAIL and explain why.\n"
-    )
+    return _shared_build_rebuttal_section(review_rebuttal)
 
 
 def _load_dev_guide_text(repo_dir: pathlib.Path) -> str:
@@ -934,6 +938,7 @@ def _collect_review_findings(ctx: ToolContext, model_results: list) -> tuple[lis
             severity = str(item.get("severity", "advisory")).lower()
             item_name = item.get("item", "?")
             reason = item.get("reason", "")
+            obligation_id = str(item.get("obligation_id", "") or "")
             if item_verdict != "FAIL":
                 continue
             desc = f"[{model_name}] {item_name}: {reason}"
@@ -944,6 +949,7 @@ def _collect_review_findings(ctx: ToolContext, model_results: list) -> tuple[lis
                     item=str(item_name),
                     reason=str(reason),
                     model=model_name,
+                    obligation_id=obligation_id,
                 ))
             else:
                 advisory_warns.append(desc)
@@ -952,6 +958,7 @@ def _collect_review_findings(ctx: ToolContext, model_results: list) -> tuple[lis
                     item=str(item_name),
                     reason=str(reason),
                     model=model_name,
+                    obligation_id=obligation_id,
                 ))
 
     # Store structured findings on ctx for obligation tracking
@@ -979,11 +986,13 @@ def _build_critical_block_message(
     advisory_warns: List[str],
     errored_note: str,
 ) -> str:
+    critical_entries = list(getattr(ctx, "_last_review_critical_findings", []) or critical_fails)
+    advisory_entries = list(getattr(ctx, "_last_review_advisory_findings", []) or advisory_warns)
     ctx._review_history.append({
         "attempt": ctx._review_iteration_count,
         "commit_message": commit_message,  # full — no [:200] truncation
-        "critical": list(critical_fails),
-        "advisory": list(advisory_warns),
+        "critical": critical_entries,
+        "advisory": advisory_entries,
     })
 
     iteration_note = f" (attempt {ctx._review_iteration_count})"
@@ -1028,9 +1037,6 @@ def _build_critical_block_message(
             "- If the same critical persists after two concrete fixes, STOP retrying:\n"
             "  split the diff or use `send_user_message` to escalate."
         )
-
-    critical_entries = list(getattr(ctx, "_last_review_critical_findings", []) or critical_fails)
-    advisory_entries = list(getattr(ctx, "_last_review_advisory_findings", []) or advisory_warns)
 
     return (
         f"⚠️ REVIEW_BLOCKED{iteration_note}: Critical issues found by reviewers.\n"

@@ -21,6 +21,7 @@ from ouroboros.tools.review_helpers import (
     format_obligation_excerpt,
     _ANTI_THRASHING_RULE_VERDICT,
     _ANTI_THRASHING_RULE_ITEM_NAME,
+    _HISTORY_VERIFICATION_ONLY_RULE,
 )
 from ouroboros.tools.scope_review import (
     _build_review_history_section as scope_hist,
@@ -85,6 +86,11 @@ def test_history_section_anti_rephrase_instruction():
     assert _ANTI_THRASHING_RULE_ITEM_NAME in out
 
 
+def test_history_section_verification_only_instruction():
+    out = triad_hist(_mk_history(), open_obligations=_mk_obligations())
+    assert _HISTORY_VERIFICATION_ONLY_RULE in out
+
+
 def test_history_section_empty_without_history_or_obligations():
     assert triad_hist([], open_obligations=None) == ""
     assert triad_hist([], open_obligations=[]) == ""
@@ -125,6 +131,7 @@ def test_scope_review_history_section_verdict_authoritative():
     out = scope_hist(_mk_history(), open_obligations=_mk_obligations())
     assert _ANTI_THRASHING_RULE_VERDICT in out
     assert _ANTI_THRASHING_RULE_ITEM_NAME in out
+    assert _HISTORY_VERIFICATION_ONLY_RULE in out
 
 
 def test_scope_review_history_section_empty_without_inputs():
@@ -138,7 +145,6 @@ def test_scope_review_history_section_empty_without_inputs():
 
 
 def test_scope_history_section_verdict_authoritative():
-    from ouroboros.tools.review_helpers import _ANTI_THRASHING_RULE_VERDICT
     history = [
         {"summary": "previous scope round noted a broken contract",
          "status": "responded"},
@@ -146,6 +152,7 @@ def test_scope_history_section_verdict_authoritative():
     out = _build_scope_history_section(history)
     # The shared constant is now interpolated into the scope history section.
     assert _ANTI_THRASHING_RULE_VERDICT in out
+    assert _HISTORY_VERIFICATION_ONLY_RULE in out
 
 
 # ---------------------------------------------------------------------------
@@ -199,6 +206,7 @@ def test_advisory_prompt_includes_verdict_authoritative_and_anti_rephrase_rules(
     )
     assert "VERDICT IS AUTHORITATIVE" in prompt
     assert "DO NOT REPHRASE" in prompt
+    assert "VERIFICATION ONLY" in prompt
 
 
 # ---------------------------------------------------------------------------

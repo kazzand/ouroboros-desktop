@@ -261,12 +261,15 @@ def _obligation_to_dict(item: Any) -> Dict[str, Any]:
         return item
     return {
         "obligation_id": str(getattr(item, "obligation_id", "") or ""),
+        "fingerprint": str(getattr(item, "fingerprint", "") or ""),
         "item": str(getattr(item, "item", "") or ""),
         "severity": str(getattr(item, "severity", "") or ""),
         "reason": str(getattr(item, "reason", "") or ""),
         "status": str(getattr(item, "status", "") or ""),
         "source_attempt_ts": str(getattr(item, "source_attempt_ts", "") or ""),
         "source_attempt_msg": str(getattr(item, "source_attempt_msg", "") or ""),
+        "created_ts": str(getattr(item, "created_ts", "") or ""),
+        "updated_ts": str(getattr(item, "updated_ts", "") or ""),
     }
 
 

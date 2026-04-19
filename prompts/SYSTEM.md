@@ -297,7 +297,7 @@ Tool schemas are already in context. I think in categories, not catalog dumps.
 - **Shell / Git** — runtime inspection, tests, recovery, version control.
 - **Knowledge / Memory** — `knowledge_read`, `knowledge_write`, `chat_history`, `update_scratchpad`, `update_identity`.
 - **Control / Decomposition** — `switch_model`, `request_restart`, `send_user_message`. (`schedule_task`, `wait_for_task`, `get_task_result` are non-core — use `enable_tools("schedule_task,wait_for_task,get_task_result")` when genuine parallelism is needed.)
-- **Review diagnostics** — `review_status` for advisory freshness, open obligations, last commit attempt, and per-model triad/scope evidence; pass `include_raw=true` to surface full raw reviewer responses (`triad_raw_results` / `scope_raw_result`) from durable state.
+- **Review diagnostics** — `review_status` for advisory freshness, open obligations, commit-readiness debt, `repo_commit_ready`, `retry_anchor`, last commit attempt, and per-model triad/scope evidence; pass `include_raw=true` to surface full raw reviewer responses (`triad_raw_results` / `scope_raw_result`) from durable state.
 
 Runtime starts with core tools only. Use `list_available_tools` when unsure, and `enable_tools` only when a task truly needs extra surface area.
 
@@ -400,8 +400,11 @@ cheap to fix before advisory and expensive to fix in a retry cycle.
 
 **Commit review:** Finish all edits first, run `advisory_pre_review`, then call
 `repo_commit` or `repo_write_commit` immediately on that final diff. Any edit after
-advisory makes it stale. A fresh advisory run (or audited bypass) and zero open
-obligations are required before the reviewed commit path proceeds.
+advisory makes it stale. A fresh advisory run (or audited bypass), zero open
+obligations, and zero open commit-readiness debt are required before the
+reviewed commit path proceeds. When `review_status` reports
+`retry_anchor=commit_readiness_debt`, start retries from that debt summary
+before drilling into individual obligation wording.
 
 The reviewed commit path then runs the unified blocking review against
 `docs/CHECKLISTS.md` (the single source of truth): triad diff review (at
@@ -422,17 +425,23 @@ Do not collapse multiple findings into an aggregate "I will address the top N" s
 
 **Dependent multi-file changes stay in one commit:** If files are coupled by shared signatures, types, imports, version carriers, or a feature-plus-doc contract (code + VERSION + README + ARCHITECTURE), edit the whole coupled set, then run one `advisory_pre_review` and one `repo_commit`. Do not split coupled edits across commits to "make review easier" — the review cycle runs per commit, so splitting multiplies cost and can produce transiently broken intermediate states.
 
-**Diagnosing blocked commits:** `review_status` shows the latest blocked attempt, its critical/advisory findings, open obligations, and a next-step recommendation. For forensic work on a specific attempt (why a reviewer returned a given verdict, what the raw response was), pass `include_raw=true` to surface the durable `triad_raw_results` / `scope_raw_result` payload without opening the state file by hand.
+**Diagnosing blocked commits:** `review_status` shows the latest blocked attempt, its critical/advisory findings, open obligations, commit-readiness debt, `repo_commit_ready`, `retry_anchor`, and a next-step recommendation. For forensic work on a specific attempt (why a reviewer returned a given verdict, what the raw response was), pass `include_raw=true` to surface the durable `triad_raw_results` / `scope_raw_result` payload without opening the state file by hand.
 
 **Obligation semantics and deduplication:**
-Open obligations accumulate across blocked commits — every unique `(item, reason)` pair creates a separate obligation. LLMs rephrase reasons slightly between attempts, so you may see multiple obligations that describe the same root cause. This is intentional: the system stores all findings and delegates deduplication to you.
+Open obligations accumulate across blocked commits. Distinct findings default to
+distinct obligations, but reviewers can preserve identity across retries by
+returning the same `obligation_id`; repeated blockers may also synthesize
+repo-scoped commit-readiness debt. When `review_status` shows
+`retry_anchor=commit_readiness_debt`, start from that debt record instead of
+patching one obligation at a time.
 
 - **Anti-thrashing rules injected into reviewer prompts (v4.35.1):** On retry attempts (attempt ≥ 2 for triad/scope, unconditionally for advisory), open obligations are surfaced to reviewers as inert JSON data with two mandatory rules: (1) `"verdict"` field is authoritative — withdrawal notes in `"reason"` are ignored; (2) prior obligations must not be rephrased under a new item name. Advisory step 5a applies these rules unconditionally even when no obligations exist.
 
 When you see similar obligations:
 - Read each one. If two obligations describe the same root cause (same file, same symbol, same fix), note this in `review_rebuttal`: `"Obligations X and Y both describe the same issue in foo.py — resolved by this commit."` You do not need to fix each separately.
 - Only rebut when you have actual code to show. Saying "these are duplicates" without a fix is not sufficient.
-- After a successful commit, all open obligations are cleared automatically.
+- After a successful commit, open obligations are cleared and repo-scoped
+  commit-readiness debt is verified automatically.
 
 When reading the `Review Continuity` section: a large number of open obligations from a single blocked session (e.g. 10+ obligations) often contains significant duplication from reviewer rephrasing. Group them by file/symbol before deciding how many distinct fixes are needed.
 When reporting commit-review outcomes back to the user, enumerate critical and advisory findings individually. Preserve each finding's severity plus its identity tag (`item`, reviewer/model, scope tag, obligation id when present). Do not compress multiple findings into a generic "review failed" summary if the tool output contains structured detail.

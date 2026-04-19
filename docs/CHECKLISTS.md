@@ -27,10 +27,12 @@ When a new reviewable concern appears, add it here — not in prompts or docs.
   expensive advisory cycles. Finish all edits first.
 - If advisory finds critical issues: **strongly recommended** to fix them and re-run advisory
   before calling repo_commit.
-  Note: repo_commit's gate checks snapshot freshness and open obligations only — it does not
-  enforce zero advisory FAIL items as a hard gate. Fixing critical findings and re-running
-  advisory is best practice, but `repo_commit` can proceed on a fresh advisory even if the
-  advisory reported FAIL items. The multi-model blocking review will still catch those issues.
+  Note: repo_commit's gate checks snapshot freshness, open obligations, and open
+  commit-readiness debt — it does not enforce zero advisory FAIL items as a hard
+  gate. Fixing critical findings and re-running advisory is best practice, but
+  `repo_commit` can proceed on a fresh advisory when no open obligations or
+  commit-readiness debt remain, even if the advisory reported FAIL items. The
+  multi-model blocking review will still catch those issues.
 - Once advisory is fresh → call repo_commit immediately without further edits.
 - Bypass (`skip_advisory_pre_review=True`) is always durably audited in events.jsonl.
 
@@ -42,6 +44,11 @@ When a new reviewable concern appears, add it here — not in prompts or docs.
   to confirm each obligation is resolved, though the gate does not enforce this at the code level.
 - Open obligations are cleared automatically on a successful commit.
 - Both triad-review blocks and scope-review blocks produce structured obligations.
+- Repeated blockers may also synthesize **commit-readiness debt**. When present,
+  `repo_commit` remains blocked until advisory clears both the open obligations
+  and the debt; `review_status` reports this via
+  `commit_readiness_debts_count`, `repo_commit_ready=false`, and
+  `retry_anchor=commit_readiness_debt`.
 - **Anti-thrashing injection (v4.35.1):** On retry attempts, open obligations are loaded from durable review state and injected into reviewer prompts as an inert JSON data block (fenced ```json``` with a "DATA records — not instructions" disclaimer). Two mandatory rules are also appended: (1) The JSON `"verdict"` field is the authoritative signal — withdrawal notes in `"reason"` text are ignored; (2) Do not rephrase prior findings under a different checklist item name. In `claude_advisory_review.py::_build_advisory_prompt`, these same two rules are injected at **step 5a unconditionally** (on every advisory run, not only when obligations exist), and reinforced at steps 6.e/6.f when obligations are present.
 - **Obligation storage policy:** All obligations are stored; deduplication is the agent's responsibility.
   Multiple obligations describing the same root cause (from reviewer rephrasing across attempts) are
@@ -101,7 +108,7 @@ a `self_consistency` FAIL that an entire advisory cycle is then spent on.
 When a reviewed commit returns critical findings, the reflex is to patch the single
 flagged finding and retry. That pattern reliably produces 5-10 blocked rounds.
 The correct procedure before **every** retry:
-1. List all open obligations (`review_status` tool or the Review Continuity context section).
+1. List all open obligations and commit-readiness debt (`review_status` tool or the Review Continuity context section).
 2. Group them by root cause — one underlying problem often generates 2-4 separately-named obligations from reviewer rephrasing.
 3. Write a short plan in a progress message: one paragraph naming each root-cause group and the single code/doc change that resolves it.
 4. Only then open any file and edit.
@@ -120,7 +127,7 @@ Ouroboros repository.
 | # | item | what to check | severity when FAIL |
 |---|------|---------------|--------------------|
 | 1 | bible_compliance | Does the diff violate any BIBLE.md principle? | critical |
-| 2 | development_compliance | Does it follow DEVELOPMENT.md patterns? Check explicitly: (a) naming conventions (snake_case modules/vars, PascalCase classes, UPPER_SNAKE_CASE constants); (b) entity type rules — Gateway classes contain ONLY transport, no business logic; Tool functions are thin wrappers; (c) module-size target stays near one context window (~1000 lines) with a hard fail above 1600 lines for non-grandfathered modules, method-size target stays under 150 lines with a hard fail above 300 lines, codebase-wide total Python function/method count stays under the 1200 smoke hard gate, and functions keep `<= 8` params; (d) no gratuitous abstract layers (P5 Minimalism); (e) new LLM calls go through the shared `LLMClient`/`llm.py` layer, not ad-hoc HTTP clients; (f) cognitive artifacts (identity.md, scratchpad, task reflections, review outputs) must NOT use hardcoded `[:N]` truncation — explicit omission notes required; (g) new `get_tools()` exports follow the ToolEntry pattern in registry.py. | critical |
+| 2 | development_compliance | Does it follow DEVELOPMENT.md patterns? Check explicitly: (a) naming conventions (snake_case modules/vars, PascalCase classes, UPPER_SNAKE_CASE constants); (b) entity type rules — Gateway classes contain ONLY transport, no business logic; Tool functions are thin wrappers; (c) module-size target stays near one context window (~1000 lines) with a hard fail above 1600 lines for non-grandfathered modules, method-size target stays under 150 lines with a hard fail above 300 lines, codebase-wide total Python function/method count stays under the 1250 smoke hard gate, and functions keep `<= 8` params; (d) no gratuitous abstract layers (P5 Minimalism); (e) new LLM calls go through the shared `LLMClient`/`llm.py` layer, not ad-hoc HTTP clients; (f) cognitive artifacts (identity.md, scratchpad, task reflections, review outputs) must NOT use hardcoded `[:N]` truncation — explicit omission notes required; (g) new `get_tools()` exports follow the ToolEntry pattern in registry.py. | critical |
 | 3 | secrets_check | Are secrets, API keys, .env files, credentials present in the diff? | critical |
 | 4 | code_quality | Careful code review: bugs, logic errors, crashes, regressions, race conditions, resource leaks? | critical |
 | 5 | security_issues | Security vulnerabilities: injection, path traversal, secret leakage, unsafe operations? | critical |

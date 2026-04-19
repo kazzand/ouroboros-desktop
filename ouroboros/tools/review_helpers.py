@@ -127,6 +127,73 @@ _CONVERGENCE_RULE_TEXT = (
     "Pre-existing issues in unchanged code are advisory at most."
 )
 
+_HISTORY_VERIFICATION_ONLY_RULE = (
+    "Use prior review history and obligation records for verification only. "
+    "Do NOT manufacture a new FAIL from historical text alone. Any new FAIL must be "
+    "grounded in the CURRENT diff or CURRENT repository artifacts shown in this prompt."
+)
+
+_OBLIGATION_SUFFIX_RE = re.compile(
+    r"\s*\(obligation\s+([a-z0-9][a-z0-9_-]*)\)\s*$",
+    re.IGNORECASE,
+)
+
+
+def normalize_reviewer_obligation_id(value: object) -> str:
+    text = str(value or "").strip().lower()
+    if not text:
+        return ""
+    if not re.fullmatch(r"[a-z0-9][a-z0-9_-]*", text):
+        return ""
+    return text
+
+
+def strip_obligation_suffix(item_name: object) -> tuple[str, str]:
+    text = str(item_name or "").strip()
+    if not text:
+        return "", ""
+    match = _OBLIGATION_SUFFIX_RE.search(text)
+    obligation_id = normalize_reviewer_obligation_id(match.group(1)) if match else ""
+    normalized_item = _OBLIGATION_SUFFIX_RE.sub("", text).strip()
+    return normalized_item, obligation_id
+
+
+def normalize_reviewer_item(item: object) -> dict | None:
+    if not isinstance(item, dict):
+        return None
+    normalized = dict(item)
+    normalized_item, suffix_obligation_id = strip_obligation_suffix(normalized.get("item", ""))
+    if normalized_item:
+        normalized["item"] = normalized_item
+    obligation_id = normalize_reviewer_obligation_id(normalized.get("obligation_id", "")) or suffix_obligation_id
+    if obligation_id:
+        normalized["obligation_id"] = obligation_id
+    else:
+        normalized.pop("obligation_id", None)
+    return normalized
+
+
+def normalize_reviewer_items(items: object) -> list:
+    if not isinstance(items, list):
+        return []
+    normalized_items = []
+    for item in items:
+        normalized = normalize_reviewer_item(item)
+        normalized_items.append(normalized if normalized is not None else item)
+    return normalized_items
+
+
+def build_rebuttal_section(review_rebuttal: str) -> str:
+    if not review_rebuttal:
+        return ""
+    return (
+        "\n## Developer's rebuttal to previous review feedback\n\n"
+        f"{review_rebuttal}\n\n"
+        "Reconsider previous FAIL verdict(s) in light of this argument. "
+        "If the argument is valid, change your verdict to PASS. "
+        "If not, maintain FAIL and explain why.\n"
+    )
+
 
 def format_obligation_excerpt(reason: str, max_chars: int = 120) -> str:
     """Format an obligation reason excerpt with sanitization and explicit OMISSION NOTE.
