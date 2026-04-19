@@ -1,4 +1,4 @@
-# Ouroboros v4.40.1 — Architecture & Reference
+# Ouroboros v4.40.2 — Architecture & Reference
 
 This document describes every component, page, button, API endpoint, and data flow.
 It is the single source of truth for how the system works. Keep it updated.
@@ -11,7 +11,7 @@ It is the single source of truth for how the system works. Keep it updated.
 User
   │
   ▼
-launcher.py (PyWebView)       ← desktop window, immutable (bundle-only, not in git)
+launcher.py (PyWebView)       ← desktop window, immutable outer shell (tracked in git; bundled as packaged entry point)
   │
   │  spawns subprocess
   ▼
@@ -101,7 +101,7 @@ Dockerfile                    ← Docker image (web UI runtime)
 
 ### Two-process model
 
-1. **launcher.py** — immutable outer shell (lives inside the `.app` bundle, not in the git repo). Never self-modifies. Handles:
+1. **launcher.py** — immutable outer shell (tracked in the git repo; bundled as the packaged entry point via PyInstaller). Never self-modifies. Handles:
    - PID lock (single instance)
    - Bootstrap: copies workspace to `~/Ouroboros/repo/` on first run
    - Core file sync: overwrites safety-critical files on every launch
@@ -1496,17 +1496,64 @@ Tag pushes (`v*`) always fire regardless of paths.
 | `build_linux.sh` | Linux | `dist/Ouroboros-<VERSION>-linux-<arch>.tar.gz` |
 | `build_windows.ps1` | Windows | `dist/Ouroboros-<VERSION>-windows-x64.zip` |
 
-All three use PyInstaller with `server.py` as entry point. Hidden imports cover
-starlette, uvicorn, websockets, dulwich, huggingface_hub. Data bundles include
-`ouroboros/`, `supervisor/`, `web/`, `prompts/`, `docs/`, `assets/`, `BIBLE.md`,
-`README.md`, `VERSION`, `pyproject.toml`.
+All three use PyInstaller with `launcher.py` as the packaged entry point (which spawns
+`server.py` as a subprocess). Hidden imports are limited to `webview` and `ouroboros.config`
+(plus Windows-only `pythonnet`/`clr_loader`); the full agent runtime — starlette, uvicorn,
+websockets, dulwich, huggingface_hub, and the rest — ships via the bundled `python-standalone`
+data tree and is resolved at runtime by the embedded interpreter. Data bundles include
+`ouroboros/`, `supervisor/`, `web/`, `prompts/`, `docs/`, `assets/`, `tests/`,
+`server.py`, `BIBLE.md`, `README.md`, `VERSION`, `pyproject.toml`, `Makefile`,
+`requirements.txt`, `requirements-launcher.txt`, `.gitignore`, and `python-standalone/` (the embedded
+Python runtime that carries all agent dependencies — and, from v4.40.2, the bundled
+Chromium binary installed via `PLAYWRIGHT_BROWSERS_PATH=0 playwright install chromium`
+before PyInstaller runs; see *Bundled Chromium* paragraph below).
+
+**Bundled Chromium (v4.40.2+):** Each build script invokes
+`playwright install chromium` inside `python-standalone` with `PLAYWRIGHT_BROWSERS_PATH`
+set to `0`, **before** PyInstaller packages the app. This directs Playwright to store
+the Chromium binary inside the playwright package directory
+(`driver/package/.local-browsers/`), which is already part of the `python-standalone`
+data tree bundled by PyInstaller. The exact shell syntax differs per platform:
+
+- macOS/Linux (bash): `PLAYWRIGHT_BROWSERS_PATH=0 python-standalone/bin/python3 -m playwright install chromium`
+- Windows (PowerShell): `$env:PLAYWRIGHT_BROWSERS_PATH = "0"; python-standalone\python.exe -m playwright install chromium`
+
+At runtime, `ouroboros/tools/browser.py::_set_playwright_browsers_path_if_bundled()`
+runs at module import time. It sets `PLAYWRIGHT_BROWSERS_PATH=0` **only** when
+`_has_platform_chromium(local_browsers)` returns `True` — meaning the
+`driver/package/.local-browsers/` directory inside the playwright package contains at
+least one `chromium-*` subdirectory **and** that subdirectory contains a
+platform-matching entry (`chrome-mac-*` on macOS, `chrome-linux*` on Linux,
+`chrome-win*` on Windows). This two-level check prevents false positives from
+foreign-platform payloads or partial downloads. Source/dev installs that already have
+Chromium in `~/.cache/ms-playwright/` are unaffected — they never trigger the check and
+continue using the standard cache path. If the environment variable is already set
+explicitly, it is always respected. The result: browser tools (`browse_page`,
+`browser_action`, `analyze_screenshot`) work out of the box in all packaged builds with
+no additional download. **Linux caveat:** the Chromium binary is bundled, but some Linux hosts may
+still need native system libraries if those are not already present. The bundled
+Playwright CLI is inside the app archive, so use the bundled Python to install deps:
+```
+./Ouroboros/python-standalone/bin/python3 -m playwright install-deps chromium
+```
+Alternatively install the equivalent distro packages directly
+(`libnss3`, `libatk-bridge2.0-0`, `libdrm2`, etc.). This is a host OS dependency,
+not a bundle issue — the bare `playwright` CLI command is not on PATH in packaged
+installs.
 
 ### Docker (`Dockerfile`)
 
 ```
-python:3.10-slim + git → pip install requirements → python server.py
+python:3.10-slim + git → pip install requirements → playwright install-deps chromium → playwright install chromium → python server.py
 Binds 0.0.0.0:8765, sets OUROBOROS_FILE_BROWSER_DEFAULT=/app.
 ```
+
+From v4.40.2, the `Dockerfile` installs all native system dependencies via
+`python3 -m playwright install-deps chromium` (the authoritative Playwright-managed
+dependency resolver, not a hand-curated apt list) **and** the Chromium browser binary
+itself (`PLAYWRIGHT_BROWSERS_PATH=0 python3 -m playwright install chromium`) so browser
+tools (`browse_page`, `browser_action`) work out of the box in the container without any
+additional setup or first-run download.
 
 ---
 
