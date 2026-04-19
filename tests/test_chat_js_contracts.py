@@ -83,14 +83,86 @@ def test_chat_js_visibilitychange_restores_scroll():
            "messagesDiv.scrollTop = messagesDiv.scrollHeight" in src
 
 
-# ── ArrowUp recall: rememberInput is the only writer ─────────────────────────
+# ── ArrowUp recall: seeding sources ──────────────────────────────────────────
 
-# NOTE: the previous PR #23 seed-from-server-history test was removed because
-# that feature never landed in chat.js (syncHistory does not push to
-# inputHistory). The current contract is that ``rememberInput`` inside
-# ``sendMessage`` is the sole writer to ``inputHistory``; see
-# test_chat_js_does_not_append_live_inbound_to_input_history and
-# test_chat_js_saves_input_history_on_remember for the actual guards.
+# inputHistory has two writers:
+#   1. rememberInput() — called from sendMessage on local sends.
+#   2. syncHistory() seeding block — seeds on first load and reconnect from
+#      server-side user messages (Telegram, other WebUI sessions).
+# Live inbound ws.on('chat') does NOT push to inputHistory (avoids mid-scrub
+# UX disruption and the mid-scrub index reset issue).
+
+
+def test_chat_js_sync_history_seeds_input_history_via_dedicated_flag():
+    """syncHistory gates recall seeding on the dedicated `inputHistorySeededFromServer`
+    flag, NOT on `!historyLoaded`.  This ensures seeding still fires on the first
+    successful server sync even when historyLoaded was already set true by the
+    sessionStorage-fallback bootstrap path (e.g. first /api/chat/history fetch failed)."""
+    src = _src()
+    sync_start = src.index("async function syncHistory(")
+    sync_end = src.index("\n    (async () => {", sync_start)
+    sync_body = src[sync_start:sync_end]
+    assert "!inputHistorySeededFromServer" in sync_body, (
+        "syncHistory must gate seeding on !inputHistorySeededFromServer, not !historyLoaded"
+    )
+    assert "inputHistorySeededFromServer = true" in sync_body, (
+        "syncHistory must set inputHistorySeededFromServer = true after seeding"
+    )
+    assert "inputHistory.push" in sync_body, (
+        "syncHistory must push to inputHistory during seeding"
+    )
+    assert "saveInputHistory(inputHistory)" in sync_body, (
+        "syncHistory seeding must persist updated inputHistory"
+    )
+
+
+def test_chat_js_sync_history_seeding_gate_is_dedicated_flag():
+    """The seeding block must be wrapped by `if (!inputHistorySeededFromServer)`.
+    Other uses of `!historyLoaded || fromReconnect` in syncHistory (e.g. retiredTaskIds)
+    are fine — only the seeding gate matters."""
+    src = _src()
+    sync_start = src.index("async function syncHistory(")
+    sync_end = src.index("\n    (async () => {", sync_start)
+    sync_body = src[sync_start:sync_end]
+    assert "if (!inputHistorySeededFromServer)" in sync_body, (
+        "syncHistory seeding block must be gated by `if (!inputHistorySeededFromServer)`, "
+        "not by `!historyLoaded || fromReconnect`"
+    )
+
+
+def test_chat_js_sync_history_strips_plan_prefix_in_seeding():
+    """syncHistory strips PLAN_PREFIX from server-side user messages before
+    adding them to inputHistory, so plan-mode preambles don't pollute recall."""
+    src = _src()
+    sync_start = src.index("async function syncHistory(")
+    sync_end = src.index("\n    (async () => {", sync_start)
+    sync_body = src[sync_start:sync_end]
+    assert "PLAN_PREFIX" in sync_body, (
+        "syncHistory seeding must reference PLAN_PREFIX to strip planning preambles"
+    )
+    assert "startsWith(PLAN_PREFIX)" in sync_body, (
+        "syncHistory seeding must check startsWith(PLAN_PREFIX) before stripping"
+    )
+
+
+def test_chat_js_input_history_seeded_flag_declared():
+    """inputHistorySeededFromServer flag must be declared in initChat scope
+    alongside historyLoaded so it survives across syncHistory calls."""
+    src = _src()
+    assert "inputHistorySeededFromServer = false" in src, (
+        "inputHistorySeededFromServer must be declared and initialised to false in initChat"
+    )
+
+
+def test_chat_js_plan_prefix_defined_at_module_scope():
+    """PLAN_PREFIX is defined at module scope (before initChat) so both
+    sendMessage and syncHistory can reference it without redefinition."""
+    src = _src()
+    plan_prefix_idx = src.index("const PLAN_PREFIX =")
+    init_chat_idx = src.index("export function initChat(")
+    assert plan_prefix_idx < init_chat_idx, (
+        "PLAN_PREFIX const must be defined at module scope, before initChat"
+    )
 
 
 def test_chat_js_dedupes_input_history_via_last_element_check():
@@ -106,13 +178,50 @@ def test_chat_js_dedupes_input_history_via_last_element_check():
 
 
 def test_chat_js_caps_input_history_via_slice_50():
-    """inputHistory is bounded at 50 entries via ``slice(-50)`` at both
-    ``loadInputHistory`` and ``saveInputHistory``, not an explicit
-    ``inputHistory.length > 50`` shift loop."""
+    """inputHistory is bounded at 50 entries.
+
+    ``slice(-50)`` must appear at least 3 times:
+      1. ``loadInputHistory`` — caps on load from sessionStorage
+      2. ``saveInputHistory`` — caps on persist
+      3. ``syncHistory`` seeding block — caps merged server+local recall
+    """
     src = _src()
-    # slice(-50) pattern appears in both loadInputHistory and saveInputHistory
-    assert src.count("slice(-50)") >= 2, (
-        "inputHistory must be bounded via slice(-50) at load AND save"
+    assert src.count("slice(-50)") >= 3, (
+        "inputHistory must be bounded via slice(-50) at load, save, AND syncHistory seeding"
+    )
+
+
+def test_chat_js_sync_history_seeding_uses_chronological_merge():
+    """syncHistory seeding builds a chronological merge: server messages (older)
+    prepended before local session messages (newer), then deduped from the end
+    so most-recent entries are kept, then capped at 50 via slice(-50).
+
+    This prevents the naive-append bug where server messages appear *after*
+    local messages in recall, inverting chronological order for ArrowUp."""
+    src = _src()
+    sync_start = src.index("async function syncHistory(")
+    sync_end = src.index("\n    (async () => {", sync_start)
+    sync_body = src[sync_start:sync_end]
+
+    # Must build a combined array from server + local texts
+    assert "serverTexts" in sync_body, (
+        "syncHistory seeding must collect server messages into serverTexts array"
+    )
+    assert "...serverTexts, ...inputHistory" in sync_body or \
+           "serverTexts, ...inputHistory" in sync_body, (
+        "syncHistory seeding must combine serverTexts (older) with inputHistory (newer)"
+    )
+    # Must deduplicate from end (newest wins) — iterate from i = combined.length - 1
+    assert "combined.length - 1" in sync_body, (
+        "syncHistory seeding must deduplicate from the end to preserve most-recent entries"
+    )
+    # Must cap at 50 via slice(-50)
+    assert "slice(-50)" in sync_body, (
+        "syncHistory seeding must cap the merged recall at 50 entries via slice(-50)"
+    )
+    # Must replace inputHistory in-place
+    assert "inputHistory.length = 0" in sync_body, (
+        "syncHistory seeding must replace inputHistory in-place (inputHistory.length = 0)"
     )
 
 

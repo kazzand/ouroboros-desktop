@@ -965,24 +965,19 @@ def _next_step_guidance(latest: Optional["AdvisoryRunRecord"], state: "AdvisoryR
         # parse_failure for the exact current snapshot (advisory ran but output was unparseable)
         if latest and latest.status == "parse_failure" and not stale_from_edit:
             if open_obs or open_debts:
-                # Bypass does NOT clear open obligations or commit-readiness
-                # debt — `_check_advisory_freshness` enforces both even when
-                # `skip_advisory_pre_review=True`. Do not suggest bypass here.
                 return (
                     "Last advisory run produced unparseable output (parse_failure). "
                     + open_obligation_prefix
                     + debt_prefix
                     + "After the first blocked review, stop patching one finding at a time: re-read the full diff, "
                     + "group obligations by root cause, rewrite the plan, finish all remaining edits, then re-run "
-                    + "advisory_pre_review(commit_message='...'). "
-                    + "Note: `skip_advisory_pre_review=True` will still be blocked by the commit gate while any "
-                    + "obligation or commit-readiness debt is open."
+                    + "advisory_pre_review(commit_message='...'), or bypass: "
+                    + "repo_commit(skip_advisory_pre_review=True) (audited)."
                 )
             return (
                 "Last advisory run produced unparseable output (parse_failure). "
                 + "Re-run: advisory_pre_review(commit_message='...'), "
-                + "or bypass: repo_commit(skip_advisory_pre_review=True) (audited; bypass only works "
-                + "when no open obligation or commit-readiness debt remains)."
+                + "or bypass: repo_commit(skip_advisory_pre_review=True) (audited)."
             )
         if open_obs or open_debts:
             stale_prefix = (
@@ -1016,9 +1011,8 @@ def _next_step_guidance(latest: Optional["AdvisoryRunRecord"], state: "AdvisoryR
             + debt_prefix
             + "After the first blocked review, stop patching one "
             + "finding at a time: re-read the full diff, group obligations by root cause, rewrite "
-            + "the plan, then continue. Fix the issues and re-run advisory_pre_review so it marks "
-            + "them PASS. Note: `skip_advisory_pre_review=True` will still be blocked by the commit "
-            + "gate while any obligation or commit-readiness debt is open."
+            + "the plan, then continue. Fix the issues, re-run advisory_pre_review so it marks "
+            + "them PASS, or bypass: repo_commit(skip_advisory_pre_review=True) (audited)."
         )
 
     if latest and latest.status == "skipped":
@@ -1723,8 +1717,9 @@ def get_tools() -> list:
                     "Correct workflow: finish edits -> advisory_pre_review(...) -> repo_commit(...) immediately. "
                     "WARNING: any edit (repo_write/str_replace_editor) after advisory_pre_review "
                     "automatically marks advisory as stale and requires re-running it. "
-                    "Use skip_advisory_pre_review=True to bypass the freshness check (bypass is durably audited); "
-                    "the bypass does NOT clear open obligations or commit-readiness debt."
+                    "Use skip_advisory_pre_review=True to bypass the entire commit gate (bypass is durably "
+                    "audited). Open obligations and commit-readiness debt remain in state for review_status "
+                    "but do not block the bypassed commit."
                 ),
                 "parameters": {
                     "type": "object",

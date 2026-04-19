@@ -9,6 +9,7 @@ import {
 const CHAT_STORAGE_KEY = 'ouro_chat';
 const CHAT_INPUT_HISTORY_KEY = 'ouro_chat_input_history';
 const CHAT_SESSION_ID_KEY = 'ouro_chat_session_id';
+const PLAN_PREFIX = 'Please do multi-model planning (plan_task tool) and web-search before answering or starting this task:\n\n';
 
 function getOrCreateChatSessionId() {
     try {
@@ -148,6 +149,7 @@ export function initChat({ ws, state, updateUnreadBadge }) {
     let inputHistoryIndex = inputHistory.length;
     let inputDraft = '';
     let historyLoaded = false;
+    let inputHistorySeededFromServer = false; // set true only after a successful server-side recall seed
     let historySyncPromise = null;
     let welcomeShown = false;
     const liveCardRecords = new Map();
@@ -1131,6 +1133,51 @@ export function initChat({ ws, state, updateUnreadBadge }) {
                     if (hasOngoingTask) showTyping();
                 }
 
+                // Seed inputHistory from server-side chat history on first load
+                // and on reconnect.  This makes ArrowUp recall work for Telegram
+                // messages and messages sent from other browser sessions that never
+                // went through the local rememberInput() path.
+                // PLAN_PREFIX is stripped so plan-mode messages don't pollute recall
+                // with the planning preamble.
+                //
+                // Merge strategy: server history is chronologically older, local
+                // session history is newer.  We build a combined list [server...,
+                // local...] and deduplicate from the END (most-recent wins) so that
+                // the most recent ArrowUp entry is always the last thing sent from
+                // this session, and older server entries fill slots below it.
+                // Seed inputHistory from server on the FIRST successful server sync,
+                // regardless of whether historyLoaded was already set true by the
+                // sessionStorage-fallback bootstrap path.  A dedicated flag ensures
+                // seeding still happens even when the initial /api/chat/history fetch
+                // failed and historyLoaded became true via the fallback IIFE.
+                if (!inputHistorySeededFromServer) {
+                    const serverTexts = [];
+                    for (const msg of messages) {
+                        if (msg.role !== 'user') continue;
+                        let text = (msg.text || '').trim();
+                        if (text.startsWith(PLAN_PREFIX)) text = text.slice(PLAN_PREFIX.length).trimStart();
+                        if (text) serverTexts.push(text);
+                    }
+                    // Merge strategy: server messages are chronologically older,
+                    // local session messages are newer.  Build combined [server...,
+                    // local...] and deduplicate from the END (most-recent wins).
+                    const combined = [...serverTexts, ...inputHistory];
+                    const deduped = [];
+                    const seen = new Set();
+                    for (let i = combined.length - 1; i >= 0; i--) {
+                        if (!seen.has(combined[i])) {
+                            deduped.unshift(combined[i]);
+                            seen.add(combined[i]);
+                        }
+                    }
+                    // Replace in-place, cap at 50 (keep most recent = tail)
+                    inputHistory.length = 0;
+                    inputHistory.push(...deduped.slice(-50));
+                    saveInputHistory(inputHistory);
+                    inputHistoryIndex = inputHistory.length;
+                    inputHistorySeededFromServer = true;
+                }
+
                 const wasFirstLoad = !historyLoaded;
                 historyLoaded = true;
                 // On first load (page open / restart), scroll to the latest
@@ -1207,8 +1254,6 @@ export function initChat({ ws, state, updateUnreadBadge }) {
         const cursor = input.value.length;
         input.setSelectionRange(cursor, cursor);
     }
-
-    const PLAN_PREFIX = 'Please do multi-model planning (plan_task tool) and web-search before answering or starting this task:\n\n';
 
     async function sendMessage(planMode = false) {
         if (sendBtn.disabled) return;  // guard against Enter re-entry during async upload

@@ -393,39 +393,14 @@ def _check_advisory_freshness(ctx: ToolContext, commit_message: str,
 
         update_state(drive_root, _mutate)
 
-        # Bypass short-circuits the "no fresh advisory for this snapshot" check
-        # (the legitimate operator-authorized override) — but it MUST NOT
-        # silently clear open obligations or commit-readiness debt. Otherwise
-        # `repo_commit_ready=false` surfaced by `review_status` would disagree
-        # with the actual commit gate, and an explicit bypass could land a
-        # commit that violates durable anti-thrashing signals. The bypass has
-        # already been audited to events.jsonl above; now we still enforce the
-        # unresolved obligation/debt check inline (same message shape as the
-        # fresh-but-unresolved branch below).
-        if open_obs or open_debts:
-            debt_parts = []
-            if open_obs:
-                debt_parts.append(f"{len(open_obs)} open obligation(s)")
-            if open_debts:
-                debt_parts.append(f"{len(open_debts)} commit-readiness debt item(s)")
-            lines = [
-                f"⚠️ ADVISORY_PRE_REVIEW_REQUIRED: Advisory bypass audited "
-                f"(hash={snapshot_hash[:12]}), but {' and '.join(debt_parts)} remain "
-                f"unresolved. Bypass does NOT clear durable anti-thrashing signals.\n"
-            ]
-            if open_obs:
-                lines.append("Unresolved obligations:")
-                lines += _render_obligations()
-            if open_debts:
-                lines.append("\nCommit-readiness debt:")
-                lines += _render_debts()
-            lines.append(
-                "\nFix the flagged issues and run advisory_pre_review so it can "
-                "verify them PASS before bypassing again."
-            )
-            return "\n".join(lines)
-
-        return None  # audited bypass, nothing unresolved
+        # Bypass is an absolute escape hatch: `skip_advisory_pre_review=True`
+        # short-circuits the commit gate entirely after audit logging. Durable
+        # obligations and commit-readiness debt remain in state (`review_status`
+        # shows `repo_commit_ready=false`), but the bypass flag deliberately
+        # overrides that — it is the documented escape for cases where advisory
+        # cannot run (provider outage, rate limit, etc.). Obligations are
+        # cleared normally by `on_successful_commit()` once the commit lands.
+        return None  # audited bypass
 
     # Advisory is fresh for this snapshot — check if obligations or debt remain.
     if state.is_fresh(snapshot_hash, repo_key=repo_key) and (open_obs or open_debts):

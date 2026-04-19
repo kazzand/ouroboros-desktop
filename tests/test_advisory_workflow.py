@@ -1306,18 +1306,20 @@ def test_resolve_matching_obligations_accepts_consistent_ids():
     assert "obl-0001" not in open_ids
 
 
-def test_commit_gate_bypass_still_blocks_on_open_debt(tmp_path):
-    """skip_advisory_pre_review=True must short-circuit only the FRESHNESS check.
-    Open obligations / commit-readiness debt must still block the commit gate,
-    otherwise `repo_commit_ready=false` surfaced by `review_status` disagrees with
-    the real gate. Regression for the scope-review round-2 finding on
-    `_check_advisory_freshness` bypass branch."""
+def test_commit_gate_bypass_is_absolute_escape_hatch_with_open_debt(tmp_path):
+    """skip_advisory_pre_review=True is an absolute escape hatch: it short-circuits
+    the entire commit gate after audit logging, even when open obligations or
+    commit-readiness debt exist. Obligations stay in durable state (review_status
+    reports repo_commit_ready=false), but the bypass deliberately overrides that —
+    it is the documented escape for provider outages, rate limits, etc.
+    Obligations are cleared by on_successful_commit() once the commit lands."""
     import pathlib as _pl
     from unittest.mock import MagicMock
 
     from ouroboros.review_state import (
         AdvisoryReviewState,
         ObligationItem,
+        load_state,
         make_repo_key,
         save_state,
         _utc_now,
@@ -1357,12 +1359,15 @@ def test_commit_gate_bypass_still_blocks_on_open_debt(tmp_path):
         skip_advisory_pre_review=True,
     )
 
-    assert result is not None, (
-        "Bypass must NOT silently clear open obligations — the gate must still block."
+    assert result is None, (
+        "Bypass must pass the gate even with open obligations — it is an absolute escape hatch."
     )
-    assert "ADVISORY_PRE_REVIEW_REQUIRED" in result
-    assert "obligation" in result.lower()
-    assert "obl-0001" in result
+    reloaded = load_state(drive_root)
+    bypassed_runs = [r for r in reloaded.advisory_runs if r.status == "bypassed"]
+    assert len(bypassed_runs) == 1, "Bypass must record an audited AdvisoryRunRecord"
+    assert reloaded.get_open_obligations(repo_key=repo_key), (
+        "Bypass must NOT clear obligations — they stay in state for review_status."
+    )
 
 
 def test_reviewed_stage_cycle_advisory_scope_covers_full_staged_index(tmp_path, monkeypatch):

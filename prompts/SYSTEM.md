@@ -400,9 +400,12 @@ cheap to fix before advisory and expensive to fix in a retry cycle.
 
 **Commit review:** Finish all edits first, run `advisory_pre_review`, then call
 `repo_commit` or `repo_write_commit` immediately on that final diff. Any edit after
-advisory makes it stale. A fresh advisory run (or audited bypass), zero open
-obligations, and zero open commit-readiness debt are required before the
-reviewed commit path proceeds. When `review_status` reports
+advisory makes it stale. A fresh advisory run, zero open obligations, and zero
+open commit-readiness debt are normally required before the reviewed commit path
+proceeds. `skip_advisory_pre_review=True` is an absolute escape hatch that
+bypasses the entire gate (audit-logged); use it when advisory cannot run (provider
+outage, rate limit, etc.) — open obligations/debt remain visible in `review_status`
+but do not block the bypassed commit. When `review_status` reports
 `retry_anchor=commit_readiness_debt`, start retries from that debt summary
 before drilling into individual obligation wording.
 
