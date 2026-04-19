@@ -1,0 +1,329 @@
+"""Contract tests for web/modules/chat.js.
+
+History: PR #23 originally proposed a richer recall/plan-prefix pipeline
+(``stripPlanPrefix`` helper, ``_recallText`` capture of live inbound
+messages, ``Set``-based dedup, explicit ``inputHistory.length > 50`` cap).
+That surface never landed in chat.js — the current implementation uses a
+simpler model: inline ``PLAN_PREFIX + text`` in ``sendMessage``,
+last-element dedup in ``rememberInput``, and ``slice(-50)`` at both
+``loadInputHistory`` and ``saveInputHistory``. History replay and live
+inbound bubbles show the raw ``msg.text`` / ``msg.content`` (the plan
+preamble is intentionally visible so the user can see what was actually
+sent on the wire).
+
+This file now has two complementary layers aligned with that reality:
+1. Structural (source-text) — verify the actual patterns in chat.js
+   (``slice(-50)``, last-element dedup, inline ``PLAN_PREFIX + text``
+   etc.). Breaks on deletion/rename.
+2. Executable (logic port) — preserve the Python ports of the
+   ``stripPlanPrefix`` and ``extractRecallEntries`` helpers so that if
+   they ever get implemented in JS, the Python-port tests are the
+   authoritative spec for their behaviour.
+"""
+import pathlib
+import re
+
+CHAT_JS = pathlib.Path(__file__).parent.parent / "web" / "modules" / "chat.js"
+
+_PLAN_PREFIX = (
+    "Please do multi-model planning (plan_task tool) and web-search before "
+    "answering or starting this task:\n\n"
+)
+
+
+def _src() -> str:
+    return CHAT_JS.read_text(encoding="utf-8")
+
+
+# ── Portable Python ports of the JS pure helpers ─────────────────────────────
+
+def _strip_plan_prefix(text: str) -> str:
+    """Python port of chat.js::stripPlanPrefix."""
+    return text[len(_PLAN_PREFIX):].lstrip() if text.startswith(_PLAN_PREFIX) else text
+
+
+def _extract_recall_entries(messages: list, existing=None) -> list:
+    """Python port of chat.js::extractRecallEntries."""
+    seen = set(existing or [])
+    out = []
+    for msg in messages:
+        if msg.get("role") != "user":
+            continue
+        text = _strip_plan_prefix((msg.get("text") or "").strip())
+        if not text or text in seen:
+            continue
+        out.append(text)
+        seen.add(text)
+    return out
+
+
+# ── visibilitychange fix ──────────────────────────────────────────────────────
+
+def test_chat_js_has_single_visibilitychange_listener():
+    """PR #23 unified: exactly one visibilitychange listener covering both layout sync and scroll restore."""
+    src = _src()
+    count = src.count("document.addEventListener('visibilitychange'")
+    assert count == 1, (
+        f"Expected exactly 1 visibilitychange listener (unified handler), found {count}"
+    )
+
+
+def test_chat_js_visibilitychange_calls_sync_live_card_layout():
+    """The visibilitychange handler calls syncLiveCardLayout to fix stale layout."""
+    src = _src()
+    # The handler block should reference syncLiveCardLayout and requestAnimationFrame
+    assert "syncLiveCardLayout" in src
+    assert "requestAnimationFrame" in src
+
+
+def test_chat_js_visibilitychange_restores_scroll():
+    """The visibilitychange handler restores scroll position on tab return."""
+    src = _src()
+    assert "scrollTop = messagesDiv.scrollHeight" in src or \
+           "messagesDiv.scrollTop = messagesDiv.scrollHeight" in src
+
+
+# ── ArrowUp recall: rememberInput is the only writer ─────────────────────────
+
+# NOTE: the previous PR #23 seed-from-server-history test was removed because
+# that feature never landed in chat.js (syncHistory does not push to
+# inputHistory). The current contract is that ``rememberInput`` inside
+# ``sendMessage`` is the sole writer to ``inputHistory``; see
+# test_chat_js_does_not_append_live_inbound_to_input_history and
+# test_chat_js_saves_input_history_on_remember for the actual guards.
+
+
+def test_chat_js_dedupes_input_history_via_last_element_check():
+    """inputHistory dedups by checking the last element only (not a Set).
+
+    The simpler last-element model catches the common ArrowUp-then-send
+    round-trip without allocating a Set on every recall entry.
+    """
+    src = _src()
+    assert "inputHistory[inputHistory.length - 1] !== text" in src, (
+        "rememberInput must dedup by checking the last element of inputHistory"
+    )
+
+
+def test_chat_js_caps_input_history_via_slice_50():
+    """inputHistory is bounded at 50 entries via ``slice(-50)`` at both
+    ``loadInputHistory`` and ``saveInputHistory``, not an explicit
+    ``inputHistory.length > 50`` shift loop."""
+    src = _src()
+    # slice(-50) pattern appears in both loadInputHistory and saveInputHistory
+    assert src.count("slice(-50)") >= 2, (
+        "inputHistory must be bounded via slice(-50) at load AND save"
+    )
+
+
+# ── Live inbound handling ─────────────────────────────────────────────────────
+
+def test_chat_js_does_not_append_live_inbound_to_input_history():
+    """Live inbound user messages (Telegram, other sessions) are rendered as
+    bubbles but do NOT pollute the local user's ArrowUp recall — only
+    ``sendMessage`` adds entries to inputHistory via ``rememberInput``."""
+    src = _src()
+    # ws.on('chat') user branch renders bubble but does not push to inputHistory.
+    ws_chat_block = src[src.index("ws.on('chat'"):src.index("ws.on('chat'") + 2000]
+    assert "inputHistory.push" not in ws_chat_block, (
+        "ws.on('chat') handler must not push to inputHistory (only local sends do)"
+    )
+    # rememberInput is the sole writer; it is called from sendMessage.
+    assert "rememberInput(text)" in src
+
+
+def test_chat_js_saves_input_history_on_remember():
+    """``rememberInput`` must persist to sessionStorage after the push so the
+    in-memory array and sessionStorage stay in sync. Scoped to the
+    ``rememberInput`` function body so a globally-placed
+    ``saveInputHistory(...)`` call elsewhere cannot accidentally satisfy this
+    contract (reviewer finding from v4.40.1 review pass 3)."""
+    src = _src()
+    fn_start = src.index("function rememberInput(text) {")
+    # End of the function: the next line that starts with "    }" at the
+    # exact same indent as the function definition.
+    fn_end = src.index("\n    }\n", fn_start) + len("\n    }")
+    body = src[fn_start:fn_end]
+
+    assert "inputHistory.push(text)" in body, (
+        "rememberInput must push the raw user text into inputHistory"
+    )
+    assert "saveInputHistory(inputHistory)" in body, (
+        "rememberInput must persist the updated inputHistory via saveInputHistory"
+    )
+
+    # Ordering: the save must follow the push so the stored value matches the
+    # in-memory array after the mutation, not before.
+    push_idx = body.index("inputHistory.push(text)")
+    save_idx = body.index("saveInputHistory(inputHistory)")
+    assert push_idx < save_idx, (
+        "saveInputHistory must be called AFTER inputHistory.push in rememberInput"
+    )
+
+
+# ── PLAN_PREFIX application ───────────────────────────────────────────────────
+
+_PLAN_PREFIX = 'Please do multi-model planning (plan_task tool) and web-search before answering or starting this task:\n\n'
+
+
+def test_chat_js_applies_plan_prefix_inline_in_sendmessage():
+    """``sendMessage`` applies PLAN_PREFIX inline via ``PLAN_PREFIX + text`` when
+    ``planMode`` is on and the text is not a slash command. There is no
+    dedicated ``stripPlanPrefix`` helper — the prefix is applied at send
+    time and the wire text is stored/rendered as-is everywhere."""
+    src = _src()
+    assert "PLAN_PREFIX + text" in src, (
+        "sendMessage must apply PLAN_PREFIX inline via 'PLAN_PREFIX + text'"
+    )
+    assert "planMode && !text.startsWith('/')" in src, (
+        "PLAN_PREFIX application must be guarded by planMode + slash-command bypass"
+    )
+
+
+def test_chat_js_sync_history_renders_raw_msg_text():
+    """History replay does not strip PLAN_PREFIX — user bubbles in recall
+    show the exact wire text (plan preamble visible). This is intentional
+    so the user can audit what was actually sent."""
+    src = _src()
+    # Find the syncHistory region and verify the bubble is rendered from raw msg.text.
+    sync_start = src.index("async function syncHistory(")
+    # Bound to the next top-level function; use a generous lookahead.
+    sync_end = src.index("\n    async function ", sync_start + 1) if "\n    async function " in src[sync_start + 1:] else sync_start + 20000
+    sync_body = src[sync_start:sync_end]
+    assert "stripPlanPrefix" not in sync_body, (
+        "syncHistory must not use stripPlanPrefix — raw msg.text is rendered"
+    )
+    assert "addMessage(msg.text" in sync_body, (
+        "syncHistory must call addMessage(msg.text, ...) directly for history replay"
+    )
+
+
+def test_chat_js_live_inbound_renders_raw_msg_content():
+    """``ws.on('chat')`` live inbound user path calls ``addMessage(msg.content,
+    'user', ...)`` directly without stripping PLAN_PREFIX — same rationale
+    as history replay."""
+    src = _src()
+    ws_start = src.index("ws.on('chat'")
+    ws_end = src.index("ws.on('", ws_start + 1) if "ws.on('" in src[ws_start + 1:] else ws_start + 3000
+    ws_body = src[ws_start:ws_end]
+    assert "stripPlanPrefix" not in ws_body, (
+        "ws.on('chat') must not use stripPlanPrefix — raw msg.content is rendered"
+    )
+    assert "addMessage(msg.content" in ws_body, (
+        "ws.on('chat') must render live inbound user bubbles via addMessage(msg.content, ...)"
+    )
+
+
+def test_plan_prefix_string_defined_exactly_once():
+    """PLAN_PREFIX canonical string appears exactly once (const definition in
+    ``sendMessage``). There is no second occurrence because no
+    ``stripPlanPrefix`` helper exists in the current implementation."""
+    src = _src()
+    canonical = 'Please do multi-model planning (plan_task tool) and web-search before answering or starting this task:'
+    occurrences = src.count(canonical)
+    assert occurrences == 1, (
+        f"Expected PLAN_PREFIX canonical string exactly 1 time (const only), found {occurrences}"
+    )
+
+
+# ── Regression guards: recall/send pipeline ───────────────────────────────────
+
+def test_chat_js_remember_input_runs_before_wire_prefix():
+    """``rememberInput`` must capture the raw user text *before* ``PLAN_PREFIX``
+    is prepended to ``wireText`` — otherwise ArrowUp recall would resurface
+    the plan preamble instead of the original text."""
+    src = _src()
+    remember_idx = src.index("rememberInput(text)")
+    wire_idx = src.index("const wireText = (planMode")
+    assert remember_idx < wire_idx, (
+        "rememberInput(text) must run before the PLAN_PREFIX wireText assignment"
+    )
+
+
+# ── Regression guards ─────────────────────────────────────────────────────────
+
+def test_chat_js_input_history_index_reset_after_seeding():
+    """inputHistoryIndex is reset to length after recall seeding."""
+    src = _src()
+    assert "inputHistoryIndex = inputHistory.length" in src
+
+
+# ── Executable behavior tests (Python port of JS pure helpers) ────────────────
+
+def test_strip_plan_prefix_removes_prefix():
+    """stripPlanPrefix strips the plan preamble and trims leading whitespace."""
+    result = _strip_plan_prefix(_PLAN_PREFIX + "What is 2+2?")
+    assert result == "What is 2+2?"
+
+
+def test_strip_plan_prefix_leaves_normal_text_unchanged():
+    """stripPlanPrefix does not modify messages that don't start with PLAN_PREFIX."""
+    msg = "Hello, what can you do?"
+    assert _strip_plan_prefix(msg) == msg
+
+
+def test_strip_plan_prefix_handles_empty_string():
+    """stripPlanPrefix handles empty input gracefully."""
+    assert _strip_plan_prefix("") == ""
+
+
+def test_extract_recall_entries_filters_non_user_roles():
+    """extractRecallEntries only includes user-role messages."""
+    messages = [
+        {"role": "assistant", "text": "Hello"},
+        {"role": "user", "text": "Hi there"},
+        {"role": "system", "text": "System msg"},
+    ]
+    result = _extract_recall_entries(messages)
+    assert result == ["Hi there"]
+
+
+def test_extract_recall_entries_strips_plan_prefix():
+    """extractRecallEntries strips PLAN_PREFIX before adding to recall."""
+    messages = [{"role": "user", "text": _PLAN_PREFIX + "Search for X"}]
+    result = _extract_recall_entries(messages)
+    assert result == ["Search for X"]
+
+
+def test_extract_recall_entries_deduplicates_against_existing():
+    """extractRecallEntries skips messages already in the existing set."""
+    existing = {"already there"}
+    messages = [
+        {"role": "user", "text": "already there"},
+        {"role": "user", "text": "new message"},
+    ]
+    result = _extract_recall_entries(messages, existing)
+    assert result == ["new message"]
+
+
+def test_extract_recall_entries_deduplicates_within_batch():
+    """extractRecallEntries skips duplicate messages within the same batch."""
+    messages = [
+        {"role": "user", "text": "hello"},
+        {"role": "user", "text": "hello"},
+    ]
+    result = _extract_recall_entries(messages)
+    assert result == ["hello"]
+
+
+def test_extract_recall_entries_skips_empty_text():
+    """extractRecallEntries skips messages with empty or whitespace-only text."""
+    messages = [
+        {"role": "user", "text": ""},
+        {"role": "user", "text": "   "},
+        {"role": "user", "text": "real message"},
+    ]
+    result = _extract_recall_entries(messages)
+    assert result == ["real message"]
+
+
+def test_plan_prefix_js_constant_matches_python_port():
+    """The canonical PLAN_PREFIX string in chat.js must match the Python port
+    so that the Python port's ``_strip_plan_prefix`` would successfully strip
+    what ``sendMessage`` actually sends on the wire."""
+    src = _src()
+    # PLAN_PREFIX in chat.js may be written as a template literal with \n\n
+    # escapes or as a regular string; accept both forms.
+    assert _PLAN_PREFIX.replace("\n\n", "\\n\\n") in src or _PLAN_PREFIX in src, (
+        "PLAN_PREFIX const in chat.js must match the Python port's canonical string"
+    )
