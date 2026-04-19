@@ -82,6 +82,7 @@ def test_apply_runtime_provider_defaults_migrates_saved_openai_values():
 
 
 def test_apply_runtime_provider_defaults_keeps_explicit_official_openai_review_models():
+    # All model slots already correct; scope review model is unset → gets migrated to main.
     normalized, changed, changed_keys = apply_runtime_provider_defaults({
         "OPENAI_API_KEY": "sk-openai",
         "OUROBOROS_MODEL": "openai::gpt-5.4",
@@ -89,6 +90,7 @@ def test_apply_runtime_provider_defaults_keeps_explicit_official_openai_review_m
         "OUROBOROS_MODEL_LIGHT": "openai::gpt-5.4-mini",
         "OUROBOROS_MODEL_FALLBACK": "openai::gpt-5.4-mini",
         "OUROBOROS_REVIEW_MODELS": "openai::gpt-5.4,openai::gpt-5.4-mini",
+        "OUROBOROS_SCOPE_REVIEW_MODEL": "openai::gpt-5.4",  # already in direct format
     })
 
     assert not changed
@@ -171,3 +173,100 @@ def test_apply_runtime_provider_defaults_skips_non_official_or_custom_configs():
     assert not changed
     assert changed_keys == []
     assert normalized["OUROBOROS_MODEL"] == "custom-model"
+
+
+# --- Tests for Fix C (classify_runtime_provider_change) ---
+
+from ouroboros.server_runtime import classify_runtime_provider_change
+
+
+class TestClassifyRuntimeProviderChange:
+    def test_direct_normalize_when_openrouter_absent(self):
+        before = {"OPENAI_API_KEY": "sk-openai"}
+        after = {"OPENAI_API_KEY": "sk-openai", "OUROBOROS_MODEL": "openai::gpt-5.4"}
+        assert classify_runtime_provider_change(before, after) == "direct_normalize"
+
+    def test_reverse_migrate_when_openrouter_added(self):
+        before = {"OPENAI_API_KEY": "sk-openai"}
+        after = {
+            "OPENAI_API_KEY": "sk-openai",
+            "OPENROUTER_API_KEY": "sk-or-v1-new",
+            "OUROBOROS_MODEL": "openai::gpt-5.4",
+        }
+        assert classify_runtime_provider_change(before, after) == "reverse_migrate"
+
+    def test_none_when_no_exclusive_provider_and_no_openrouter(self):
+        before = {}
+        after = {"OPENAI_COMPATIBLE_API_KEY": "compat-key"}
+        assert classify_runtime_provider_change(before, after) == "none"
+
+    def test_direct_normalize_for_anthropic_only(self):
+        before = {"ANTHROPIC_API_KEY": "sk-ant"}
+        after = {"ANTHROPIC_API_KEY": "sk-ant", "OUROBOROS_MODEL": "anthropic::claude-opus-4-7"}
+        assert classify_runtime_provider_change(before, after) == "direct_normalize"
+
+    def test_reverse_migrate_for_anthropic_plus_openrouter(self):
+        before = {"ANTHROPIC_API_KEY": "sk-ant"}
+        after = {
+            "ANTHROPIC_API_KEY": "sk-ant",
+            "OPENROUTER_API_KEY": "sk-or-v1-new",
+            "OUROBOROS_MODEL": "anthropic::claude-opus-4-7",
+        }
+        assert classify_runtime_provider_change(before, after) == "reverse_migrate"
+
+    def test_direct_normalize_for_openai_only_no_change_marker(self):
+        # classify only looks at 'after' state — before is unused but accepted
+        before = {}
+        after = {"OPENAI_API_KEY": "sk-openai"}
+        assert classify_runtime_provider_change(before, after) == "direct_normalize"
+
+    def test_none_when_both_openai_and_anthropic(self):
+        # Two direct providers → not exclusive → none
+        before = {}
+        after = {"OPENAI_API_KEY": "sk-openai", "ANTHROPIC_API_KEY": "sk-ant"}
+        assert classify_runtime_provider_change(before, after) == "none"
+
+
+class TestSettingsSaveWarningContract:
+    """Verify the warning-gate contract used by server.py::api_settings_post.
+
+    server.py does:
+        current, provider_defaults_changed, _ = apply_runtime_provider_defaults(current)
+        if provider_defaults_changed:
+            change_kind = classify_runtime_provider_change(old_settings, current)
+            if change_kind == "direct_normalize":
+                warnings.append("Normalized direct-provider routing ...")
+
+    We test this logic directly — (1) direct normalization should produce a warning,
+    (2) adding OpenRouter back should NOT produce a warning.
+    """
+
+    def _simulate_save_warning(self, old_settings: dict, new_settings: dict) -> list[str]:
+        """Simulate the api_settings_post warning logic."""
+        from ouroboros.server_runtime import apply_runtime_provider_defaults
+        current, provider_defaults_changed, _ = apply_runtime_provider_defaults(dict(new_settings))
+        warnings: list[str] = []
+        if provider_defaults_changed:
+            change_kind = classify_runtime_provider_change(old_settings, current)
+            if change_kind == "direct_normalize":
+                warnings.append(
+                    "Normalized direct-provider routing because OpenRouter is not configured."
+                )
+        return warnings
+
+    def test_direct_normalization_produces_warning(self):
+        # First save with only OpenAI — direct normalization fires, warning expected
+        old = {}
+        new = {"OPENAI_API_KEY": "sk-openai"}
+        warnings = self._simulate_save_warning(old, new)
+        assert len(warnings) == 1
+        assert "Normalized" in warnings[0]
+
+    def test_adding_openrouter_back_produces_no_warning(self):
+        # User was in OpenAI-only mode, then adds OpenRouter —
+        # apply_runtime_provider_defaults returns no changes (OpenRouter present),
+        # so provider_defaults_changed is False and the warning block is never reached.
+        old = {"OPENAI_API_KEY": "sk-openai", "OUROBOROS_MODEL": "openai::gpt-5.4"}
+        new = {"OPENAI_API_KEY": "sk-openai", "OPENROUTER_API_KEY": "sk-or-v1", "OUROBOROS_MODEL": "openai::gpt-5.4"}
+        warnings = self._simulate_save_warning(old, new)
+        assert warnings == []

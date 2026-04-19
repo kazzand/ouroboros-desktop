@@ -269,6 +269,7 @@ from ouroboros.config import (
 )
 from ouroboros.server_runtime import (
     apply_runtime_provider_defaults,
+    classify_runtime_provider_change,
     has_local_routing,
     has_startup_ready_provider,
     has_supervisor_provider,
@@ -938,9 +939,13 @@ async def api_settings_post(request: Request) -> JSONResponse:
 
         warnings = []
         if provider_defaults_changed:
-            warnings.append(
-                "Normalized direct-provider routing because OpenRouter is not configured for the active provider."
-            )
+            change_kind = classify_runtime_provider_change(old_settings, current)
+            # Reverse migration (OpenRouter added back, :: → /) is silent
+            # housekeeping — the old warning text was misleading in that case.
+            if change_kind == "direct_normalize":
+                warnings.append(
+                    "Normalized direct-provider routing because OpenRouter is not configured for the active provider."
+                )
         try:
             from supervisor.message_bus import get_bridge
             get_bridge().configure_from_settings(current)

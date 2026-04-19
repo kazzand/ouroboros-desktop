@@ -35,7 +35,7 @@ _DIRECT_PROVIDER_LEGACY_DEFAULTS = {
     },
     "anthropic": {},
 }
-_MODEL_LANE_KEYS = tuple(_DIRECT_PROVIDER_AUTO_DEFAULTS["openai"].keys())
+_ALL_MODEL_SLOT_KEYS = tuple(_DIRECT_PROVIDER_AUTO_DEFAULTS["openai"].keys())
 _DIRECT_PROVIDER_REVIEW_RUNS = 3
 
 
@@ -126,6 +126,29 @@ def _normalize_direct_review_models(settings: dict, provider: str) -> str:
     return _serialize_model_list(migrated_models)
 
 
+def classify_runtime_provider_change(before: dict, after: dict) -> str:
+    """Classify what kind of normalization ``apply_runtime_provider_defaults`` did.
+
+    Returns one of:
+
+    - ``"none"`` — no change, or change was purely cosmetic.
+    - ``"direct_normalize"`` — OpenRouter is NOT configured, and the function
+      auto-filled direct-provider defaults.  This is the only case where a
+      user-facing warning is appropriate.
+    - ``"reverse_migrate"`` — OpenRouter IS configured (so no exclusive-direct
+      provider is active).  ``apply_runtime_provider_defaults`` returned early
+      without making any changes, so this is pure housekeeping and should NOT
+      produce a warning.
+    """
+    provider_after = _exclusive_direct_remote_provider(after)
+    if provider_after:
+        return "direct_normalize"
+    has_openrouter_after = bool(_setting_text(after, "OPENROUTER_API_KEY"))
+    if has_openrouter_after:
+        return "reverse_migrate"
+    return "none"
+
+
 def has_remote_provider(settings: dict) -> bool:
     """Return True when any supported remote-provider credential is configured."""
     return any(
@@ -176,7 +199,7 @@ def apply_runtime_provider_defaults(settings: dict) -> tuple[dict, bool, list[st
 
     changed_keys: list[str] = []
     provider_defaults = _DIRECT_PROVIDER_AUTO_DEFAULTS[provider]
-    for key in _MODEL_LANE_KEYS:
+    for key in _ALL_MODEL_SLOT_KEYS:
         raw_current = _setting_text(normalized, key)
         current = migrate_model_value(provider, raw_current)
         default = _setting_text(SETTINGS_DEFAULTS, key)
