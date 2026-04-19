@@ -1,4 +1,4 @@
-# Ouroboros v4.40.2 — Architecture & Reference
+# Ouroboros v4.40.3 — Architecture & Reference
 
 This document describes every component, page, button, API endpoint, and data flow.
 It is the single source of truth for how the system works. Keep it updated.
@@ -1504,11 +1504,11 @@ data tree and is resolved at runtime by the embedded interpreter. Data bundles i
 `ouroboros/`, `supervisor/`, `web/`, `prompts/`, `docs/`, `assets/`, `tests/`,
 `server.py`, `BIBLE.md`, `README.md`, `VERSION`, `pyproject.toml`, `Makefile`,
 `requirements.txt`, `requirements-launcher.txt`, `.gitignore`, and `python-standalone/` (the embedded
-Python runtime that carries all agent dependencies — and, from v4.40.2, the bundled
+Python runtime that carries all agent dependencies — and, from v4.40.3, the bundled
 Chromium binary installed via `PLAYWRIGHT_BROWSERS_PATH=0 playwright install chromium`
 before PyInstaller runs; see *Bundled Chromium* paragraph below).
 
-**Bundled Chromium (v4.40.2+):** Each build script invokes
+**Bundled Chromium (build scripts v4.40.2+; runtime detection v4.40.3+):** Each build script invokes
 `playwright install chromium` inside `python-standalone` with `PLAYWRIGHT_BROWSERS_PATH`
 set to `0`, **before** PyInstaller packages the app. This directs Playwright to store
 the Chromium binary inside the playwright package directory

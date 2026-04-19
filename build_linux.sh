@@ -28,6 +28,9 @@ rm -rf build dist
 export PYINSTALLER_CONFIG_DIR="$PWD/.pyinstaller-cache"
 mkdir -p "$PYINSTALLER_CONFIG_DIR"
 
+echo "--- Installing Chromium for browser tools (bundled into python-standalone) ---"
+PLAYWRIGHT_BROWSERS_PATH=0 python-standalone/bin/python3 -m playwright install chromium
+
 echo "--- Running PyInstaller ---"
 "$PYTHON_CMD" -m PyInstaller Ouroboros.spec --clean --noconfirm
 

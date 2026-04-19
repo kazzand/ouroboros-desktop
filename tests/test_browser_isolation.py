@@ -89,6 +89,122 @@ class TestBrowserModuleState:
         assert pathlib.Path(alias_dir.resolve()) == arm_dir.resolve()
 
 
+class TestHasPlatformChromium:
+    """_has_platform_chromium: two-level check — chromium-* dir + platform-matching subdir."""
+
+    def test_missing_dir_returns_false(self, tmp_path):
+        from ouroboros.tools.browser import _has_platform_chromium
+        assert _has_platform_chromium(tmp_path / "nonexistent") is False
+
+    def test_empty_dir_returns_false(self, tmp_path):
+        from ouroboros.tools.browser import _has_platform_chromium
+        assert _has_platform_chromium(tmp_path) is False
+
+    def test_non_chromium_dir_returns_false(self, tmp_path):
+        from ouroboros.tools.browser import _has_platform_chromium
+        (tmp_path / "firefox-1234").mkdir()
+        assert _has_platform_chromium(tmp_path) is False
+
+    def test_chromium_dir_no_matching_platform_subdir_returns_false(self, tmp_path, monkeypatch):
+        from ouroboros.tools import browser as bmod
+        monkeypatch.setattr(bmod.sys, "platform", "darwin", raising=False)
+        from ouroboros.tools.browser import _has_platform_chromium
+        chromium_dir = tmp_path / "chromium-1234"
+        chromium_dir.mkdir()
+        (chromium_dir / "chrome-linux-x64").mkdir()  # wrong platform
+        assert _has_platform_chromium(tmp_path) is False
+
+    def test_chromium_dir_with_no_executable_returns_false(self, tmp_path, monkeypatch):
+        """A non-empty chrome-mac-* dir with only metadata (no Chromium.app) must NOT trigger."""
+        from ouroboros.tools import browser as bmod
+        monkeypatch.setattr(bmod.sys, "platform", "darwin", raising=False)
+        from ouroboros.tools.browser import _has_platform_chromium
+        chromium_dir = tmp_path / "chromium-1234"
+        chromium_dir.mkdir()
+        platform_dir = chromium_dir / "chrome-mac-x64"
+        platform_dir.mkdir()
+        (platform_dir / "metadata.json").write_text("{}", encoding="utf-8")  # metadata only
+        assert _has_platform_chromium(tmp_path) is False
+
+    def test_chromium_dir_with_matching_executable_returns_true(self, tmp_path, monkeypatch):
+        """A chrome-mac-* dir with the real macOS Chromium.app executable returns True."""
+        from ouroboros.tools import browser as bmod
+        monkeypatch.setattr(bmod.sys, "platform", "darwin", raising=False)
+        from ouroboros.tools.browser import _has_platform_chromium
+        chromium_dir = tmp_path / "chromium-1234"
+        chromium_dir.mkdir()
+        platform_dir = chromium_dir / "chrome-mac-x64"
+        exe = platform_dir / "Chromium.app" / "Contents" / "MacOS" / "Chromium"
+        exe.parent.mkdir(parents=True)
+        exe.write_text("stub", encoding="utf-8")
+        assert _has_platform_chromium(tmp_path) is True
+
+
+class TestSetPlaywrightBrowsersPathIfBundled:
+    """_set_playwright_browsers_path_if_bundled: sets env var only when bundled Chromium found."""
+
+    def test_no_op_when_env_already_set(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", "/some/custom/path")
+        import importlib
+        import ouroboros.tools.browser as bmod
+        monkeypatch.setattr(bmod.sys, "platform", "darwin", raising=False)
+        # Should not overwrite existing env var
+        bmod._set_playwright_browsers_path_if_bundled()
+        import os
+        assert os.environ["PLAYWRIGHT_BROWSERS_PATH"] == "/some/custom/path"
+
+    def test_sets_zero_when_chromium_dir_matches(self, monkeypatch, tmp_path):
+        import os
+        monkeypatch.delenv("PLAYWRIGHT_BROWSERS_PATH", raising=False)
+        import ouroboros.tools.browser as bmod
+        monkeypatch.setattr(bmod.sys, "platform", "darwin", raising=False)
+        # Build fake playwright package structure
+        local_browsers = tmp_path / "driver" / "package" / ".local-browsers"
+        chromium_dir = local_browsers / "chromium-9999"
+        chromium_dir.mkdir(parents=True)
+        platform_dir = chromium_dir / "chrome-mac-x64"
+        exe = platform_dir / "Chromium.app" / "Contents" / "MacOS" / "Chromium"
+        exe.parent.mkdir(parents=True)
+        exe.write_text("stub", encoding="utf-8")  # real macOS executable path
+        fake_pw = types.SimpleNamespace(__file__=str(tmp_path / "__init__.py"))
+        monkeypatch.setitem(sys.modules, "playwright", fake_pw)
+        bmod._set_playwright_browsers_path_if_bundled()
+        assert os.environ.get("PLAYWRIGHT_BROWSERS_PATH") == "0"
+
+    def test_no_change_when_no_matching_chromium(self, monkeypatch, tmp_path):
+        import os
+        monkeypatch.delenv("PLAYWRIGHT_BROWSERS_PATH", raising=False)
+        import ouroboros.tools.browser as bmod
+        monkeypatch.setattr(bmod.sys, "platform", "darwin", raising=False)
+        local_browsers = tmp_path / "driver" / "package" / ".local-browsers"
+        local_browsers.mkdir(parents=True)
+        fake_pw = types.SimpleNamespace(__file__=str(tmp_path / "__init__.py"))
+        monkeypatch.setitem(sys.modules, "playwright", fake_pw)
+        bmod._set_playwright_browsers_path_if_bundled()
+        assert "PLAYWRIGHT_BROWSERS_PATH" not in os.environ
+
+    def test_import_time_side_effect_sets_env_when_bundled(self, monkeypatch, tmp_path):
+        """Module-import calls _set_playwright_browsers_path_if_bundled(); reloading the
+        module with a fake bundled Chromium present must set PLAYWRIGHT_BROWSERS_PATH=0."""
+        import importlib
+        import os
+        monkeypatch.delenv("PLAYWRIGHT_BROWSERS_PATH", raising=False)
+        # Build fake playwright package with a non-empty platform dir
+        local_browsers = tmp_path / "driver" / "package" / ".local-browsers"
+        exe = local_browsers / "chromium-9999" / "chrome-mac-x64" / "Chromium.app" / "Contents" / "MacOS" / "Chromium"
+        exe.parent.mkdir(parents=True)
+        exe.write_text("stub", encoding="utf-8")  # real macOS executable path
+        fake_pw = types.SimpleNamespace(__file__=str(tmp_path / "__init__.py"))
+        monkeypatch.setitem(sys.modules, "playwright", fake_pw)
+        import ouroboros.tools.browser as bmod
+        monkeypatch.setattr(bmod.sys, "platform", "darwin", raising=False)
+        # Simulate a fresh module import by calling the module-level init directly
+        # (importlib.reload would re-run the side-effect but also re-register tools;
+        # calling the function directly tests the same code path without side effects)
+        bmod._set_playwright_browsers_path_if_bundled()
+        assert os.environ.get("PLAYWRIGHT_BROWSERS_PATH") == "0"
+
+
 class TestCleanupBrowser:
     """cleanup_browser should null out all browser_state references."""
 

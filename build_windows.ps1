@@ -26,6 +26,10 @@ if (Test-Path "dist") { Remove-Item -Recurse -Force "dist" }
 $env:PYINSTALLER_CONFIG_DIR = Join-Path (Get-Location) ".pyinstaller-cache"
 New-Item -ItemType Directory -Force -Path $env:PYINSTALLER_CONFIG_DIR | Out-Null
 
+Write-Host "--- Installing Chromium for browser tools (bundled into python-standalone) ---"
+$env:PLAYWRIGHT_BROWSERS_PATH = "0"
+& "python-standalone\python.exe" -m playwright install chromium
+
 Write-Host "--- Running PyInstaller ---"
 python -m PyInstaller Ouroboros.spec --clean --noconfirm
 

@@ -34,6 +34,92 @@ _playwright_ready = False
 _MISSING_EXECUTABLE_RE = re.compile(r"Executable doesn't exist at ([^\n]+)")
 
 
+def _has_platform_chromium(local_browsers_dir: pathlib.Path) -> bool:
+    """Return True if *local_browsers_dir* contains a Chromium build that matches
+    the current platform (two-level check: directory exists AND contains a
+    platform-matching subdirectory).
+
+    The directory layout created by ``PLAYWRIGHT_BROWSERS_PATH=0 playwright install chromium``
+    is ``driver/package/.local-browsers/chromium-<rev>/chrome-{mac,linux,win}-*/``.
+    We only consider the bundle usable when at least one ``chrome-<platform>-*`` entry
+    is present inside a ``chromium-*`` directory — foreign-platform payloads (e.g. an
+    arm64 bundle on an x86 host) are ignored so we don't accidentally set the env var
+    and point Playwright at the wrong binary.
+    """
+    if not local_browsers_dir.is_dir():
+        return False
+    plat = sys.platform
+    # Platform-matching folder name fragments (used inside chromium-<rev>/)
+    if plat == "darwin":
+        candidates = ["chrome-mac"]  # covers both chrome-mac-x64 and chrome-mac-arm64
+    elif plat.startswith("win"):
+        candidates = ["chrome-win"]
+    else:
+        candidates = ["chrome-linux"]
+    for chromium_dir in local_browsers_dir.iterdir():
+        if not chromium_dir.name.startswith("chromium-"):
+            continue
+        for sub in chromium_dir.iterdir():
+            if not any(sub.name.startswith(c) for c in candidates):
+                continue
+            # Confirm the platform directory contains the expected browser executable,
+            # not just metadata. Partial downloads leave the directory non-empty but
+            # without the binary, which would redirect Playwright to a broken bundle.
+            if _platform_executable_exists(sub):
+                return True
+    return False
+
+
+def _platform_executable_exists(platform_dir: pathlib.Path) -> bool:
+    """Return True when *platform_dir* contains the platform-native browser executable.
+
+    Expected locations (set by Playwright's own download convention):
+    - macOS:   Chromium.app/Contents/MacOS/Chromium
+    - Linux:   chrome  (or chrome-linux)
+    - Windows: chrome.exe
+    """
+    plat = sys.platform
+    if plat == "darwin":
+        return (platform_dir / "Chromium.app" / "Contents" / "MacOS" / "Chromium").exists()
+    elif plat.startswith("win"):
+        return (platform_dir / "chrome.exe").exists()
+    else:
+        # Linux: Playwright names the binary 'chrome' inside the platform dir
+        return (platform_dir / "chrome").exists()
+
+
+def _set_playwright_browsers_path_if_bundled() -> None:
+    """Set ``PLAYWRIGHT_BROWSERS_PATH=0`` at import time when a platform-matching
+    bundled Chromium is detected inside the playwright package directory.
+
+    This makes the packaged ``.app`` / ``.tar.gz`` / ``.zip`` builds work out of
+    the box: Chromium was installed into the playwright package tree during the
+    build step (``PLAYWRIGHT_BROWSERS_PATH=0 playwright install chromium``), so
+    setting the same env-var at runtime tells Playwright to look in the same place.
+
+    Source/dev installs that already have Chromium in ``~/.cache/ms-playwright/``
+    are unaffected: the check only fires when ``_has_platform_chromium`` confirms
+    that a matching bundled binary actually exists inside the package directory.
+    If the env-var is already set explicitly, it is always respected as-is.
+    """
+    import os
+    if "PLAYWRIGHT_BROWSERS_PATH" in os.environ:
+        return  # already set — respect explicit override
+    try:
+        import playwright as _pw_pkg
+        pkg_root = pathlib.Path(_pw_pkg.__file__).parent
+        local_browsers = pkg_root / "driver" / "package" / ".local-browsers"
+        if _has_platform_chromium(local_browsers):
+            os.environ["PLAYWRIGHT_BROWSERS_PATH"] = "0"
+            log.debug("Bundled Chromium detected — set PLAYWRIGHT_BROWSERS_PATH=0")
+    except Exception:
+        pass  # non-fatal; fall through to standard cache lookup
+
+
+# Set PLAYWRIGHT_BROWSERS_PATH when a bundled Chromium is present (packaged builds).
+_set_playwright_browsers_path_if_bundled()
+
+
 def _ensure_playwright_installed():
     """Install Playwright and Chromium if not already available."""
     global _playwright_ready
