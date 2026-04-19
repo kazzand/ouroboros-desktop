@@ -87,8 +87,12 @@ def test_chat_js_visibilitychange_restores_scroll():
 
 # inputHistory has two writers:
 #   1. rememberInput() — called from sendMessage on local sends.
-#   2. syncHistory() seeding block — seeds on first load and reconnect from
-#      server-side user messages (Telegram, other WebUI sessions).
+#   2. syncHistory() seeding block — seeds ONCE per page lifetime from
+#      server-side user messages (Telegram, other WebUI sessions), gated
+#      by the one-shot inputHistorySeededFromServer flag. Subsequent WS
+#      reconnects deliberately do NOT re-seed (avoids inputHistoryIndex
+#      reset mid-scrub); new server-side messages that arrive over a
+#      persistent tab surface in recall only after the next page reload.
 # Live inbound ws.on('chat') does NOT push to inputHistory (avoids mid-scrub
 # UX disruption and the mid-scrub index reset issue).
 

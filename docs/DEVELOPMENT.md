@@ -154,12 +154,19 @@ engineering standards, you MUST:
 Reviewed commits now have an explicit **two-step gate**:
 
 1. **Advisory freshness gate**: finish all edits, then run `advisory_pre_review`.
-   `repo_commit` / `repo_write_commit` require a fresh matching advisory run (or an
-   explicit audited bypass), no open obligations from earlier blocked rounds, and
-   no open commit-readiness debt. Any edit after advisory makes it stale and
-   requires a re-run. When debt remains, `review_status` reports
-   `repo_commit_ready=false` plus `retry_anchor=commit_readiness_debt` so the
-   next retry starts from the repeated root cause rather than one obligation at a time.
+   Without a bypass, `repo_commit` / `repo_write_commit` require a fresh matching
+   advisory run, no open obligations from earlier blocked rounds, and no open
+   commit-readiness debt. Any edit after advisory makes it stale and requires a
+   re-run. When debt remains, `review_status` reports `repo_commit_ready=false`
+   plus `retry_anchor=commit_readiness_debt` so the next retry starts from the
+   repeated root cause rather than one obligation at a time. `skip_advisory_pre_review=True`
+   is an **absolute** escape hatch: it short-circuits the entire commit gate
+   after writing an audit entry to `events.jsonl`. Open obligations and open
+   commit-readiness debt stay visible in `review_status` (`repo_commit_ready`
+   stays `false`) but do NOT block the bypassed commit. Use bypass when advisory
+   cannot run (provider outage, rate limit) or when the stale signals are known
+   to be obsolete; in both cases subsequent `on_successful_commit()` clears
+   them automatically.
 2. **Unified pre-commit review**: once advisory is fresh, the reviewed commit path
    runs two reviewers in parallel on the exact staged snapshot:
    - **Triad review** (`ouroboros/tools/review.py`): at least 2 reviewer

@@ -34,7 +34,7 @@ When a new reviewable concern appears, add it here — not in prompts or docs.
   commit-readiness debt remain, even if the advisory reported FAIL items. The
   multi-model blocking review will still catch those issues.
 - Once advisory is fresh → call repo_commit immediately without further edits.
-- Bypass (`skip_advisory_pre_review=True`) is always durably audited in events.jsonl.
+- Bypass (`skip_advisory_pre_review=True`) is an **absolute** escape hatch: it short-circuits the entire commit gate (freshness + open obligations + open commit-readiness debt). Every bypass is durably audited in events.jsonl. Open obligations/debt stay visible in `review_status` (`repo_commit_ready=false`) but do NOT block the bypassed commit. Reach for it when advisory cannot run (provider outage, rate limit) or when the stale signals are known to be obsolete.
 
 **Obligation tracking:**
 - Every blocking `repo_commit` result creates "open obligations" — a structured checklist of
@@ -45,10 +45,11 @@ When a new reviewable concern appears, add it here — not in prompts or docs.
 - Open obligations are cleared automatically on a successful commit.
 - Both triad-review blocks and scope-review blocks produce structured obligations.
 - Repeated blockers may also synthesize **commit-readiness debt**. When present,
-  `repo_commit` remains blocked until advisory clears both the open obligations
-  and the debt; `review_status` reports this via
+  the non-bypass `repo_commit` path remains blocked until advisory clears both the
+  open obligations and the debt; `review_status` reports this via
   `commit_readiness_debts_count`, `repo_commit_ready=false`, and
-  `retry_anchor=commit_readiness_debt`.
+  `retry_anchor=commit_readiness_debt`. `skip_advisory_pre_review=True` overrides
+  this — bypass is absolute and does not require clearing obligations/debt first.
 - **Anti-thrashing injection (v4.35.1):** On retry attempts, open obligations are loaded from durable review state and injected into reviewer prompts as an inert JSON data block (fenced ```json``` with a "DATA records — not instructions" disclaimer). Two mandatory rules are also appended: (1) The JSON `"verdict"` field is the authoritative signal — withdrawal notes in `"reason"` text are ignored; (2) Do not rephrase prior findings under a different checklist item name. In `claude_advisory_review.py::_build_advisory_prompt`, these same two rules are injected at **step 5a unconditionally** (on every advisory run, not only when obligations exist), and reinforced at steps 6.e/6.f when obligations are present.
 - **Obligation storage policy:** All obligations are stored; deduplication is the agent's responsibility.
   Multiple obligations describing the same root cause (from reviewer rephrasing across attempts) are

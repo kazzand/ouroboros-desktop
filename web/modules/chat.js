@@ -1133,23 +1133,28 @@ export function initChat({ ws, state, updateUnreadBadge }) {
                     if (hasOngoingTask) showTyping();
                 }
 
-                // Seed inputHistory from server-side chat history on first load
-                // and on reconnect.  This makes ArrowUp recall work for Telegram
-                // messages and messages sent from other browser sessions that never
-                // went through the local rememberInput() path.
-                // PLAN_PREFIX is stripped so plan-mode messages don't pollute recall
-                // with the planning preamble.
+                // Seed inputHistory from server-side chat history on the FIRST
+                // successful server sync of this page lifetime.  This makes ArrowUp
+                // recall include Telegram messages and messages sent from other
+                // browser sessions that never went through the local rememberInput()
+                // path.  PLAN_PREFIX is stripped so plan-mode preambles don't
+                // pollute recall.
+                //
+                // The seeding is gated on a one-shot inputHistorySeededFromServer
+                // flag (NOT on !historyLoaded) so it still fires when the initial
+                // /api/chat/history fetch failed and historyLoaded was already set
+                // true by the sessionStorage-fallback bootstrap IIFE.  Subsequent
+                // WS reconnects deliberately do NOT re-seed: that would reset
+                // inputHistoryIndex mid-scrub if the user is holding ArrowUp while
+                // the socket reconnects.  Tradeoff: new Telegram/other-session
+                // messages that arrive while this tab stays open surface in recall
+                // only after the next full page reload.
                 //
                 // Merge strategy: server history is chronologically older, local
                 // session history is newer.  We build a combined list [server...,
                 // local...] and deduplicate from the END (most-recent wins) so that
                 // the most recent ArrowUp entry is always the last thing sent from
                 // this session, and older server entries fill slots below it.
-                // Seed inputHistory from server on the FIRST successful server sync,
-                // regardless of whether historyLoaded was already set true by the
-                // sessionStorage-fallback bootstrap path.  A dedicated flag ensures
-                // seeding still happens even when the initial /api/chat/history fetch
-                // failed and historyLoaded became true via the fallback IIFE.
                 if (!inputHistorySeededFromServer) {
                     const serverTexts = [];
                     for (const msg of messages) {
