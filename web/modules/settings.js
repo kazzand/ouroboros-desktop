@@ -218,12 +218,33 @@ export function initSettings({ state }) {
         syncEffortSegments(page);
     }
 
+    function _renderNetworkHint(meta) {
+        const hint = document.getElementById('settings-lan-hint');
+        if (!hint || !meta) return;
+        if (meta.reachability === 'loopback_only') {
+            hint.innerHTML = '🔒 Bound to <code>localhost</code> — only accessible from this machine. To allow LAN access, restart with <code>OUROBOROS_SERVER_HOST=0.0.0.0</code>.';
+            hint.dataset.tone = 'info';
+            hint.hidden = false;
+        } else if (meta.reachability === 'lan_reachable') {
+            hint.innerHTML = `🌐 Accessible on your local network at <a href="${meta.recommended_url}" target="_blank" rel="noopener">${meta.recommended_url}</a>${meta.warning ? ' — <em>' + meta.warning + '</em>' : ''}`;
+            hint.dataset.tone = 'ok';
+            hint.hidden = false;
+        } else if (meta.reachability === 'host_ip_unknown') {
+            hint.innerHTML = `⚠️ Server is listening on non-localhost but LAN IP could not be detected automatically. Try <code>${meta.recommended_url}</code>.${meta.warning ? ' ' + meta.warning : ''}`;
+            hint.dataset.tone = 'warn';
+            hint.hidden = false;
+        } else {
+            hint.hidden = true;
+        }
+    }
+
     async function loadSettings() {
         const resp = await fetch('/api/settings', { cache: 'no-store' });
         const data = await resp.json().catch(() => ({}));
         if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
         currentSettings = data;
         applySettings(data);
+        _renderNetworkHint(data._meta);
         renderClaudeCodeUi();
         // Always start polling so a below-baseline SDK surfaces even before
         // the user sets ANTHROPIC_API_KEY. `refreshClaudeCodeStatus` is now

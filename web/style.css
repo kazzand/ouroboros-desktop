@@ -2007,6 +2007,25 @@ body {
 .cost-table tbody tr:hover td {
     background: rgba(255,255,255,0.03);
 }
+
+/* ---------------------------------------------------------------------------
+ * Settings — LAN reachability hint
+ * Rendered by web/modules/settings.js::_renderNetworkHint into the
+ * #settings-lan-hint container inside the Network Gate section.
+ * --------------------------------------------------------------------------- */
+.settings-lan-hint {
+    margin-top: 8px;
+    padding: 8px 12px;
+    border-radius: var(--radius-sm);
+    font-size: 0.84em;
+    background: rgba(255,255,255,0.04);
+    border: 1px solid rgba(255,255,255,0.08);
+    color: var(--text-secondary, rgba(255,255,255,0.65));
+}
+.settings-lan-hint[data-tone="ok"] { border-color: rgba(100,200,100,0.25); }
+.settings-lan-hint[data-tone="warn"] { border-color: rgba(220,180,50,0.35); }
+.settings-lan-hint[data-tone="info"] { border-color: rgba(100,150,220,0.25); }
+.settings-lan-hint a { color: inherit; text-decoration: underline; opacity: 0.9; }
 .btn-sm {
     padding: 4px 12px;
     font-size: 12px;

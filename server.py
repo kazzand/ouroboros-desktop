@@ -5,7 +5,7 @@ This file lives in REPO_DIR and can be modified by the agent.
 It runs as a subprocess of the launcher, serving the web UI and
 coordinating the supervisor/worker system.
 
-Starlette + uvicorn on localhost:{PORT}.
+Starlette + uvicorn on configurable host:port (default localhost:8765; non-loopback binding supported via OUROBOROS_SERVER_HOST).
 """
 
 import asyncio
@@ -15,6 +15,7 @@ import logging
 
 import os
 import pathlib
+import socket
 import sys
 import threading
 import time
@@ -89,6 +90,87 @@ _SECRET_SETTING_KEYS = {
     "GITHUB_TOKEN",
     "OUROBOROS_NETWORK_PASSWORD",
 }
+
+# ---------------------------------------------------------------------------
+# Runtime network binding (captured in main() from parse_server_args)
+# Used by /api/settings to expose a LAN reachability hint to the Settings UI.
+# ---------------------------------------------------------------------------
+_BIND_HOST = DEFAULT_HOST
+
+
+def _get_lan_ip() -> str:
+    """Return the LAN IP using a UDP socket trick (no packet sent). Returns '' on failure."""
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(("192.0.2.1", 80))  # RFC 5737 TEST-NET-1, no packet sent
+            return s.getsockname()[0]
+    except OSError:
+        return ""
+
+
+# IPv4 wildcard hosts that mean "listen on all interfaces"
+_WILDCARD_HOSTS = frozenset({"0.0.0.0", ""})
+
+
+def _is_wildcard_host(host: str) -> bool:
+    return host in _WILDCARD_HOSTS
+
+
+from ouroboros.platform_layer import is_container_env
+
+
+def _build_network_meta(bind_host: str, bind_port: int) -> dict:
+    """Build the _meta dict for /api/settings response."""
+    from ouroboros.server_auth import is_loopback_host
+    # Strip surrounding brackets from IPv6 literals (e.g. "[::1]" → "::1") so
+    # is_loopback_host can correctly classify bracketed IPv6 loopback addresses.
+    unbracketed = bind_host[1:-1] if bind_host.startswith("[") and bind_host.endswith("]") else bind_host
+    loopback = is_loopback_host(unbracketed)
+    if loopback:
+        return {
+            "bind_host": bind_host,
+            "bind_port": bind_port,
+            "lan_ip": "",
+            "reachability": "loopback_only",
+            "recommended_url": "",
+            "warning": "Server is bound to localhost — not accessible from other devices.",
+        }
+    # Non-loopback: determine the advertised IP
+    wildcard = _is_wildcard_host(bind_host)
+    if wildcard:
+        if is_container_env():
+            # Container bridge IPs are typically not reachable from the user's LAN
+            lan_ip = ""
+        else:
+            lan_ip = _get_lan_ip()
+    elif bind_host in ("::", "[::]"):
+        # IPv6 wildcard — startup uses AF_INET only (server_entrypoint.py), so we
+        # cannot reliably detect or advertise an IPv6 LAN IP. Degrade gracefully.
+        lan_ip = ""
+    else:
+        # Specific non-loopback bind address — use it directly (IPv4 or hostname).
+        # Use unbracketed form so URL construction can uniformly re-bracket IPv6.
+        lan_ip = unbracketed
+
+    if lan_ip:
+        # Handle IPv6 addresses (bracket them for URL)
+        host_in_url = f"[{lan_ip}]" if ":" in lan_ip else lan_ip
+        reachability = "lan_reachable"
+        recommended_url = f"http://{host_in_url}:{bind_port}"
+        warning = ""
+    else:
+        reachability = "host_ip_unknown"
+        recommended_url = f"http://your-host-ip:{bind_port}"
+        warning = "Could not detect LAN IP automatically." if wildcard else ""
+    return {
+        "bind_host": bind_host,
+        "bind_port": bind_port,
+        "lan_ip": lan_ip,
+        "reachability": reachability,
+        "recommended_url": recommended_url,
+        "warning": warning,
+    }
+
 
 # ---------------------------------------------------------------------------
 # WebSocket connections manager
@@ -810,6 +892,12 @@ async def api_settings_get(request: Request) -> JSONResponse:
     for key in _SECRET_SETTING_KEYS:
         if safe.get(key):
             safe[key] = _mask_secret_value(safe[key])
+    # Inject read-only runtime network metadata for the Settings UI hint
+    try:
+        port = int(PORT_FILE.read_text().strip()) if PORT_FILE.exists() else DEFAULT_PORT
+    except (ValueError, OSError):
+        port = DEFAULT_PORT
+    safe["_meta"] = _build_network_meta(_BIND_HOST, port)
     return JSONResponse(safe)
 
 
@@ -1274,6 +1362,8 @@ def _emergency_process_cleanup() -> None:
 # ---------------------------------------------------------------------------
 def main() -> int:
     args = parse_server_args(DEFAULT_HOST, DEFAULT_PORT)
+    global _BIND_HOST
+    _BIND_HOST = args.host
     auth_warning = get_network_auth_startup_warning(args.host)
     if auth_warning:
         log.warning(auth_warning)

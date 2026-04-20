@@ -197,6 +197,7 @@ export function renderSettingsPage() {
                             placeholder: 'Leave blank to keep the network surface open',
                         })}</div>
                         <div class="settings-inline-note">Adds a password wall only for non-localhost app and API access. Leave it blank if you use Ouroboros only on this machine or inside a trusted private network. External binds still start without it, but startup logs a warning.</div>
+                        <div id="settings-lan-hint" class="settings-lan-hint" hidden></div>
                     </div>
                 </section>
 

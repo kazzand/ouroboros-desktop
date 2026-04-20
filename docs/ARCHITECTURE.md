@@ -1,4 +1,4 @@
-# Ouroboros v4.42.0 — Architecture & Reference
+# Ouroboros v4.42.1 — Architecture & Reference
 
 This document describes every component, page, button, API endpoint, and data flow.
 It is the single source of truth for how the system works. Keep it updated.
@@ -15,7 +15,7 @@ launcher.py (PyWebView)       ← desktop window, immutable outer shell (tracked
   │
   │  spawns subprocess
   ▼
-server.py (Starlette+uvicorn) ← HTTP + WebSocket on localhost:8765
+server.py (Starlette+uvicorn) ← HTTP + WebSocket on configurable host:port (default localhost:8765; Docker/non-loopback supported via OUROBOROS_SERVER_HOST=0.0.0.0)
   │
   ├── web/                     ← Web UI (SPA with ES modules in web/modules/)
   │
@@ -263,6 +263,7 @@ The web UI is a single-page app (`web/index.html` + `web/style.css` + ES modules
 - `files.js` — file browser, preview, uploads, and editor
 - `evolution.js` — evolution chart (Chart.js) + versions sub-tab (git commits, tags, rollback, promote)
 - `settings.js` — settings form with local model management
+- `settings_ui.js` — Settings page HTML layout, tabs, secret input bindings, Network Gate LAN hint container
 - `settings_controls.js` — searchable model pickers + segmented effort controls
 - `costs.js` — cost breakdown tables
 - `about.js` — about page
@@ -325,7 +326,7 @@ The Dashboard tab has been removed. Its functionality is now distributed:
 - **API Keys**: OpenRouter, OpenAI, OpenAI-compatible, Cloud.ru, Anthropic, Telegram Bot Token, GitHub Token, and Network Password.
   Keys are displayed as masked values (e.g., `sk-or-v1...`), can be explicitly cleared, and are only overwritten on save if the user enters a new value (not containing `...`).
 - **Claude Runtime Status**: the Anthropic card shows app-managed Claude runtime status with a `Repair Runtime` action. The card is visible when the user has configured `ANTHROPIC_API_KEY` **or** when the last `/api/claude-code/status` poll stored a non-empty `error` on the runtime card state (`claudeRuntimeHasError` in `web/modules/settings.js::applyClaudeCodeStatus`). Two distinct paths set that `error`: (a) backend `ouroboros/platform_layer.py::resolve_claude_runtime` marks the SDK below the `_CLAUDE_SDK_MIN_VERSION` baseline (the only backend-originated path today — other not-ready conditions such as a missing bundled CLI currently fall through to `status_label() == "no_api_key"` until a key is configured); (b) the browser-side `refreshClaudeCodeStatus` `catch` block synthesizes an error payload for any `/api/claude-code/status` transport failure, non-OK HTTP response, or JSON parse error, so loss of connectivity to the backend also surfaces the card before a key is configured. The Claude runtime (SDK + bundled CLI) powers delegated code editing and advisory review and is managed automatically by the app.
-- **Providers tab**: also contains `Legacy OpenAI Base URL` (backward-compatibility escape hatch for older installs) and `Network Gate` (optional non-localhost password) at the bottom.
+- **Providers tab**: also contains `Legacy OpenAI Base URL` (backward-compatibility escape hatch for older installs) and `Network Gate` (optional non-localhost password) at the bottom. The Network Gate section also shows a read-only LAN hint (via `_meta` from `/api/settings`): loopback-bound instances show a restart instruction, LAN-reachable instances show a clickable URL, and unknown-IP cases show a placeholder. Bracketed IPv6 literals (e.g. `[::1]`) are normalized by `_build_network_meta` — brackets are stripped before the `is_loopback_host` classification, and URL construction uniformly re-brackets IPv6 addresses so there is no double-bracketing.
 - **Models tab**: Main, Code, Light, Fallback model routing. Each card has a `Local` toggle to route through the GGUF server configured in Advanced. `Claude Code Model` field selects the Anthropic model for `claude_code_edit` / `advisory_pre_review`.
 - **Model catalog**: optional `Refresh Model Catalog` action calls `/api/model-catalog`. Failures are non-fatal and surfaced as inline warnings.
 - **Model pickers**: searchable provider-aware pickers replace legacy raw dropdowns for remote models.
@@ -444,7 +445,7 @@ authentication. If the password is blank, non-loopback access stays open by desi
 | POST | `/api/files/delete` | Delete a file/directory (root delete is rejected) |
 | POST | `/api/files/transfer` | Copy or move files/directories within the Files root |
 | POST | `/api/files/upload` | Multipart upload into current Files directory |
-| GET | `/api/settings` | Current settings with masked API keys |
+| GET | `/api/settings` | Current settings with masked API keys; also injects `_meta` (bind_host, bind_port, lan_ip, reachability, recommended_url, warning) for the Settings UI network hint |
 | POST | `/api/settings` | Update settings (partial update, only provided keys) |
 | GET | `/api/claude-code/status` | App-managed Claude runtime status (SDK version, CLI path/version, legacy detection, API key readiness) |
 | POST | `/api/claude-code/install` | Repair/update the app-managed Claude runtime |

@@ -31,6 +31,21 @@ _SUBPROCESS_NO_WINDOW = (
 )
 
 
+def is_container_env() -> bool:
+    """Return True when running inside a Docker/container environment.
+
+    Checks:
+    - OUROBOROS_CONTAINER=1 environment variable (explicit override)
+    - /.dockerenv file presence (standard Docker sentinel, Linux only)
+    """
+    if os.environ.get("OUROBOROS_CONTAINER") == "1":
+        return True
+    # /.dockerenv is created by Docker on Linux; safe no-op on macOS/Windows
+    if IS_LINUX and pathlib.Path("/.dockerenv").exists():
+        return True
+    return False
+
+
 def _hidden_run(command: list[str], **kwargs):
     if _SUBPROCESS_NO_WINDOW:
         kwargs = dict(kwargs)

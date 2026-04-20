@@ -35,6 +35,9 @@ def is_loopback_host(host: str | None) -> bool:
     text = (host or "").strip().lower()
     if not text:
         return False
+    # Normalize bracketed IPv6 literals (e.g. "[::1]" → "::1") so ipaddress can parse them.
+    if text.startswith("[") and text.endswith("]"):
+        text = text[1:-1]
     if text in {"localhost", "127.0.0.1", "::1"}:
         return True
     try:
