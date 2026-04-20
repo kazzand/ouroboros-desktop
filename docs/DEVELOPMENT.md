@@ -329,5 +329,9 @@ The Logs page phase badges now match Chat live card colors.
 ### No inline styles in JS
 
 JS modules that generate HTML must use CSS class names, not `style=""` attributes.
+This is enforced by reviewer policy — `.style.*` assignments on DOM elements (e.g.
+`element.style.display`, `element.style.color`) will produce a REVIEW_BLOCKED finding.
 Existing classes (`.stat-card`, `.page-header`, `.about-*`, `.costs-*`) cover common layouts.
 Add new classes to `web/style.css` when needed.
+Before staging any `web/modules/*.js` file: `grep -n "\.style\." web/modules/*.js`
+and fix any hits.

@@ -390,10 +390,12 @@ If health invariants show "RESCUE SNAPSHOT AVAILABLE", inspect the snapshot with
 `data_read` and decide whether to re-apply `changes.diff` via `run_shell`.
 
 **Pre-advisory sanity check (run before calling `advisory_pre_review`):**
-See `docs/CHECKLISTS.md::Pre-Commit Self-Check` — an 8-row table with a "How"
+See `docs/CHECKLISTS.md::Pre-Commit Self-Check` — a 12-row table with a "How"
 column (version sync, behavior→VERSION bump, scenario-level test coverage,
 shared-format grep, guard/filter three-breakage-rule, new tool registration,
-green tests before first commit, changelog P7-limit). Also contains the
+green tests before first commit, changelog P7-limit, build-script/browser cross-surface
+sync, commit_gate.py coupled surfaces, VERSION+pyproject ordering, JS inline-style
+ban). Also contains the
 "After a blocked reviewed commit" mandatory-regrouping procedure
 (applies to both `repo_commit` and `repo_write_commit`).
 Walk through it honestly each time, then call `advisory_pre_review`.
@@ -494,6 +496,8 @@ Not mechanically, but honestly: "Did I update everything that needs updating?"
 8. **Knowledge base** — should a `knowledge_write` capture the new topic?
 9. **Version bump** — behavioral change requires VERSION + tag + README
    changelog (see Versioning section).
+
+**Coupled-surface rules:** See `docs/CHECKLISTS.md::Pre-Commit Self-Check` rows 9–12 for the canonical list of files with known propagation chains (build scripts/browser, commit_gate.py, VERSION ordering, JS inline styles). That checklist is the SSOT — do not duplicate the rules here.
 
 This is not bureaucracy — this is the lesson from the identity_journal incident.
 One missed propagation point = inconsistency = confusion for future me.
