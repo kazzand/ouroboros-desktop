@@ -535,6 +535,35 @@ class TestPrePushGate:
         from ouroboros.tools.git import _git_commit_with_tests
         assert callable(_git_commit_with_tests)
 
+    def test_pre_push_tests_timeout_is_sufficient(self):
+        """Post-commit test runner timeout must be >= 180s.
+
+        The full test suite (~2100 tests) takes ~2 minutes. A 30s timeout
+        produces false TESTS_FAILED reports on every commit. This regression
+        guard prevents the timeout from being lowered back to an insufficient value.
+        """
+        import ast
+        import pathlib
+        src = (pathlib.Path(__file__).parent.parent / "ouroboros" / "tools" / "git.py").read_text()
+        tree = ast.parse(src)
+        found_timeout = None
+        for node in ast.walk(tree):
+            # Find the subprocess.run call inside _run_pre_push_tests
+            if not isinstance(node, ast.FunctionDef) or node.name != "_run_pre_push_tests":
+                continue
+            for subnode in ast.walk(node):
+                if not isinstance(subnode, ast.Call):
+                    continue
+                for kw in subnode.keywords:
+                    if kw.arg == "timeout" and isinstance(kw.value, ast.Constant):
+                        found_timeout = kw.value.value
+        assert found_timeout is not None, "timeout kwarg not found in _run_pre_push_tests subprocess.run call"
+        assert found_timeout >= 180, (
+            f"_run_pre_push_tests timeout is {found_timeout}s — must be >= 180s to avoid "
+            "false TESTS_FAILED on the full 2100+ test suite (which takes ~2 minutes). "
+            "The original 30s value caused every successful commit to report spurious failures."
+        )
+
 
 # ── Timeout handling ─────────────────────────────────────────────
 
