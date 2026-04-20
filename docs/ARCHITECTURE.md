@@ -1,4 +1,4 @@
-# Ouroboros v4.40.6 — Architecture & Reference
+# Ouroboros v4.41.0 — Architecture & Reference
 
 This document describes every component, page, button, API endpoint, and data flow.
 It is the single source of truth for how the system works. Keep it updated.
@@ -76,7 +76,7 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on localhost:8765
       ├── gateways/            ← External API adapters (thin transport, no business logic)
       │   └── claude_code.py   ← Claude Agent SDK gateway (edit + read-only paths)
       ├── tools/               ← Auto-discovered tool plugins
-      │   ├── release_sync.py    ← Standalone release-metadata sync library (no wire-up; Commit B will integrate)
+      │   ├── release_sync.py    ← Release-metadata sync library; used by _preflight_check check 7 for P7 history-limit validation (check_history_limit) and by agents for version-carrier sync (sync_release_metadata)
       │   ├── a2a.py             ← A2A client tools: a2a_discover, a2a_send, a2a_status (non-core, require enable_tools)
       │   ├── ci.py              ← CI trigger and monitoring (GitHub Actions API)
       │   ├── claude_advisory_review.py ← Advisory pre-review tool (read-only Claude Agent SDK)
@@ -786,7 +786,7 @@ non-fatal on exception (LLM reviewers catch anything that slips through).
 | 4 | `architecture_doc` | New `.py` in `ouroboros/`/`supervisor/` but `ARCHITECTURE.md` not staged | Block |
 | 5 | `version_values_match` | VERSION staged: pyproject.toml, README badge, ARCHITECTURE.md header in staged index must all match VERSION value | Block on mismatch |
 | 6 | `readme_changelog_row` | VERSION staged: staged README.md changelog must have a table row for the new version | Block if missing |
-| 7 | (reserved) | — | — |
+| 7 | `p7_history_limits` | VERSION staged: staged README.md Version History must not exceed P7 limits (2 major / 5 minor / 5 patch rows); reads staged content via `git show :README.md`, delegates to `check_history_limit()` from `release_sync.py` | Block on any over-limit category |
 | 8 | `conftest_no_tests` | `conftest.py` staged with `test_*` functions (AST parse of staged content, not regex/worktree read) | Block with move hint |
 
 ### Reviewer calibration (`CRITICAL_FINDING_CALIBRATION` in `ouroboros/tools/review_helpers.py`)
@@ -1126,6 +1126,7 @@ errors surface via the same observability path.
   Prompt includes the "Repo Commit Checklist" section from
   CHECKLISTS.md (precise section loader), plus BIBLE.md, DEVELOPMENT.md, ARCHITECTURE.md,
   touched-file pack, goal/scope sections, git status, and worktree diff.
+- **Advisory test preflight (v4.41.0)**: before the Claude SDK call, `_run_advisory_tests(ctx)` runs `pytest tests/ -q --tb=line` (timeout 120s) in the worktree. On failure, `_handle_advisory_pre_review` returns `status="tests_preflight_blocked"` with the pytest output, saving the ~$1.3 SDK spend on already-broken code. Respects `OUROBOROS_PRE_PUSH_TESTS=0` env gate (same as post-commit test runner). Pass `skip_tests=True` to bypass for intentional WIP code. Tool schema exposes this parameter with `default: false`.
 - **Advisory budget gate** (v4.15.0): if the assembled advisory prompt exceeds
   `_ADVISORY_PROMPT_MAX_CHARS` (~1.6M chars / ~400K tokens — Claude Code has a 1M token
   context, so 400K tokens leaves healthy headroom), advisory is skipped with a
@@ -1198,6 +1199,8 @@ errors surface via the same observability path.
   calls so the latest values are never silently dropped on status updates.
   `parse_failure` means the SDK ran but returned unparseable output — repo_commit treats it as
   no fresh advisory (equivalent to stale) and requires a re-run or explicit bypass.
+  `tests_preflight_blocked` means pytest failed before the SDK call (v4.41.0+) — treated as
+  non-fresh; agent must fix failing tests and re-run advisory_pre_review (or pass skip_tests=True).
   `snapshot_paths` is persisted so `review_status` can recompute the live hash with the same
   path scope after a reload, preventing false staleness for path-scoped advisory runs.
   `is_fresh()` considers `status in ("fresh", "bypassed", "skipped")` — budget-gate skips

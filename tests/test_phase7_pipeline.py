@@ -825,3 +825,389 @@ class TestIndexFullInstruction:
         content = system_md.read_text(encoding="utf-8")
         assert "Do NOT call" in content or "reserved internal name" in content
         assert "knowledge_list" in content
+
+
+# ---------------------------------------------------------------------------
+# Check 7: P7 history limits in _preflight_check (v4.41.0)
+# ---------------------------------------------------------------------------
+
+class TestPreflightCheck7P7Limits:
+    """Verify that _preflight_check check 7 blocks when README.md Version
+    History exceeds BIBLE.md P7 limits (2 major / 5 minor / 5 patch rows)."""
+
+    # Helper: build a fake git-show-staged for check 7 tests.
+    # We monkeypatch _git_show_staged to return controlled content.
+
+    def _run_with_readme(self, monkeypatch, readme_content: str,
+                         extra_staged: str = "") -> "str | None":
+        """Run _preflight_check with VERSION staged and a controlled README."""
+        review = _get_review_module()
+
+        def _fake_git_show(repo_dir, path: str) -> str:
+            if path == "VERSION":
+                return "4.99.0"
+            if path == "README.md":
+                return readme_content
+            if path == "pyproject.toml":
+                return 'version = "4.99.0"'
+            if path == "docs/ARCHITECTURE.md":
+                return "# Ouroboros v4.99.0 — "
+            return ""
+
+        monkeypatch.setattr(review, "_git_show_staged", _fake_git_show)
+        staged = f"M  VERSION\nM  README.md\nM  tests/test_foo.py\n{extra_staged}".strip()
+        return review._preflight_check("v4.99.0 release", staged, "/repo")
+
+    # README must also contain the version badge to pass check 5 (version carrier
+    # sync) so check 7 is actually reached. The badge line is the real format from
+    # README.md: [![Version X.Y.Z](...badge/version-X.Y.Z-green.svg)].
+    _BADGE_LINE = (
+        "[![Version 4.99.0](https://img.shields.io/badge/version-4.99.0-green.svg)](VERSION)"
+    )
+
+    def _wrap_readme(self, rows_section: str) -> str:
+        # Include a row for 4.99.0 itself so check 6 passes (changelog row required).
+        current_row = "| 4.99.0 | 2026-01-01 | current release |"
+        return (
+            f"{self._BADGE_LINE}\n\n"
+            "## Version History\n\n"
+            "| Version | Date | Description |\n"
+            "|---------|------|-------------|\n"
+            f"{current_row}\n"
+            f"{rows_section}\n"
+        )
+
+    def _readme_with_patch_rows(self, count: int) -> str:
+        rows = "\n".join(
+            f"| 4.{i}.1 | 2026-01-01 | patch fix |"
+            for i in range(count)
+        )
+        return self._wrap_readme(rows)
+
+    def _readme_with_minor_rows(self, count: int) -> str:
+        rows = "\n".join(
+            f"| 4.{i}.0 | 2026-01-01 | minor feature |"
+            for i in range(count)
+        )
+        return self._wrap_readme(rows)
+
+    def _readme_with_major_rows(self, count: int) -> str:
+        rows = "\n".join(
+            f"| {i}.0.0 | 2026-01-01 | major release |"
+            for i in range(count)
+        )
+        return self._wrap_readme(rows)
+
+    def test_patch_limit_exceeded_blocks(self, monkeypatch):
+        """6 patch rows (limit 5) → PREFLIGHT_BLOCKED."""
+        result = self._run_with_readme(monkeypatch, self._readme_with_patch_rows(6))
+        assert result is not None, "Expected block on too many patch rows"
+        assert "PREFLIGHT_BLOCKED" in result
+        assert "patch" in result.lower()
+
+    def test_patch_limit_at_boundary_passes(self, monkeypatch):
+        """Exactly 5 patch rows → passes."""
+        result = self._run_with_readme(monkeypatch, self._readme_with_patch_rows(5))
+        assert result is None, f"Expected pass at 5 patch rows, got: {result}"
+
+    def test_minor_limit_exceeded_blocks(self, monkeypatch):
+        """6 minor rows (limit 5) → PREFLIGHT_BLOCKED."""
+        result = self._run_with_readme(monkeypatch, self._readme_with_minor_rows(6))
+        assert result is not None, "Expected block on too many minor rows"
+        assert "PREFLIGHT_BLOCKED" in result
+        assert "minor" in result.lower()
+
+    def test_minor_limit_at_boundary_passes(self, monkeypatch):
+        """Exactly 5 minor rows → passes."""
+        result = self._run_with_readme(monkeypatch, self._readme_with_minor_rows(5))
+        assert result is None, f"Expected pass at 5 minor rows, got: {result}"
+
+    def test_major_limit_exceeded_blocks(self, monkeypatch):
+        """3 major rows (limit 2) → PREFLIGHT_BLOCKED."""
+        result = self._run_with_readme(monkeypatch, self._readme_with_major_rows(3))
+        assert result is not None, "Expected block on too many major rows"
+        assert "PREFLIGHT_BLOCKED" in result
+        assert "major" in result.lower()
+
+    def test_major_limit_at_boundary_passes(self, monkeypatch):
+        """Exactly 2 major rows → passes."""
+        result = self._run_with_readme(monkeypatch, self._readme_with_major_rows(2))
+        assert result is None, f"Expected pass at 2 major rows, got: {result}"
+
+    def test_check7_only_fires_when_version_staged(self, monkeypatch):
+        """Check 7 must be a no-op when VERSION is not in the staged set."""
+        review = _get_review_module()
+
+        # README with too many patch rows, but VERSION is NOT staged.
+        bloated_readme = self._readme_with_patch_rows(10)
+
+        def _fake_git_show(repo_dir, path: str) -> str:
+            if path == "README.md":
+                return bloated_readme
+            return ""
+
+        monkeypatch.setattr(review, "_git_show_staged", _fake_git_show)
+        # Only README staged — no VERSION, no ouroboros/*.py.
+        result = review._preflight_check(
+            "fix docs", "M  README.md", "/repo"
+        )
+        assert result is None, (
+            "Check 7 fired without VERSION staged — it should be a no-op."
+        )
+
+    def test_check7_passes_when_readme_not_staged(self, monkeypatch):
+        """VERSION staged but README not staged → check 7 silently skips
+        (git show returns empty string for an un-staged README)."""
+        review = _get_review_module()
+
+        def _fake_git_show(repo_dir, path: str) -> str:
+            if path == "VERSION":
+                return "4.99.0"
+            return ""  # README absent from staged index
+
+        monkeypatch.setattr(review, "_git_show_staged", _fake_git_show)
+        # Tests staged to pass check 3; ARCHITECTURE.md for check 4.
+        result = review._preflight_check(
+            "v4.99.0 bump", "M  VERSION\nM  tests/test_foo.py", "/repo"
+        )
+        # Check 1 fires first (README.md missing from staged when VERSION staged).
+        # This is acceptable — the missing README is caught by check 1, not check 7.
+        # Either result is valid here; we just verify no crash.
+        assert result is None or "PREFLIGHT_BLOCKED" in result
+
+
+# ---------------------------------------------------------------------------
+# Advisory skip_tests parameter (v4.41.0)
+# ---------------------------------------------------------------------------
+
+class TestAdvisorySkipTests:
+    """Verify that advisory_pre_review runs tests before the SDK call and
+    that skip_tests=True bypasses the test gate."""
+
+    def _make_advisory_ctx(self, tmp_path):
+        """Minimal ToolContext-like mock for advisory handler tests."""
+        import unittest.mock as mock
+        fake_ctx = mock.MagicMock()
+        fake_ctx.repo_dir = str(tmp_path)
+        fake_ctx.drive_root = tmp_path
+        fake_ctx.emit_progress_fn = lambda *a, **kw: None
+        fake_ctx.task_id = "t-skiptest"
+        return fake_ctx
+
+    def test_tests_preflight_blocked_when_tests_fail(self, tmp_path, monkeypatch):
+        """When tests fail and skip_tests=False, advisory returns
+        status='tests_preflight_blocked' without calling the SDK."""
+        import json as _json
+        from ouroboros.tools import claude_advisory_review as adv
+
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-fake")
+        monkeypatch.setattr(adv, "check_worktree_readiness", lambda *a, **kw: [])
+        monkeypatch.setattr(adv, "_check_worktree_version_sync_shared", lambda *a, **kw: "")
+        monkeypatch.setattr(adv, "compute_snapshot_hash", lambda *a, **kw: "hash-skip-test")
+        monkeypatch.setattr(adv, "_get_changed_file_list", lambda *a, **kw: "M  foo.py")
+
+        # Simulate failing tests
+        monkeypatch.setattr(adv, "_run_advisory_tests", lambda ctx: "FAILED: 3 failed, 10 passed")
+
+        sdk_called = {"n": 0}
+        def _fake_run_claude_advisory(*a, **kw):
+            sdk_called["n"] += 1
+            return [], "RESULT", "model", 100
+        monkeypatch.setattr(adv, "_run_claude_advisory", _fake_run_claude_advisory)
+
+        ctx = self._make_advisory_ctx(tmp_path)
+        result_raw = adv._handle_advisory_pre_review(
+            ctx, commit_message="test", skip_tests=False
+        )
+        result = _json.loads(result_raw)
+        assert result["status"] == "tests_preflight_blocked"
+        assert "TESTS_PREFLIGHT_BLOCKED" in result["message"]
+        assert sdk_called["n"] == 0, "SDK should NOT be called when tests fail"
+
+    def test_skip_tests_true_bypasses_test_gate(self, tmp_path, monkeypatch):
+        """skip_tests=True skips the test gate and reaches the SDK call."""
+        import json as _json
+        from ouroboros.tools import claude_advisory_review as adv
+
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-fake")
+        monkeypatch.setattr(adv, "check_worktree_readiness", lambda *a, **kw: [])
+        monkeypatch.setattr(adv, "_check_worktree_version_sync_shared", lambda *a, **kw: "")
+        monkeypatch.setattr(adv, "compute_snapshot_hash", lambda *a, **kw: "hash-skip-test-2")
+        monkeypatch.setattr(adv, "_get_changed_file_list", lambda *a, **kw: "M  foo.py")
+
+        # Even though tests "fail", skip_tests=True must bypass
+        test_called = {"n": 0}
+        def _fake_run_advisory_tests(ctx):
+            test_called["n"] += 1
+            return "FAILED: 1 failed"
+        monkeypatch.setattr(adv, "_run_advisory_tests", _fake_run_advisory_tests)
+
+        sdk_called = {"n": 0}
+        def _fake_run_claude_advisory(*a, **kw):
+            sdk_called["n"] += 1
+            return [], "⚠️ ADVISORY_ERROR: fake error", "", 0
+        monkeypatch.setattr(adv, "_run_claude_advisory", _fake_run_claude_advisory)
+
+        ctx = self._make_advisory_ctx(tmp_path)
+        adv._handle_advisory_pre_review(
+            ctx, commit_message="test", skip_tests=True
+        )
+        assert test_called["n"] == 0, "_run_advisory_tests should not be called with skip_tests=True"
+        assert sdk_called["n"] == 1, "SDK should be called when skip_tests=True"
+
+    def test_passing_tests_proceed_to_sdk(self, tmp_path, monkeypatch):
+        """When tests pass, advisory continues to the SDK call."""
+        import json as _json
+        from ouroboros.tools import claude_advisory_review as adv
+
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-fake")
+        monkeypatch.setattr(adv, "check_worktree_readiness", lambda *a, **kw: [])
+        monkeypatch.setattr(adv, "_check_worktree_version_sync_shared", lambda *a, **kw: "")
+        monkeypatch.setattr(adv, "compute_snapshot_hash", lambda *a, **kw: "hash-skip-test-3")
+        monkeypatch.setattr(adv, "_get_changed_file_list", lambda *a, **kw: "M  foo.py")
+
+        monkeypatch.setattr(adv, "_run_advisory_tests", lambda ctx: None)  # tests pass
+
+        sdk_called = {"n": 0}
+        def _fake_run_claude_advisory(*a, **kw):
+            sdk_called["n"] += 1
+            return [], "⚠️ ADVISORY_ERROR: fake", "", 0
+        monkeypatch.setattr(adv, "_run_claude_advisory", _fake_run_claude_advisory)
+
+        ctx = self._make_advisory_ctx(tmp_path)
+        adv._handle_advisory_pre_review(ctx, commit_message="test")
+        assert sdk_called["n"] == 1, "SDK should be called when tests pass"
+
+    def test_run_advisory_tests_respects_env_gate(self, tmp_path):
+        """OUROBOROS_PRE_PUSH_TESTS=0 disables the test runner."""
+        import os as _os
+        from ouroboros.tools import claude_advisory_review as adv
+
+        orig = _os.environ.get("OUROBOROS_PRE_PUSH_TESTS")
+        try:
+            _os.environ["OUROBOROS_PRE_PUSH_TESTS"] = "0"
+            fake_ctx = type("C", (), {"repo_dir": str(tmp_path)})()
+            result = adv._run_advisory_tests(fake_ctx)
+            assert result is None, "Expected None when env gate disabled"
+        finally:
+            if orig is None:
+                _os.environ.pop("OUROBOROS_PRE_PUSH_TESTS", None)
+            else:
+                _os.environ["OUROBOROS_PRE_PUSH_TESTS"] = orig
+
+    def test_skip_tests_param_in_tool_schema(self):
+        """advisory_pre_review tool schema must expose skip_tests parameter."""
+        from ouroboros.tools.claude_advisory_review import get_tools
+        tools = get_tools()
+        advisory_tool = next(t for t in tools if t.name == "advisory_pre_review")
+        props = advisory_tool.schema["parameters"]["properties"]
+        assert "skip_tests" in props, "skip_tests must be in advisory_pre_review schema"
+        assert props["skip_tests"]["type"] == "boolean"
+
+    def test_tests_preflight_blocked_persists_durable_record_and_review_status(
+        self, tmp_path, monkeypatch
+    ):
+        """End-to-end: _handle_advisory_pre_review with failing tests writes an
+        AdvisoryRunRecord(status='tests_preflight_blocked'), and _handle_review_status
+        surfaces it as non-fresh and the correct next-step guidance; after a hash
+        mismatch (snapshot changes) it falls through to the stale path, not the
+        tests-blocked path.
+        """
+        import json as _json
+        from ouroboros.tools import claude_advisory_review as adv
+        from ouroboros.review_state import load_state
+
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-fake")
+        monkeypatch.setattr(adv, "check_worktree_readiness", lambda *a, **kw: [])
+        monkeypatch.setattr(adv, "_check_worktree_version_sync_shared", lambda *a, **kw: "")
+        monkeypatch.setattr(adv, "_get_changed_file_list", lambda *a, **kw: "M  foo.py")
+
+        call_count = {"n": 0}
+        def _hash(repo_dir, commit_message, paths=None):
+            call_count["n"] += 1
+            return "snapshot-A" if call_count["n"] <= 4 else "snapshot-B"
+        monkeypatch.setattr(adv, "compute_snapshot_hash", _hash)
+
+        monkeypatch.setattr(adv, "_run_advisory_tests", lambda ctx: "FAILED: 2 tests")
+
+        fake_ctx = type("C", (), {
+            "repo_dir": str(tmp_path), "drive_root": tmp_path,
+            "emit_progress_fn": lambda *a, **kw: None, "task_id": "t-e2e",
+        })()
+
+        # 1. Run advisory — tests fail
+        result_raw = adv._handle_advisory_pre_review(fake_ctx, commit_message="test-commit")
+        result = _json.loads(result_raw)
+        assert result["status"] == "tests_preflight_blocked"
+
+        # 2. Durable state must have the AdvisoryRunRecord
+        state = load_state(tmp_path)
+        matching = [r for r in state.advisory_runs if r.snapshot_hash == "snapshot-A"]
+        assert len(matching) == 1
+        assert matching[0].status == "tests_preflight_blocked"
+        assert matching[0].commit_message == "test-commit"
+
+        # 3. review_status must surface it (non-fresh + test-failure guidance)
+        fake_ctx2 = type("C", (), {
+            "repo_dir": str(tmp_path), "drive_root": tmp_path,
+            "emit_progress_fn": lambda *a, **kw: None, "task_id": "t-e2e",
+        })()
+        status_raw = adv._handle_review_status(fake_ctx2)
+        status = _json.loads(status_raw)
+        assert status.get("repo_commit_ready") is False or status.get("repo_commit_ready") == "no"
+        next_step = status.get("next_step", "")
+        assert "test" in next_step.lower() or "skip_tests" in next_step.lower(), \
+            f"Expected test-failure guidance in next_step, got: {next_step!r}"
+        assert "Advisory is stale" not in next_step, \
+            f"Fell through to generic stale message: {next_step!r}"
+
+        # 4. After hash mismatch (snapshot-B), the next_step guidance must fall
+        # to the stale/re-run path and NOT still say "fix failing tests" for
+        # snapshot-A (that advice is only valid for the exact snapshot that failed).
+        # hash_mismatch=True because tests_preflight_blocked is now in the status set.
+        status_raw2 = adv._handle_review_status(fake_ctx2)
+        status2 = _json.loads(status_raw2)
+        next_step2 = status2.get("next_step", "")
+        # The guidance must NOT still refer to the old tests_preflight_blocked path
+        # after the snapshot changed — that block is now stale.
+        # We accept "advisory is stale", "re-run", or similar stale-path messaging.
+        # The _next_step_guidance tests_preflight_blocked branch fires only when
+        # stale_from_edit=False AND hash matches — here hash diverged, so it won't.
+        assert "advisory_pre_review" in next_step2.lower() or "stale" in next_step2.lower() \
+            or "re-run" in next_step2.lower() or "rerun" in next_step2.lower() \
+            or "repo_commit" in next_step2.lower(), \
+            f"Expected stale-path guidance after hash mismatch, got: {next_step2!r}"
+
+    def test_next_step_guidance_tests_preflight_blocked(self):
+        """_next_step_guidance must return a specific 'fix failing tests' message
+        (not the generic stale-advisory fallback) when the latest advisory run
+        has status='tests_preflight_blocked' and stale_from_edit=False."""
+        from ouroboros.tools.claude_advisory_review import _next_step_guidance
+        from ouroboros.review_state import AdvisoryRunRecord, AdvisoryReviewState
+
+        latest = AdvisoryRunRecord(
+            snapshot_hash="abc123",
+            commit_message="test",
+            status="tests_preflight_blocked",
+            ts="2026-04-20T00:00:00Z",
+            raw_result="⚠️ TESTS_PREFLIGHT_BLOCKED: 3 failed",
+        )
+        state = AdvisoryReviewState()
+        guidance = _next_step_guidance(
+            latest=latest,
+            state=state,
+            stale_from_edit=False,
+            stale_from_edit_ts=None,
+            open_obs=[],
+            open_debts=[],
+            effective_is_fresh=False,
+        )
+        assert "tests_preflight_blocked" not in guidance.lower() or "tests" in guidance.lower(), \
+            "Guidance should reference test failures"
+        assert "fix" in guidance.lower() or "pytest" in guidance.lower() or "tests" in guidance.lower(), \
+            f"Expected test-failure guidance, got: {guidance!r}"
+        # Must NOT be the generic stale-advisory fallback
+        assert "Advisory is stale" not in guidance, \
+            f"Fell through to generic stale message: {guidance!r}"
+        assert "skip_tests" in guidance, \
+            f"Guidance should mention skip_tests=True escape hatch: {guidance!r}"

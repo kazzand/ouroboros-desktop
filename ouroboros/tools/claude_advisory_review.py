@@ -949,6 +949,24 @@ def _next_step_guidance(latest: Optional["AdvisoryRunRecord"], state: "AdvisoryR
         # a staged .py file has a SyntaxError). Raise it above parse_failure
         # in the priority list: the concrete syntax-error location is much
         # more actionable than the generic "could not parse" message.
+        # tests_preflight_blocked: pytest failed before the SDK call.
+        if latest and latest.status == "tests_preflight_blocked" and not stale_from_edit:
+            tail = (
+                f" There are still {len(open_obs)} open obligation(s) from previous "
+                "blocking rounds — address those in the same edit pass."
+                if open_obs else ""
+            )
+            return (
+                "Last advisory run was blocked by test preflight: pytest failed before "
+                "the Claude SDK call. Fix the failing tests and re-run advisory_pre_review. "
+                "Use advisory_pre_review(skip_tests=True) only for intentional WIP code."
+                + debt_prefix
+                + tail
+            )
+        # preflight_blocked for the exact current snapshot (SDK skipped —
+        # a staged .py file has a SyntaxError). Raise it above parse_failure
+        # in the priority list: the concrete syntax-error location is much
+        # more actionable than the generic "could not parse" message.
         if latest and latest.status == "preflight_blocked" and not stale_from_edit:
             tail = (
                 f" There are still {len(open_obs)} open obligation(s) from previous "
@@ -1054,6 +1072,215 @@ def _check_worktree_version_sync(repo_dir: pathlib.Path) -> str:
 
 # -- Tool handlers --
 
+def _persist_preflight_record(
+    ctx: ToolContext,
+    snapshot_hash: str,
+    commit_message: str,
+    status: str,
+    raw_result: str,
+    paths,
+    duration_sec: float,
+    readiness_warnings: list,
+) -> None:
+    """Persist a durable AdvisoryRunRecord for any preflight-blocked outcome.
+
+    Shared by syntax-preflight (``preflight_blocked``) and test-preflight
+    (``tests_preflight_blocked``) paths so ``review_status`` and the
+    ``Review Continuity`` context surface the concrete blocker instead of
+    reporting "no advisory run yet" after restarts.
+    Never raises; failures are logged and swallowed (non-fatal).
+    Derives drive_root / repo_key / task_id from ctx to stay under 8 params.
+    """
+    try:
+        drive_root = pathlib.Path(ctx.drive_root)
+        repo_key = make_repo_key(pathlib.Path(ctx.repo_dir))
+        task_id = str(getattr(ctx, "task_id", "") or "")
+
+        def _mutate(pre_state: AdvisoryReviewState) -> None:
+            next_attempt = len(
+                pre_state.filter_advisory_runs(
+                    repo_key=repo_key,
+                    tool_name="advisory_pre_review",
+                    task_id=task_id,
+                )
+            ) + 1
+            pre_state.add_run(AdvisoryRunRecord(
+                snapshot_hash=snapshot_hash,
+                commit_message=commit_message,
+                status=status,
+                ts=_utc_now(),
+                items=[],
+                snapshot_summary="preflight block — SDK not called",
+                raw_result=raw_result,
+                snapshot_paths=paths,
+                repo_key=repo_key,
+                tool_name="advisory_pre_review",
+                task_id=task_id,
+                attempt=next_attempt,
+                readiness_warnings=readiness_warnings,
+                prompt_chars=0,
+                model_used="",
+                duration_sec=duration_sec,
+            ))
+        update_state(drive_root, _mutate)
+    except Exception:
+        log.debug("_persist_preflight_record failed (non-critical)", exc_info=True)
+
+
+def _advisory_pre_sdk_gate(
+    ctx: ToolContext,
+    repo_dir: pathlib.Path,
+    drive_root: pathlib.Path,
+    snapshot_hash: str,
+    commit_message: str,
+    paths: Optional[List[str]],
+    skip_tests: bool,
+):
+    """Run all cheap guard checks before the expensive Claude SDK advisory call.
+
+    Returns a 3-tuple (readiness_warnings, changed_files, early_exit):
+    - ``readiness_warnings``: list of non-blocking warning strings
+    - ``changed_files``: porcelain git-status string (may be empty or error sentinel)
+    - ``early_exit``: if not None, caller returns this JSON string immediately
+
+    Extracted from ``_handle_advisory_pre_review`` to keep that function under
+    the 300-line method hard gate (DEVELOPMENT.md / smoke test enforcement).
+    repo_key, state, and task_id are derived here to stay under the 8-param limit.
+    """
+    repo_key = make_repo_key(repo_dir)
+    task_id = str(getattr(ctx, "task_id", "") or "")
+    state = load_state(drive_root)
+
+    # Readiness gate FIRST: reject clean worktree before any fresh-run short-circuit.
+    readiness_warnings = check_worktree_readiness(repo_dir, paths=paths)
+    if readiness_warnings and any("no uncommitted changes" in w.lower() for w in readiness_warnings):
+        ctx.emit_progress_fn(f"⚠️ Advisory readiness gate: {'; '.join(readiness_warnings)}")
+        return readiness_warnings, "", json.dumps({
+            "status": "error",
+            "snapshot_hash": snapshot_hash,
+            "message": "No uncommitted changes detected — nothing to review.",
+            "readiness_warnings": readiness_warnings,
+        }, ensure_ascii=False, indent=2)
+
+    if readiness_warnings:
+        try:
+            append_jsonl(drive_root / "logs" / "events.jsonl", {
+                "ts": utc_now_iso(),
+                "type": "advisory_readiness_gate",
+                "warnings": readiness_warnings,
+                "task_id": task_id,
+            })
+        except Exception:
+            pass
+
+    # Fresh-run short-circuit: skip if already covered and no obligations/debt outstanding.
+    existing = state.find_by_hash(snapshot_hash, repo_key=repo_key)
+    open_obligations = state.get_open_obligations(repo_key=repo_key)
+    open_debts = state.get_open_commit_readiness_debts(repo_key=repo_key)
+    already_fresh_ok = (
+        existing and existing.status in ("fresh", "bypassed", "skipped")
+        and not open_obligations and not open_debts
+    )
+    if already_fresh_ok:
+        return readiness_warnings, "", json.dumps({
+            "status": "already_fresh",
+            "snapshot_hash": snapshot_hash,
+            "ts": existing.ts,
+            "items": existing.items,
+            "readiness_warnings": readiness_warnings,
+            "message": "A fresh advisory run already exists for this snapshot. Proceed with repo_commit.",
+        }, ensure_ascii=False, indent=2)
+
+    ctx.emit_progress_fn("Running advisory pre-review (Claude Code, read-only)...")
+    changed_files = _get_changed_file_list(repo_dir, paths=paths)
+
+    if changed_files.startswith("⚠️ ADVISORY_ERROR"):
+        return readiness_warnings, changed_files, json.dumps({
+            "status": "error",
+            "snapshot_hash": snapshot_hash,
+            "error": changed_files,
+            "message": (
+                "Advisory review aborted: could not retrieve changed file list. "
+                "Fix the error and retry, or use skip_advisory_pre_review=True to bypass (will be audited)."
+            ),
+        }, ensure_ascii=False, indent=2)
+
+    # Cheap version-sync check — non-fatal warning only.
+    version_sync_warning = _check_worktree_version_sync(repo_dir)
+    if version_sync_warning:
+        ctx.emit_progress_fn(f"⚠️ Advisory preflight: {version_sync_warning}")
+
+    # Test preflight gate (A3 — v4.41.0): run pytest before the expensive SDK call.
+    if not skip_tests:
+        ctx.emit_progress_fn("Running tests before advisory SDK call...")
+        test_err = _run_advisory_tests(ctx)
+        if test_err:
+            msg = (
+                "⚠️ TESTS_PREFLIGHT_BLOCKED: Tests must pass before advisory review.\n"
+                "Fix the failures below, then re-run advisory_pre_review.\n"
+                "Use skip_tests=True if this is intentionally incomplete WIP code.\n\n"
+                f"{test_err}"
+            )
+            ctx.emit_progress_fn(msg)
+            # Persist a durable non-fresh record so review_status / continuity can
+            # surface the actual blocker instead of "no advisory run yet".
+            _persist_preflight_record(
+                ctx=ctx,
+                snapshot_hash=snapshot_hash,
+                commit_message=commit_message,
+                status="tests_preflight_blocked",
+                raw_result=msg,
+                paths=paths,
+                duration_sec=0.0,
+                readiness_warnings=readiness_warnings,
+            )
+            return readiness_warnings, changed_files, json.dumps({
+                "status": "tests_preflight_blocked",
+                "snapshot_hash": snapshot_hash,
+                "message": msg,
+                "readiness_warnings": readiness_warnings,
+            }, ensure_ascii=False, indent=2)
+        ctx.emit_progress_fn("Tests passed ✓ — proceeding with advisory SDK call.")
+
+    return readiness_warnings, changed_files, None
+
+
+def _run_advisory_tests(ctx: ToolContext) -> Optional[str]:
+    """Run pytest before the advisory SDK call.
+
+    Returns a non-None error string when tests fail, None when tests pass.
+    Reuses the same runner logic as ``_run_pre_push_tests`` in git.py so
+    timeout, output cap, and ``OUROBOROS_PRE_PUSH_TESTS`` env gate are shared.
+
+    Separate from ``_run_pre_push_tests`` (which is imported from git.py and
+    runs AFTER commit) to keep the two call sites independently gated:
+    advisory tests run pre-SDK (before any git staging), commit tests run
+    post-commit to verify the committed state.
+    """
+    if os.environ.get("OUROBOROS_PRE_PUSH_TESTS", "1") != "1":
+        return None
+    tests_dir = pathlib.Path(ctx.repo_dir) / "tests"
+    if not tests_dir.exists():
+        return None
+    MAX_OUTPUT = 8000
+    try:
+        result = subprocess.run(
+            ["pytest", "tests/", "-q", "--tb=line", "--no-header"],
+            cwd=ctx.repo_dir, capture_output=True, text=True, timeout=120,
+        )
+        if result.returncode == 0:
+            return None
+        output = (result.stdout + result.stderr).strip()
+        return _truncate_review_artifact(output, limit=MAX_OUTPUT)
+    except subprocess.TimeoutExpired:
+        return "⚠️ Tests timed out after 120 seconds"
+    except FileNotFoundError:
+        return "⚠️ pytest not found — install pytest or set OUROBOROS_PRE_PUSH_TESTS=0 to skip"
+    except Exception as exc:
+        log.warning("_run_advisory_tests failed: %s", exc, exc_info=True)
+        return f"⚠️ Unexpected error running tests: {exc}"
+
+
 def _handle_advisory_pre_review(
     ctx: ToolContext,
     commit_message: str = "",
@@ -1061,15 +1288,19 @@ def _handle_advisory_pre_review(
     goal: str = "",
     scope: str = "",
     paths: Optional[List[str]] = None,
+    skip_tests: bool = False,
 ) -> str:
     """Run an advisory pre-commit review via Claude Agent SDK (read-only)."""
     repo_dir = pathlib.Path(ctx.repo_dir)
     drive_root = pathlib.Path(ctx.drive_root)
-    repo_key = make_repo_key(repo_dir)
 
     snapshot_hash = compute_snapshot_hash(repo_dir, commit_message, paths=paths)
-    state = load_state(drive_root)
+
+    # repo_key / task_id / state are needed for bypass recording only;
+    # _advisory_pre_sdk_gate re-derives them internally to stay under 8 params.
+    repo_key = make_repo_key(repo_dir)
     task_id = str(getattr(ctx, "task_id", "") or "")
+    state = load_state(drive_root)
 
     # Auto-bypass if Anthropic key is absent — audit it transparently
     if not os.environ.get("ANTHROPIC_API_KEY", ""):
@@ -1083,75 +1314,17 @@ def _handle_advisory_pre_review(
                                "explicit skip_advisory_pre_review=True", task_id, drive_root,
                                snapshot_paths=paths)
 
-    # Readiness gate FIRST: reject clean worktree before any fresh-run short-circuit.
-    # This ensures "no uncommitted changes" always blocks, even if a prior fresh/bypass exists.
-    readiness_warnings = check_worktree_readiness(repo_dir, paths=paths)
-    if readiness_warnings and any("no uncommitted changes" in w.lower() for w in readiness_warnings):
-        ctx.emit_progress_fn(f"⚠️ Advisory readiness gate: {'; '.join(readiness_warnings)}")
-        return json.dumps({
-            "status": "error",
-            "snapshot_hash": snapshot_hash,
-            "message": "No uncommitted changes detected — nothing to review.",
-            "readiness_warnings": readiness_warnings,
-        }, ensure_ascii=False, indent=2)
-
-    # Log non-blocking readiness warnings to events.jsonl for observability
-    if readiness_warnings:
-        try:
-            append_jsonl(drive_root / "logs" / "events.jsonl", {
-                "ts": utc_now_iso(),
-                "type": "advisory_readiness_gate",
-                "warnings": readiness_warnings,
-                "task_id": task_id,
-            })
-        except Exception:
-            pass
-
-    # Check if we already have a fresh run for this snapshot. If open
-    # obligations OR commit-readiness debt exist for this repo, force a re-run
-    # so both are explicitly verified — `already_fresh` must stay aligned with
-    # `_check_advisory_freshness`, which blocks on either signal.
-    existing = state.find_by_hash(snapshot_hash, repo_key=repo_key)
-    open_obligations = state.get_open_obligations(repo_key=repo_key)
-    open_debts = state.get_open_commit_readiness_debts(repo_key=repo_key)
-    already_fresh_ok = (
-        existing and existing.status in ("fresh", "bypassed", "skipped")
-        and not open_obligations and not open_debts
+    readiness_warnings, changed_files, early_exit = _advisory_pre_sdk_gate(
+        ctx=ctx,
+        repo_dir=repo_dir,
+        drive_root=drive_root,
+        snapshot_hash=snapshot_hash,
+        commit_message=commit_message,
+        paths=paths,
+        skip_tests=skip_tests,
     )
-    if already_fresh_ok:
-        return json.dumps({
-            "status": "already_fresh",
-            "snapshot_hash": snapshot_hash,
-            "ts": existing.ts,
-            "items": existing.items,
-            "readiness_warnings": readiness_warnings,
-            "message": "A fresh advisory run already exists for this snapshot. Proceed with repo_commit.",
-        }, ensure_ascii=False, indent=2)
-
-    # Run the advisory review
-    ctx.emit_progress_fn("Running advisory pre-review (Claude Code, read-only)...")
-    changed_files = _get_changed_file_list(repo_dir, paths=paths)
-
-    # Fail closed if git status itself is broken — proceeding with a broken file list
-    # would let advisory review proceed on incomplete context.
-    if changed_files.startswith("⚠️ ADVISORY_ERROR"):
-        return json.dumps({
-            "status": "error",
-            "snapshot_hash": snapshot_hash,
-            "error": changed_files,
-            "message": (
-                "Advisory review aborted: could not retrieve changed file list. "
-                "Fix the error and retry, or use skip_advisory_pre_review=True to bypass (will be audited)."
-            ),
-        }, ensure_ascii=False, indent=2)
-
-    # Cheap deterministic version-sync check before expensive SDK call.
-    # Reads worktree content (advisory runs before git add, so no staged index).
-    # Non-fatal: a warning note is prepended to the advisory prompt context but
-    # does not abort the advisory run.
-    version_sync_warning = _check_worktree_version_sync(repo_dir)
-    if version_sync_warning:
-        ctx.emit_progress_fn(f"⚠️ Advisory preflight: {version_sync_warning}")
+    if early_exit is not None:
+        return early_exit
 
     import time as _time
     _advisory_start = _time.monotonic()
@@ -1181,37 +1354,16 @@ def _handle_advisory_pre_review(
     # `review_status` and the `Review Continuity` context can surface the
     # block reason after a restart.
     if raw_result.startswith("⚠️ PREFLIGHT_BLOCKED"):
-        preflight_summary = f"{changed_files.count(chr(10)) + 1} file(s) changed"
-
-        def _mutate_preflight(pre_state: AdvisoryReviewState) -> None:
-            next_run_attempt = len(
-                pre_state.filter_advisory_runs(
-                    repo_key=repo_key,
-                    tool_name="advisory_pre_review",
-                    task_id=task_id,
-                )
-            ) + 1
-            pre_state.add_run(AdvisoryRunRecord(
-                snapshot_hash=snapshot_hash,
-                commit_message=commit_message,
-                status="preflight_blocked",
-                ts=_utc_now(),
-                items=[],
-                snapshot_summary=preflight_summary,
-                raw_result=raw_result,
-                snapshot_paths=paths,
-                repo_key=repo_key,
-                tool_name="advisory_pre_review",
-                task_id=task_id,
-                attempt=next_run_attempt,
-                readiness_warnings=readiness_warnings,
-                prompt_chars=0,  # SDK never called — zero-cost block
-                model_used="",
-                duration_sec=_advisory_duration,
-            ))
-
-        update_state(drive_root, _mutate_preflight)
-
+        _persist_preflight_record(
+            ctx=ctx,
+            snapshot_hash=snapshot_hash,
+            commit_message=commit_message,
+            status="preflight_blocked",
+            raw_result=raw_result,
+            paths=paths,
+            duration_sec=_advisory_duration,
+            readiness_warnings=readiness_warnings,
+        )
         return json.dumps({
             "status": "preflight_blocked",
             "snapshot_hash": snapshot_hash,
@@ -1528,7 +1680,8 @@ def _handle_review_status(
         current_hash = compute_snapshot_hash(repo_dir, "", paths=latest_paths)
         hash_mismatch = bool(
             latest and latest.status in (
-                "fresh", "bypassed", "skipped", "parse_failure", "preflight_blocked",
+                "fresh", "bypassed", "skipped", "parse_failure",
+                "preflight_blocked", "tests_preflight_blocked",
             ) and latest.snapshot_hash != current_hash
         )
     except Exception:
@@ -1749,6 +1902,16 @@ def get_tools() -> list:
                             "type": "array",
                             "items": {"type": "string"},
                             "description": "Explicit list of changed file paths. Auto-detected from git status if omitted.",
+                        },
+                        "skip_tests": {
+                            "type": "boolean",
+                            "default": False,
+                            "description": (
+                                "Skip the pre-advisory pytest run. Default: False (tests run by default). "
+                                "Use True only for intentionally incomplete WIP code where test failures "
+                                "are expected. Tests are run via 'pytest tests/ -q' before the SDK call "
+                                "to catch broken code early and avoid wasting advisory budget."
+                            ),
                         },
                     },
                     "required": ["commit_message"],

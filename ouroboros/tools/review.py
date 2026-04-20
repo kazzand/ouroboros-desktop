@@ -480,7 +480,7 @@ def _preflight_check(commit_message: str, staged_files: str,
       5. VERSION staged: all version carriers (pyproject.toml, README badge,
          ARCHITECTURE.md header) in the staged index must match VERSION value
       6. VERSION staged: staged README.md changelog must have a row for the new version
-      7. (reserved — not implemented)
+      7. VERSION staged: staged README.md Version History must not exceed BIBLE.md P7 limits (2 major / 5 minor / 5 patch rows) — delegates to check_history_limit() from release_sync.py
       8. conftest.py staged: block if it contains test_ functions (should be in test_*.py)
     """
     import re
@@ -638,7 +638,28 @@ def _preflight_check(commit_message: str, staged_files: str,
         except Exception:
             pass  # Non-fatal
 
-    # Check 7 (not implemented — advisory check reserved for future use)
+    # Check 7: If VERSION is staged, verify README.md Version History does not
+    # exceed the P7 limits (2 major / 5 minor / 5 patch rows). Reads from the
+    # staged index via git show so partially staged changes are handled correctly.
+    # Uses check_history_limit() from release_sync.py (the single source of truth
+    # for P7 limits). This is a deterministic fast check — no LLM call needed.
+    if version_staged:
+        try:
+            readme_staged = _git_show_staged(repo_dir, "README.md")
+            if readme_staged:
+                from ouroboros.tools.release_sync import check_history_limit
+                limit_warnings = check_history_limit(readme_staged)
+                if limit_warnings:
+                    return (
+                        "⚠️ PREFLIGHT_BLOCKED: README.md Version History exceeds BIBLE.md P7 limits.\n"
+                        + "".join(f"  - {w}\n" for w in limit_warnings)
+                        + "  Trim the oldest entry in the over-limit category before committing.\n"
+                        + "  Quick check: python -c \"from ouroboros.tools.release_sync import "
+                        "check_history_limit; print(check_history_limit(open('README.md').read()))\"\n"
+                        + f"  Currently staged: {', '.join(sorted(staged_set)) or '(none)'}"
+                    )
+        except Exception:
+            pass  # Non-fatal: LLM reviewers handle P7 limits as advisory fallback
 
     # Check 8: if any conftest.py in active_staged contains collectable test functions,
     # block with an explicit message to move them to test_*.py files.
