@@ -1,4 +1,4 @@
-# Ouroboros v4.41.1 — Architecture & Reference
+# Ouroboros v4.42.0 — Architecture & Reference
 
 This document describes every component, page, button, API endpoint, and data flow.
 It is the single source of truth for how the system works. Keep it updated.
@@ -77,10 +77,11 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on localhost:8765
       │   └── claude_code.py   ← Claude Agent SDK gateway (edit + read-only paths)
       ├── tools/               ← Auto-discovered tool plugins
       │   ├── release_sync.py    ← Release-metadata sync library; used by _preflight_check check 7 for P7 history-limit validation (check_history_limit) and by agents for version-carrier sync (sync_release_metadata)
+      │   ├── review_synthesis.py ← LLM-based claim synthesis (Phase 1): deduplicates raw multi-reviewer findings into canonical issues before durable obligations are created; called from commit_gate._record_commit_attempt; fail-open (returns original on any error)
       │   ├── a2a.py             ← A2A client tools: a2a_discover, a2a_send, a2a_status (non-core, require enable_tools)
       │   ├── ci.py              ← CI trigger and monitoring (GitHub Actions API)
       │   ├── claude_advisory_review.py ← Advisory pre-review tool (read-only Claude Agent SDK)
-      │   ├── commit_gate.py     ← Advisory freshness gate and commit-attempt recording (extracted from git.py)
+      │   ├── commit_gate.py     ← Advisory freshness gate and commit-attempt recording (extracted from git.py); `_record_commit_attempt` runs LLM-based claim synthesis (via `review_synthesis.py`) on blocked attempts before durable obligations are created
       │   ├── git_rollback.py    ← rollback_to_target tool (wraps git_ops.rollback_to_version)
       │   ├── git_pr.py          ← PR integration tools: fetch_pr_ref, create_integration_branch, cherry_pick_pr_commits, stage_adaptations, stage_pr_merge (non-core, require enable_tools)
       │   ├── github.py          ← GitHub integration: issues (list/get/comment/close) + PR tools: list_github_prs, get_github_pr, comment_on_pr (non-core; github.py is in _FROZEN_TOOL_MODULES so PR inspection/comment tools work in packaged builds)
@@ -582,7 +583,7 @@ backward compatibility but is not the runtime authority.
 - `_sanitize_chat_completion_tools()` sorts tool schemas by function name before dispatch, stabilising cache keys across rounds while preserving deduplication of duplicate tool names.
 - Direct `anthropic::...` routing preserves multipart system text blocks (including `cache_control`) instead of flattening them into one string, so the same cache boundaries survive both OpenRouter-Anthropic and direct Anthropic paths.
 - **Per-task soft threshold**: Each task has a soft threshold (default $20, env `OUROBOROS_PER_TASK_COST_USD`). When a task exceeds this, the LLM is asked to wrap up soon. This is a reminder, not a hard stop.
-- **Budget tracking coverage**: All LLM spend reaches the budget via two patterns: (1) **Tool path** — tools emit `llm_usage` events to `ctx.pending_events` (falling back from `ctx.event_queue`); (2) **Daemon thread path** — background threads (consolidation, reflection, supervisor dedup) call `supervisor.state.update_budget_from_usage` directly. Covered paths: main agent loop, safety LLM, web search, triad review, scope review (with pending_events fallback added v4.27.0), plan_task per-reviewer (added v4.27.0), advisory_pre_review SDK + fallback LLM costs (added v4.27.0), claude_code_edit (conditional on cost_usd > 0), consciousness loop, consolidation daemon threads (added v4.27.0), reflection LLM calls (added v4.27.0), supervisor _find_duplicate_task (added v4.27.0).
+- **Budget tracking coverage**: All LLM spend reaches the budget via two patterns: (1) **Tool path** — tools emit `llm_usage` events to `ctx.pending_events` (falling back from `ctx.event_queue`); (2) **Daemon thread path** — background threads (consolidation, reflection, supervisor dedup) call `supervisor.state.update_budget_from_usage` directly. Covered paths: main agent loop, safety LLM, web search, triad review, scope review (with pending_events fallback added v4.27.0), plan_task per-reviewer (added v4.27.0), advisory_pre_review SDK + fallback LLM costs (added v4.27.0), claude_code_edit (conditional on cost_usd > 0), consciousness loop, consolidation daemon threads (added v4.27.0), reflection LLM calls (added v4.27.0), supervisor _find_duplicate_task (added v4.27.0), review_synthesis LLM calls (added v4.42.0).
 - **`memory_tools.py`**: Provides `memory_map` (read the metacognitive registry of all data sources) and `memory_update_registry` (add/update entries). Part of the Memory Registry system (v3.16.0).
 - **`tool_discovery.py`**: Provides `list_available_tools` (discover non-core tools) and `enable_tools` (activate extra tools for the current task). Enables dynamic tool set management.
 - **`code_search`**: First-class code search tool in `tools/core.py`. Literal search by default, regex optional. Skips binaries, caches, vendor dirs. Bounded output (max 200 results, 80K chars). Available from round 1 as a core tool. Replaces the pattern of using `run_shell` with `grep`/`rg` for code search.

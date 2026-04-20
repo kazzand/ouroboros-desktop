@@ -101,6 +101,28 @@ def _record_commit_attempt(ctx: ToolContext, commit_message: str, status: str,
         tool_name = _current_review_tool_name(ctx)
         task_id = str(getattr(ctx, "task_id", "") or "")
 
+        # --- Phase 1 claim synthesis (BEFORE the state lock) ---
+        # Run ONLY when blocked with findings. Fetches open obligations and
+        # runs the LLM synthesis call outside _mutate so no remote I/O
+        # occurs while the review-state file lock is held.
+        # Fail-open: any exception falls back to the original findings, and a
+        # single update_state call persists those original findings unchanged.
+        _findings_for_attempt = critical_findings
+        if status == "blocked" and critical_findings:
+            try:
+                from ouroboros.tools.review_synthesis import synthesize_to_canonical_issues
+                from ouroboros.review_state import load_state as _ls_synth
+                _state_snap = _ls_synth(dr)
+                _open_obs = _state_snap.get_open_obligations(repo_key=repo_key)
+                _findings_for_attempt = synthesize_to_canonical_issues(
+                    list(critical_findings),
+                    open_obligations=_open_obs,
+                    ctx=ctx,
+                )
+            except Exception as _synth_exc:
+                log.debug("review_synthesis: pre-lock synthesis skipped: %s", _synth_exc)
+                _findings_for_attempt = critical_findings
+
         def _mutate(state):
             state.expire_stale_attempts()
             attempt_no = int(getattr(ctx, "_current_review_attempt_number", 0) or 0)
@@ -152,7 +174,7 @@ def _record_commit_attempt(ctx: ToolContext, commit_message: str, status: str,
                 duration_sec=duration_sec,
                 task_id=task_id,
                 critical_findings=_list_or_default(
-                    critical_findings,
+                    _findings_for_attempt,
                     list(getattr(existing, "critical_findings", []) or []),
                 ),
                 repo_key=repo_key,
@@ -197,6 +219,7 @@ def _record_commit_attempt(ctx: ToolContext, commit_message: str, status: str,
             state.record_attempt(attempt)
 
         update_state(dr, _mutate)
+
         try:
             from ouroboros.review_state import load_state
             from ouroboros.task_continuation import (
