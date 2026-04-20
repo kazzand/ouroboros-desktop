@@ -729,8 +729,12 @@ backward compatibility but is not the runtime authority.
 ### Git tools (tools/git.py + tools/review.py + supervisor/git_ops.py)
 
 - **`repo_write`** (v3.24.0): write file(s) to disk WITHOUT committing. Supports single-file
-  (`path` + `content`) and multi-file (`files` array) modes. Preferred workflow:
-  `repo_write` all files → `advisory_pre_review` on the final diff → `repo_commit`.
+  (`path` + `content`) and multi-file (`files` array) modes. Use for new files or
+  intentional full rewrites.
+- **Edit workflow**: choose the right edit tool first — `str_replace_editor` for one
+  exact replacement, `repo_write` for new files or intentional full rewrites, and
+  `claude_code_edit` for anything beyond one exact replacement — then finish all edits,
+  run `advisory_pre_review` on the final diff, and call `repo_commit`.
 - **`repo_commit`**: stage + advisory freshness gate + unified pre-commit review + commit + tests + auto-tag + auto-push.
   Includes `review_rebuttal` parameter for disputing reviewer feedback.
 - **`repo_write_commit`**: legacy single-file write+commit (kept for compatibility).

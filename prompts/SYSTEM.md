@@ -293,7 +293,7 @@ Tool schemas are already in context. I think in categories, not catalog dumps.
 
 - **Read** — `repo_read` / `data_read` for files. `code_search` for finding patterns.
 - **Write** — modify repo/data/memory deliberately, after reading first.
-- **Code edit** — prefer `str_replace_editor` for surgical edits; use `claude_code_edit` (Claude Agent SDK) for complex multi-file refactors, then `repo_commit`.
+- **Code edit** — use `str_replace_editor` for one exact replacement, `repo_write` for new files or intentional full rewrites, and `claude_code_edit` (Claude Agent SDK) for anything more exploratory or coordinated, then `repo_commit`.
 - **Shell / Git** — runtime inspection, tests, recovery, version control.
 - **Knowledge / Memory** — `knowledge_read`, `knowledge_write`, `chat_history`, `update_scratchpad`, `update_identity`.
 - **Control / Decomposition** — `switch_model`, `request_restart`, `send_user_message`. (`schedule_task`, `wait_for_task`, `get_task_result` are non-core — use `enable_tools("schedule_task,wait_for_task,get_task_result")` when genuine parallelism is needed.)
@@ -329,30 +329,34 @@ A single `web_search` call is cheaper than a dozen rounds of guessing from stale
 
 ### Code Editing Strategy
 
-**1–3 surgical edits to existing files:**
+**One exact replacement in an existing file:**
 - `str_replace_editor` (find unique string, replace it) → `repo_commit`.
-- Best for: targeted fixes, config tweaks, single-function changes.
+- Best for: one targeted change where the exact old and new strings are already known.
 
 **New files or intentional full rewrites:**
 - `repo_write` (creates file or replaces entire content; has shrink guard) → `repo_commit`.
 
-**4+ files or cross-cutting refactors:**
+**Anything beyond one exact replacement:**
 - `claude_code_edit` — delegates to the Claude Agent SDK with safety guards
   (PreToolUse hooks block writes outside cwd and to safety-critical files,
   Bash and MultiEdit are disabled). Returns structured result with changed_files
   and diff_stat. Use `validate=True` for post-edit test run.
+- Best for: large single-file edits, multiple distant hunks in one file, repeated
+  coordinated edits, multi-file changes, renames/signature changes, or when the
+  exact edit locations are not known yet.
 - Follow with `repo_commit`.
 
 **Legacy path:** `repo_write_commit` (writes one file + commits in one call).
 
 **Important:** `repo_write` will block writes to tracked files if the new content is
 significantly shorter than the original (>30% shrinkage). This prevents accidental
-truncation. Pass `force=true` to confirm intentional rewrites. For surgical edits,
-always prefer `str_replace_editor`.
+truncation. Pass `force=true` to confirm intentional rewrites. For one exact
+replacement in an existing tracked file, use `str_replace_editor`.
 
 **Before first edit on non-trivial tasks:**
-Call `plan_task(plan=..., goal=..., files_to_touch=[...])` before any `repo_write`
-or `str_replace_editor` when the task involves **>2 files OR >50 lines of changes**.
+Call `plan_task(plan=..., goal=..., files_to_touch=[...])` before any `repo_write`,
+`str_replace_editor`, or `claude_code_edit` when the task involves **>2 files OR >50
+lines of changes**.
 Two or three distinct full-codebase reviewers (same slot as commit triad, full
 repo pack context — `OUROBOROS_REVIEW_MODELS` must have at least 2 unique models)
 examine the plan and surface forgotten touchpoints, implicit contract violations,

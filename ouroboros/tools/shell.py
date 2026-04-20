@@ -481,7 +481,13 @@ def get_tools() -> List[ToolEntry]:
         }, _run_shell, is_code_tool=True, timeout_sec=_RUN_SHELL_DEFAULT_TIMEOUT_SEC),
         ToolEntry("claude_code_edit", {
             "name": "claude_code_edit",
-            "description": "Delegate code edits to Claude Code (via Agent SDK with safety guards). Preferred for multi-file changes and refactors. Follow with repo_commit.",
+            "description": (
+                "Delegate code edits to Claude Code (via Agent SDK with safety guards). "
+                "Prefer this for anything beyond one exact replacement: large single-file "
+                "edits, repeated coordinated edits, multi-hunk work, multi-file changes, "
+                "renames/signature changes, or uncertain scope. Prefer it over chaining "
+                "many str_replace_editor calls. Follow with repo_commit."
+            ),
             "parameters": {"type": "object", "properties": {
                 "prompt": {"type": "string"},
                 "cwd": {"type": "string", "default": ""},

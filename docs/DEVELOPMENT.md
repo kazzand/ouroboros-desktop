@@ -186,8 +186,11 @@ the model context budget (`_SCOPE_BUDGET_TOKEN_LIMIT`), in which case scope revi
 is skipped with a non-blocking advisory warning. `docs/CHECKLISTS.md` remains the
 single source of truth for review items; do not duplicate or fork checklist policy here.
 
-Preferred workflow for multi-file changes: `repo_write` all files first, then
-`advisory_pre_review`, then `repo_commit` immediately on the final diff.
+Preferred workflow for non-trivial edits: choose the right edit tool first —
+`str_replace_editor` for one exact replacement, `repo_write` for new files or
+intentional full rewrites, and `claude_code_edit` for anything beyond one exact
+replacement — then `advisory_pre_review`, then `repo_commit` immediately on the
+final diff.
 
 The full pre-commit review checklists live in **`docs/CHECKLISTS.md`** —
 the single source of truth (Bible P5: DRY).

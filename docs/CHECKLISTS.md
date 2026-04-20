@@ -13,7 +13,7 @@ When a new reviewable concern appears, add it here — not in prompts or docs.
 **Correct sequence (mandatory):**
 
 ```
-1. Finish ALL edits first (repo_write / str_replace_editor)
+1. Finish ALL edits first (`str_replace_editor` / `repo_write` / `claude_code_edit`)
 2. advisory_pre_review(commit_message="...")   ← run AFTER all edits, ONCE
 3. repo_commit(commit_message="...")           ← run IMMEDIATELY after advisory
 ```
