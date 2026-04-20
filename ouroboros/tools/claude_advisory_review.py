@@ -55,6 +55,7 @@ from ouroboros.tools.review_helpers import (
     _ANTI_THRASHING_RULE_VERDICT,
     _ANTI_THRASHING_RULE_ITEM_NAME,
     _HISTORY_VERIFICATION_ONLY_RULE,
+    _run_review_preflight_tests,
 )
 from ouroboros.utils import (
     append_jsonl,
@@ -1248,37 +1249,15 @@ def _advisory_pre_sdk_gate(
 def _run_advisory_tests(ctx: ToolContext) -> Optional[str]:
     """Run pytest before the advisory SDK call.
 
-    Returns a non-None error string when tests fail, None when tests pass.
-    Reuses the same runner logic as ``_run_pre_push_tests`` in git.py so
-    timeout, output cap, and ``OUROBOROS_PRE_PUSH_TESTS`` env gate are shared.
+    Thin wrapper around ``review_helpers._run_review_preflight_tests`` — kept
+    as a distinct call site so the existing monkeypatch-based tests that stub
+    ``_run_advisory_tests`` continue to work unchanged, and so the advisory
+    and bypass paths can be traced separately in logs.
 
-    Separate from ``_run_pre_push_tests`` (which is imported from git.py and
-    runs AFTER commit) to keep the two call sites independently gated:
-    advisory tests run pre-SDK (before any git staging), commit tests run
-    post-commit to verify the committed state.
+    Returns a non-None error string when tests fail, None when tests pass.
+    Respects the shared ``OUROBOROS_PRE_PUSH_TESTS`` env gate.
     """
-    if os.environ.get("OUROBOROS_PRE_PUSH_TESTS", "1") != "1":
-        return None
-    tests_dir = pathlib.Path(ctx.repo_dir) / "tests"
-    if not tests_dir.exists():
-        return None
-    MAX_OUTPUT = 8000
-    try:
-        result = subprocess.run(
-            ["pytest", "tests/", "-q", "--tb=line", "--no-header"],
-            cwd=ctx.repo_dir, capture_output=True, text=True, timeout=120,
-        )
-        if result.returncode == 0:
-            return None
-        output = (result.stdout + result.stderr).strip()
-        return _truncate_review_artifact(output, limit=MAX_OUTPUT)
-    except subprocess.TimeoutExpired:
-        return "⚠️ Tests timed out after 120 seconds"
-    except FileNotFoundError:
-        return "⚠️ pytest not found — install pytest or set OUROBOROS_PRE_PUSH_TESTS=0 to skip"
-    except Exception as exc:
-        log.warning("_run_advisory_tests failed: %s", exc, exc_info=True)
-        return f"⚠️ Unexpected error running tests: {exc}"
+    return _run_review_preflight_tests(ctx)
 
 
 def _handle_advisory_pre_review(

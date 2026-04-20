@@ -1211,3 +1211,199 @@ class TestAdvisorySkipTests:
             f"Fell through to generic stale message: {guidance!r}"
         assert "skip_tests" in guidance, \
             f"Guidance should mention skip_tests=True escape hatch: {guidance!r}"
+
+
+class TestBypassPathTestsRun:
+    """When skip_advisory_pre_review=True, _run_reviewed_stage_cycle must run
+    _run_review_preflight_tests before the expensive triad + scope review.
+
+    This covers the new gate introduced when refactoring the test runner into
+    review_helpers._run_review_preflight_tests — previously only the advisory
+    path (claude_advisory_review._run_advisory_tests) ran tests.
+    """
+
+    def _make_staged_repo(self, tmp_path):
+        """Repo helper with one staged change so the stage cycle reaches the test gate."""
+        from ouroboros.tools.registry import ToolContext
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        drive = tmp_path / "drive"
+        drive.mkdir()
+        (drive / "logs").mkdir(parents=True)
+        (drive / "locks").mkdir(parents=True)
+        subprocess.run(["git", "init"], cwd=str(repo), capture_output=True)
+        subprocess.run(["git", "config", "user.name", "Test"], cwd=str(repo), capture_output=True)
+        subprocess.run(["git", "config", "user.email", "t@t"], cwd=str(repo), capture_output=True)
+        (repo / "dummy.txt").write_text("init", encoding="utf-8")
+        subprocess.run(["git", "add", "-A"], cwd=str(repo), capture_output=True)
+        subprocess.run(["git", "commit", "-m", "init"], cwd=str(repo), capture_output=True)
+        subprocess.run(["git", "branch", "-M", "ouroboros"], cwd=str(repo), capture_output=True)
+        # One uncommitted change so `git status --porcelain` is non-empty after the stage
+        # cycle runs `git add -A` internally.
+        (repo / "new_change.txt").write_text("something", encoding="utf-8")
+        return ToolContext(repo_dir=repo, drive_root=drive)
+
+    def test_bypass_runs_preflight_tests_and_blocks_on_failure(self, tmp_path, monkeypatch):
+        """skip_advisory_pre_review=True → _run_review_preflight_tests is called,
+        and a test failure blocks with reason='tests_preflight_blocked' BEFORE
+        the parallel triad+scope review runs."""
+        from ouroboros.tools import git as git_mod
+
+        ctx = self._make_staged_repo(tmp_path)
+
+        # Freshness check is irrelevant when bypass is in effect — stub to None.
+        monkeypatch.setattr(git_mod, "_check_advisory_freshness", lambda *a, **kw: None)
+
+        called = {"preflight": 0, "parallel": 0}
+
+        def _fake_preflight(ctx, *, timeout=120):
+            called["preflight"] += 1
+            return "FAILED: 2 failed, 5 passed"
+
+        def _fake_parallel(*a, **kw):
+            called["parallel"] += 1
+            return None, {}, "", []
+
+        monkeypatch.setattr(git_mod, "_run_review_preflight_tests", _fake_preflight)
+        monkeypatch.setattr(git_mod, "_run_parallel_review", _fake_parallel)
+
+        outcome = git_mod._run_reviewed_stage_cycle(
+            ctx,
+            commit_message="bypass test",
+            commit_start=0.0,
+            skip_advisory_pre_review=True,
+        )
+
+        assert called["preflight"] == 1, "preflight tests must run in the bypass path"
+        assert called["parallel"] == 0, "triad+scope must NOT run when preflight fails"
+        assert outcome["status"] == "blocked"
+        assert outcome["block_reason"] == "tests_preflight_blocked"
+        assert "TESTS_PREFLIGHT_BLOCKED" in outcome["message"]
+
+    def test_bypass_preflight_pass_proceeds_to_review(self, tmp_path, monkeypatch):
+        """When preflight passes in the bypass path, control reaches the
+        parallel review. The review itself is stubbed (no LLM calls)."""
+        from ouroboros.tools import git as git_mod
+
+        ctx = self._make_staged_repo(tmp_path)
+        monkeypatch.setattr(git_mod, "_check_advisory_freshness", lambda *a, **kw: None)
+
+        called = {"preflight": 0, "parallel": 0}
+
+        def _fake_preflight(ctx, *, timeout=120):
+            called["preflight"] += 1
+            return None  # tests pass
+
+        def _fake_parallel(*a, **kw):
+            called["parallel"] += 1
+            return None, {}, "", []
+
+        # _aggregate_review_verdict returns (blocked, msg, reason, findings, scope_advisory)
+        def _fake_aggregate(*a, **kw):
+            # Simulate a clean verdict so the review passes through.
+            return False, "", "", [], []
+
+        monkeypatch.setattr(git_mod, "_run_review_preflight_tests", _fake_preflight)
+        monkeypatch.setattr(git_mod, "_run_parallel_review", _fake_parallel)
+        monkeypatch.setattr(git_mod, "_aggregate_review_verdict", _fake_aggregate)
+
+        outcome = git_mod._run_reviewed_stage_cycle(
+            ctx,
+            commit_message="bypass test-pass",
+            commit_start=0.0,
+            skip_advisory_pre_review=True,
+        )
+
+        assert called["preflight"] == 1, "preflight must run in the bypass path"
+        assert called["parallel"] == 1, (
+            "triad+scope must run when preflight passes in the bypass path"
+        )
+        # outcome["status"] depends on downstream stages (commit/push) — the
+        # invariant tested here is that the preflight gate does not block.
+        assert outcome.get("block_reason") != "tests_preflight_blocked"
+
+    def test_non_bypass_path_does_not_run_preflight_here(self, tmp_path, monkeypatch):
+        """Without skip_advisory_pre_review, the stage cycle must NOT run the
+        preflight tests — the advisory side already ran them, and the commit
+        gate relies on advisory freshness instead."""
+        from ouroboros.tools import git as git_mod
+
+        ctx = self._make_staged_repo(tmp_path)
+        monkeypatch.setattr(git_mod, "_check_advisory_freshness", lambda *a, **kw: None)
+
+        called = {"preflight": 0, "parallel": 0}
+
+        def _fake_preflight(ctx, *, timeout=120):
+            called["preflight"] += 1
+            return "FAILED: 1 failed"
+
+        def _fake_parallel(*a, **kw):
+            called["parallel"] += 1
+            return None, {}, "", []
+
+        def _fake_aggregate(*a, **kw):
+            return False, "", "", [], []
+
+        monkeypatch.setattr(git_mod, "_run_review_preflight_tests", _fake_preflight)
+        monkeypatch.setattr(git_mod, "_run_parallel_review", _fake_parallel)
+        monkeypatch.setattr(git_mod, "_aggregate_review_verdict", _fake_aggregate)
+
+        git_mod._run_reviewed_stage_cycle(
+            ctx,
+            commit_message="normal flow",
+            commit_start=0.0,
+            skip_advisory_pre_review=False,
+        )
+
+        assert called["preflight"] == 0, (
+            "preflight must only run in the bypass path (non-bypass defers to "
+            "the advisory-side runner)"
+        )
+        assert called["parallel"] == 1, (
+            "triad+scope must run as normal in the non-bypass path"
+        )
+
+    def test_no_anthropic_key_auto_bypass_runs_preflight(self, tmp_path, monkeypatch):
+        """When ANTHROPIC_API_KEY is absent (auto-bypass), _run_review_preflight_tests
+        must still run in _run_reviewed_stage_cycle even though skip_advisory_pre_review
+        is False. This covers the missing-key auto-bypass path documented in the
+        bypass gate condition: `skip_advisory_pre_review or not os.environ.get("ANTHROPIC_API_KEY", "")`"""
+        import os
+        from ouroboros.tools import git as git_mod
+
+        ctx = self._make_staged_repo(tmp_path)
+
+        # Ensure no Anthropic key in environment for this test.
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "")
+
+        # Advisory freshness check passes (advisory recorded a bypass run externally).
+        monkeypatch.setattr(git_mod, "_check_advisory_freshness", lambda *a, **kw: None)
+
+        called = {"preflight": 0, "parallel": 0}
+
+        def _fake_preflight(ctx, *, timeout=120):
+            called["preflight"] += 1
+            return "FAILED: 1 test error"  # tests fail
+
+        def _fake_parallel(*a, **kw):
+            called["parallel"] += 1
+            return None, {}, "", []
+
+        monkeypatch.setattr(git_mod, "_run_review_preflight_tests", _fake_preflight)
+        monkeypatch.setattr(git_mod, "_run_parallel_review", _fake_parallel)
+
+        outcome = git_mod._run_reviewed_stage_cycle(
+            ctx,
+            commit_message="no-key auto-bypass test",
+            commit_start=0.0,
+            skip_advisory_pre_review=False,  # explicit False — gate must trigger via missing key
+        )
+
+        assert called["preflight"] == 1, (
+            "preflight must run when ANTHROPIC_API_KEY is absent, "
+            "even with skip_advisory_pre_review=False"
+        )
+        assert called["parallel"] == 0, "triad+scope must NOT run when preflight fails"
+        assert outcome["status"] == "blocked"
+        assert outcome["block_reason"] == "tests_preflight_blocked"

@@ -24,6 +24,7 @@ from ouroboros.tools.commit_gate import (
 )
 from ouroboros.utils import append_jsonl, utc_now_iso, write_text, safe_relpath, run_cmd
 from ouroboros.tools.parallel_review import run_parallel_review as _run_parallel_review, aggregate_review_verdict as _aggregate_review_verdict
+from ouroboros.tools.review_helpers import _run_review_preflight_tests
 _CONTENT_OMITTED_PREFIX = "<<CONTENT_OMITTED"
 log = logging.getLogger(__name__)
 
@@ -270,6 +271,48 @@ def _run_reviewed_stage_cycle(
             "message": advisory_err,
             "block_reason": "no_advisory",
         }
+
+    # Bypass test preflight gate: when advisory is skipped via
+    # ``skip_advisory_pre_review=True`` OR auto-bypassed because no Anthropic
+    # key is configured, the advisory-side test runner never fires. Without
+    # this gate, broken code could reach the expensive triad + scope review.
+    # Mirror the same pytest preflight here so both bypass paths provide
+    # equivalent coverage.
+    _advisory_bypassed = skip_advisory_pre_review or not os.environ.get("ANTHROPIC_API_KEY", "")
+    if _advisory_bypassed:
+        try:
+            ctx.emit_progress_fn(
+                "Advisory bypassed — running test preflight before triad + scope review..."
+            )
+        except Exception:
+            pass
+        test_err = _run_review_preflight_tests(ctx)
+        if test_err:
+            msg = (
+                "⚠️ TESTS_PREFLIGHT_BLOCKED: Tests must pass before triad + scope review "
+                "when advisory is bypassed.\n"
+                "Fix the failures below, then re-run repo_commit (or drop "
+                "skip_advisory_pre_review=True to run the full advisory flow).\n"
+                "Set OUROBOROS_PRE_PUSH_TESTS=0 to skip tests entirely.\n\n"
+                f"{test_err}"
+            )
+            try:
+                run_cmd(["git", "reset", "HEAD"], cwd=ctx.repo_dir)
+            except Exception:
+                pass
+            _record_commit_attempt(
+                ctx,
+                commit_message,
+                "blocked",
+                block_reason="tests_preflight_blocked",
+                block_details=msg,
+                duration_sec=time.time() - commit_start,
+            )
+            return {
+                "status": "blocked",
+                "message": msg,
+                "block_reason": "tests_preflight_blocked",
+            }
 
     pre_fingerprint = _fingerprint_staged_diff(pathlib.Path(ctx.repo_dir))
     if not pre_fingerprint.get("ok"):

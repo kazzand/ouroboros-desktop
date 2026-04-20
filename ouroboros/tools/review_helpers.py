@@ -7,11 +7,24 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import pathlib
 import re
 import subprocess
 from pathlib import Path
+from typing import TYPE_CHECKING, Any, Optional
 
-from ouroboros.utils import sanitize_tool_result_for_log
+from ouroboros.utils import (
+    sanitize_tool_result_for_log,
+    truncate_review_artifact as _truncate_review_artifact,
+)
+
+if TYPE_CHECKING:
+    # Avoid runtime import — ouroboros.tools.registry must NOT be imported at
+    # module load time (review_helpers.py deliberately has no dependency on
+    # other tool modules). The ToolContext type is only needed for static
+    # analysis / documentation.
+    from ouroboros.tools.registry import ToolContext  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
@@ -1136,6 +1149,56 @@ def check_worktree_readiness(
         pass
 
     return warnings
+
+
+def _run_review_preflight_tests(
+    ctx: "Any",
+    timeout: int = 120,
+) -> Optional[str]:
+    """Run pytest before an expensive review step (advisory SDK or triad+scope).
+
+    Returns a non-None error string when tests fail, None when tests pass (or
+    when the preflight is skipped by env gate / missing tests directory).
+
+    Shared helper used by:
+      * ``claude_advisory_review._run_advisory_tests`` — before the advisory
+        SDK call.
+      * ``git._run_reviewed_stage_cycle`` — before the triad + scope review
+        when advisory was bypassed (``skip_advisory_pre_review=True`` or
+        auto-bypassed with no Anthropic key).
+
+    Respects ``OUROBOROS_PRE_PUSH_TESTS=0`` env gate — same as the post-commit
+    runner in git.py — so a single knob disables all test preflight layers.
+
+    ``ctx`` is a ToolContext (typed as ``Any`` to avoid circular imports —
+    review_helpers deliberately has no runtime dependency on other tool
+    modules).
+    """
+    if os.environ.get("OUROBOROS_PRE_PUSH_TESTS", "1") != "1":
+        return None
+    repo_dir = getattr(ctx, "repo_dir", None)
+    if repo_dir is None:
+        return None
+    tests_dir = pathlib.Path(repo_dir) / "tests"
+    if not tests_dir.exists():
+        return None
+    MAX_OUTPUT = 8000
+    try:
+        result = subprocess.run(
+            ["pytest", "tests/", "-q", "--tb=line", "--no-header"],
+            cwd=str(repo_dir), capture_output=True, text=True, timeout=timeout,
+        )
+        if result.returncode == 0:
+            return None
+        output = (result.stdout + result.stderr).strip()
+        return _truncate_review_artifact(output, limit=MAX_OUTPUT)
+    except subprocess.TimeoutExpired:
+        return f"⚠️ Tests timed out after {timeout} seconds"
+    except FileNotFoundError:
+        return "⚠️ pytest not found — install pytest or set OUROBOROS_PRE_PUSH_TESTS=0 to skip"
+    except Exception as exc:
+        logger.warning("_run_review_preflight_tests failed: %s", exc, exc_info=True)
+        return f"⚠️ Unexpected error running tests: {exc}"
 
 
 def format_advisory_sdk_error(prefix: str, result_error: str, stderr_tail: str,
