@@ -1,4 +1,4 @@
-# Ouroboros v4.42.3 — Architecture & Reference
+# Ouroboros v4.42.4 — Architecture & Reference
 
 This document describes every component, page, button, API endpoint, and data flow.
 It is the single source of truth for how the system works. Keep it updated.
@@ -773,6 +773,7 @@ backward compatibility but is not the runtime authority.
 - **`revert_commit`**: create a revert commit for a specific SHA (review-exempt)
 - **Auto-tag**: on VERSION change, creates annotated tag `v{VERSION}` after tests pass
 - **Auto-push**: best-effort push to origin after successful commit (non-fatal)
+- **Post-push CI status note** (v4.42.4): after a successful push, when `GITHUB_TOKEN` and `GITHUB_REPO` are configured, `_check_ci_status_after_push` queries the GitHub Actions API filtered by `head_sha` of the just-pushed commit and appends a one-line status note to the commit result: `✅ Run passed for this commit` / `⏳ Run not yet registered` (GitHub may take 5–30 s) / `⚠️ CI STATUS: Run FAILED (run #N) → job → failed step + URL`. Filtering by SHA prevents stale results from a prior push being reported. The lookup is non-blocking, fails silently on any exception, and is skipped entirely when push did not succeed.
 - **Credential helper**: `git_ops.configure_remote()` stores credentials in repo-local
   `.git/credentials`. `migrate_remote_credentials()` migrates legacy token-in-URL origins.
   Both are wired at startup and on settings save. Saving `GITHUB_TOKEN` + `GITHUB_REPO`

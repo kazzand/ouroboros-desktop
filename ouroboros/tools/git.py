@@ -707,6 +707,83 @@ def _format_review_advisory_entry(entry: Any) -> str:
     return str(entry)
 
 
+def _check_ci_status_after_push(repo_dir: pathlib.Path) -> str:
+    """Query GitHub Actions for the CI run matching the just-pushed commit SHA.
+    Filters by head_sha so stale runs from previous pushes are never reported.
+    Returns a short status string to append to commit output, or "" on any error."""
+    try:
+        import urllib.request
+        token = os.environ.get("GITHUB_TOKEN", "").strip()
+        repo = os.environ.get("GITHUB_REPO", "").strip()
+        if not token or not repo:
+            return ""
+        branch = run_cmd(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=repo_dir).strip()
+        if not branch or branch == "HEAD":
+            return ""
+        local_sha = run_cmd(["git", "rev-parse", "HEAD"], cwd=repo_dir).strip()
+        if not local_sha:
+            return ""
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/vnd.github+json",
+            "User-Agent": "ouroboros-ci-check",
+        }
+        # Filter by head_sha in the API query so GitHub returns only runs for
+        # the just-pushed commit; client-side filter retained as defense-in-depth.
+        import urllib.parse
+        runs_url = (
+            f"https://api.github.com/repos/{repo}/actions/runs"
+            f"?per_page=10&branch={urllib.parse.quote(branch, safe='')}"
+            f"&event=push&head_sha={urllib.parse.quote(local_sha, safe='')}"
+        )
+        with urllib.request.urlopen(urllib.request.Request(runs_url, headers=headers), timeout=8) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        runs = [r for r in (data.get("workflow_runs") or []) if r.get("head_sha") == local_sha]
+        if not runs:
+            return "\n\n⏳ CI: Run not yet registered — check GitHub Actions in ~30s."
+        # Prefer runs that are active; fall back to latest completed run for this SHA.
+        if runs[0].get("status") in ("in_progress", "queued"):
+            return "\n\n⏳ CI: Run in progress — check GitHub Actions for results."
+        completed = next((r for r in runs if r.get("status") == "completed"), None)
+        if completed is None:
+            return "\n\n⏳ CI: Run queued — check GitHub Actions for results."
+        conclusion = completed.get("conclusion", "")
+        if conclusion == "success":
+            return "\n\n✅ CI: Run passed for this commit."
+        run_number = completed.get("run_number", "?")
+        html_url = completed.get("html_url", "")
+        jobs_url = completed.get("jobs_url", "")
+        failed_summary = "unknown job"
+        if jobs_url:
+            try:
+                with urllib.request.urlopen(urllib.request.Request(jobs_url, headers=headers), timeout=8) as jresp:
+                    jdata = json.loads(jresp.read().decode("utf-8"))
+                failed_parts = []
+                for job in jdata.get("jobs") or []:
+                    if job.get("conclusion") == "failure":
+                        failed_step = next((s.get("name", "?") for s in job.get("steps") or []
+                                            if s.get("conclusion") == "failure"), "?")
+                        failed_parts.append(f"{job.get('name', '?')} → {failed_step}")
+                if failed_parts:
+                    failed_summary = "; ".join(failed_parts)
+            except Exception:
+                pass  # Fall back to generic summary — run_number/html_url still surfaced below
+        if conclusion == "failure":
+            return (
+                f"\n\n⚠️ CI STATUS: Run FAILED for this commit (run #{run_number})\n"
+                f"  Failed: {failed_summary}\n"
+                f"  Fix: investigate failing tests, then push a fix commit.\n"
+                f"  URL: {html_url}"
+            )
+        # Other terminal conclusions: cancelled, timed_out, startup_failure, etc.
+        return (
+            f"\n\n⚠️ CI STATUS: Run {conclusion.upper()} for this commit (run #{run_number})\n"
+            f"  URL: {html_url}"
+        )
+    except Exception:
+        return ""
+
+
 def _format_commit_result(ctx, commit_message, push_status, test_warning):
     result = f"OK: committed to {ctx.branch_dev}: {commit_message}{push_status}"
     if test_warning:
@@ -1030,7 +1107,10 @@ def _repo_write_commit(ctx: ToolContext, path: str, content: str,
         _release_git_lock(lock)
     push_status = _auto_push(ctx.repo_dir)
     ctx.last_push_succeeded = "[pushed:" in push_status
-    return _format_commit_result(ctx, commit_message, push_status + tag_info, test_warning_ref[0])
+    ci_note = ""
+    if ctx.last_push_succeeded:
+        ci_note = _check_ci_status_after_push(ctx.repo_dir)
+    return _format_commit_result(ctx, commit_message, push_status + tag_info, test_warning_ref[0]) + ci_note
 
 
 def _repo_commit_push(ctx: ToolContext, commit_message: str,
@@ -1131,6 +1211,9 @@ def _repo_commit_push(ctx: ToolContext, commit_message: str,
         _release_git_lock(lock)
     push_status = _auto_push(ctx.repo_dir)
     ctx.last_push_succeeded = "[pushed:" in push_status
+    ci_note = ""
+    if ctx.last_push_succeeded:
+        ci_note = _check_ci_status_after_push(ctx.repo_dir)
     result = _format_commit_result(ctx, commit_message, push_status + tag_info, test_warning_ref[0])
     if paths is not None:
         try:
@@ -1140,7 +1223,7 @@ def _repo_commit_push(ctx: ToolContext, commit_message: str,
                 result += f"\n⚠️ WARNING: untracked files remain: {files}"
         except Exception:
             pass
-    return result
+    return result + ci_note
 
 
 def _git_status(ctx: ToolContext) -> str:

@@ -1325,8 +1325,18 @@ class TestBypassPathTestsRun:
     def test_non_bypass_path_does_not_run_preflight_here(self, tmp_path, monkeypatch):
         """Without skip_advisory_pre_review, the stage cycle must NOT run the
         preflight tests — the advisory side already ran them, and the commit
-        gate relies on advisory freshness instead."""
+        gate relies on advisory freshness instead.
+
+        IMPORTANT: must set ANTHROPIC_API_KEY to a non-empty sentinel so the
+        auto-bypass condition ``not os.environ.get("ANTHROPIC_API_KEY", "")``
+        evaluates to False.  Without this, CI environments (which have no key)
+        silently fall into the bypass path and make the preflight run, causing
+        the assert-0 below to fail even though ``skip_advisory_pre_review=False``.
+        """
         from ouroboros.tools import git as git_mod
+
+        # Simulate "normal" (non-bypass) path: advisory key is present.
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test-sentinel")
 
         ctx = self._make_staged_repo(tmp_path)
         monkeypatch.setattr(git_mod, "_check_advisory_freshness", lambda *a, **kw: None)

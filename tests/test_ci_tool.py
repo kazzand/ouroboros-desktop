@@ -356,3 +356,340 @@ class TestProgressEmission:
             # At least push and trigger progress events should be emitted
             progress_events = [e for e in ctx.pending_events if e.get("type") == "progress"]
             assert len(progress_events) >= 2
+
+
+class TestCheckCiStatusAfterPush:
+    """Tests for _check_ci_status_after_push helper in git.py."""
+
+    def _make_runs_response(self, runs):
+        body = json.dumps({"workflow_runs": runs}).encode()
+        resp = MagicMock()
+        resp.read.return_value = body
+        resp.__enter__ = lambda s: s
+        resp.__exit__ = MagicMock(return_value=False)
+        return resp
+
+    def _make_jobs_response(self, jobs):
+        body = json.dumps({"jobs": jobs}).encode()
+        resp = MagicMock()
+        resp.read.return_value = body
+        resp.__enter__ = lambda s: s
+        resp.__exit__ = MagicMock(return_value=False)
+        return resp
+
+    # run_cmd returns branch on first call, SHA on second call
+    LOCAL_SHA = "abc1234def5678901234567890123456789012ab"
+    STALE_SHA = "0000000000000000000000000000000000000000"
+
+    def _mock_run_cmd(self, *args, **kwargs):
+        """Returns branch name then SHA on successive calls."""
+        cmd = args[0]
+        if "abbrev-ref" in cmd:
+            return "ouroboros\n"
+        return self.LOCAL_SHA + "\n"
+
+    def test_no_token_returns_empty(self, tmp_path, monkeypatch):
+        """When GITHUB_TOKEN is absent, return '' silently."""
+        from ouroboros.tools.git import _check_ci_status_after_push
+        monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+        monkeypatch.delenv("GITHUB_REPO", raising=False)
+        assert _check_ci_status_after_push(tmp_path) == ""
+
+    def test_success_run_returns_checkmark(self, tmp_path, monkeypatch):
+        """A completed+success run with matching SHA returns the ✅ note."""
+        import ouroboros.tools.git as git_mod
+        from ouroboros.tools.git import _check_ci_status_after_push
+        monkeypatch.setenv("GITHUB_TOKEN", "tok")
+        monkeypatch.setenv("GITHUB_REPO", "owner/repo")
+        monkeypatch.setattr(git_mod, "run_cmd", self._mock_run_cmd)
+        runs = [{"status": "completed", "conclusion": "success", "run_number": 42,
+                 "head_sha": self.LOCAL_SHA,
+                 "html_url": "https://example.com", "jobs_url": ""}]
+        runs_resp = self._make_runs_response(runs)
+        with patch("urllib.request.urlopen", return_value=runs_resp):
+            result = _check_ci_status_after_push(tmp_path)
+        assert "✅ CI" in result
+
+    def test_stale_sha_returns_not_registered(self, tmp_path, monkeypatch):
+        """Runs with a DIFFERENT head_sha (stale push) must not be reported as ✅.
+        Instead the function should return the ⏳ not-yet-registered message."""
+        import ouroboros.tools.git as git_mod
+        from ouroboros.tools.git import _check_ci_status_after_push
+        monkeypatch.setenv("GITHUB_TOKEN", "tok")
+        monkeypatch.setenv("GITHUB_REPO", "owner/repo")
+        monkeypatch.setattr(git_mod, "run_cmd", self._mock_run_cmd)
+        # All runs belong to a different commit
+        runs = [{"status": "completed", "conclusion": "success", "run_number": 41,
+                 "head_sha": self.STALE_SHA,
+                 "html_url": "https://example.com", "jobs_url": ""}]
+        runs_resp = self._make_runs_response(runs)
+        with patch("urllib.request.urlopen", return_value=runs_resp):
+            result = _check_ci_status_after_push(tmp_path)
+        # Must NOT claim pass for the stale run
+        assert "✅" not in result
+        assert "⏳" in result
+
+    def test_failure_run_returns_warning(self, tmp_path, monkeypatch):
+        """A completed+failure run with matching SHA returns the ⚠️ warning."""
+        import ouroboros.tools.git as git_mod
+        from ouroboros.tools.git import _check_ci_status_after_push
+        monkeypatch.setenv("GITHUB_TOKEN", "tok")
+        monkeypatch.setenv("GITHUB_REPO", "owner/repo")
+        monkeypatch.setattr(git_mod, "run_cmd", self._mock_run_cmd)
+        runs = [{"status": "completed", "conclusion": "failure", "run_number": 7,
+                 "head_sha": self.LOCAL_SHA,
+                 "html_url": "https://github.com/run/7",
+                 "jobs_url": "https://api.github.com/jobs/7"}]
+        jobs = [{"name": "quick-test", "conclusion": "failure",
+                 "steps": [{"name": "Run tests", "conclusion": "failure"}]}]
+        runs_resp = self._make_runs_response(runs)
+        jobs_resp = self._make_jobs_response(jobs)
+        call_count = [0]
+        def _fake_urlopen(req, **kwargs):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                return runs_resp
+            return jobs_resp
+        with patch("urllib.request.urlopen", side_effect=_fake_urlopen):
+            result = _check_ci_status_after_push(tmp_path)
+        assert "⚠️ CI STATUS" in result
+        assert "run #7" in result
+        assert "quick-test" in result
+
+    def test_in_progress_returns_hourglass(self, tmp_path, monkeypatch):
+        """An in-progress run with matching SHA returns the ⏳ note."""
+        import ouroboros.tools.git as git_mod
+        from ouroboros.tools.git import _check_ci_status_after_push
+        monkeypatch.setenv("GITHUB_TOKEN", "tok")
+        monkeypatch.setenv("GITHUB_REPO", "owner/repo")
+        monkeypatch.setattr(git_mod, "run_cmd", self._mock_run_cmd)
+        runs = [{"status": "in_progress", "conclusion": None, "run_number": 10,
+                 "head_sha": self.LOCAL_SHA,
+                 "html_url": "https://github.com/run/10", "jobs_url": ""}]
+        runs_resp = self._make_runs_response(runs)
+        with patch("urllib.request.urlopen", return_value=runs_resp):
+            result = _check_ci_status_after_push(tmp_path)
+        assert "⏳ CI" in result
+
+    def test_network_error_returns_empty(self, tmp_path, monkeypatch):
+        """Any exception (e.g. network error) returns '' — never crashes."""
+        import ouroboros.tools.git as git_mod
+        from ouroboros.tools.git import _check_ci_status_after_push
+        monkeypatch.setenv("GITHUB_TOKEN", "tok")
+        monkeypatch.setenv("GITHUB_REPO", "owner/repo")
+        monkeypatch.setattr(git_mod, "run_cmd", self._mock_run_cmd)
+        with patch("urllib.request.urlopen", side_effect=OSError("network down")):
+            result = _check_ci_status_after_push(tmp_path)
+        assert result == ""
+
+    def test_no_matching_runs_returns_not_registered(self, tmp_path, monkeypatch):
+        """No runs matching local SHA returns the ⏳ not-yet-registered note."""
+        import ouroboros.tools.git as git_mod
+        from ouroboros.tools.git import _check_ci_status_after_push
+        monkeypatch.setenv("GITHUB_TOKEN", "tok")
+        monkeypatch.setenv("GITHUB_REPO", "owner/repo")
+        monkeypatch.setattr(git_mod, "run_cmd", self._mock_run_cmd)
+        runs_resp = self._make_runs_response([])
+        with patch("urllib.request.urlopen", return_value=runs_resp):
+            result = _check_ci_status_after_push(tmp_path)
+        assert "⏳" in result
+
+    def test_request_url_includes_head_sha(self, tmp_path, monkeypatch):
+        """The GitHub API request URL must include head_sha=<local_sha> so
+        GitHub server-side filters to only runs for the just-pushed commit.
+        Without this, the first-page result (per_page) may miss the new run."""
+        import ouroboros.tools.git as git_mod
+        from ouroboros.tools.git import _check_ci_status_after_push
+        monkeypatch.setenv("GITHUB_TOKEN", "tok")
+        monkeypatch.setenv("GITHUB_REPO", "owner/repo")
+        monkeypatch.setattr(git_mod, "run_cmd", self._mock_run_cmd)
+        captured_urls = []
+        runs_resp = self._make_runs_response([])
+
+        class _FakeCtx:
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+            def read(self): return runs_resp.read()
+
+        def _fake_urlopen(req, **kwargs):
+            captured_urls.append(req.full_url)
+            return _FakeCtx()
+
+        with patch("urllib.request.urlopen", side_effect=_fake_urlopen):
+            _check_ci_status_after_push(tmp_path)
+
+        assert captured_urls, "urlopen was never called"
+        assert f"head_sha={self.LOCAL_SHA}" in captured_urls[0], (
+            f"head_sha not found in API URL: {captured_urls[0]}"
+        )
+
+    def test_failure_with_jobs_fetch_error_still_warns(self, tmp_path, monkeypatch):
+        """If the runs request succeeds with conclusion='failure' but the jobs
+        request raises, the helper must still return ⚠️ CI STATUS (not '').
+        Run number and URL come from the already-fetched run object."""
+        import ouroboros.tools.git as git_mod
+        from ouroboros.tools.git import _check_ci_status_after_push
+        monkeypatch.setenv("GITHUB_TOKEN", "tok")
+        monkeypatch.setenv("GITHUB_REPO", "owner/repo")
+        monkeypatch.setattr(git_mod, "run_cmd", self._mock_run_cmd)
+        runs = [{"status": "completed", "conclusion": "failure", "run_number": 5,
+                 "head_sha": self.LOCAL_SHA,
+                 "html_url": "https://github.com/run/5",
+                 "jobs_url": "https://api.github.com/jobs/5"}]
+        runs_resp = self._make_runs_response(runs)
+        call_count = [0]
+        def _fake_urlopen(req, **kwargs):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                return runs_resp
+            raise OSError("jobs endpoint unreachable")
+        with patch("urllib.request.urlopen", side_effect=_fake_urlopen):
+            result = _check_ci_status_after_push(tmp_path)
+        assert "⚠️ CI STATUS" in result, f"Should warn even when jobs fetch fails: {result!r}"
+        assert "run #5" in result
+
+    def test_cancelled_run_returns_warning(self, tmp_path, monkeypatch):
+        """A completed+cancelled run must surface as ⚠️ — not silently return ''.
+        Covers conclusion values: cancelled, timed_out, startup_failure, stale, etc."""
+        import ouroboros.tools.git as git_mod
+        from ouroboros.tools.git import _check_ci_status_after_push
+        monkeypatch.setenv("GITHUB_TOKEN", "tok")
+        monkeypatch.setenv("GITHUB_REPO", "owner/repo")
+        monkeypatch.setattr(git_mod, "run_cmd", self._mock_run_cmd)
+        runs = [{"status": "completed", "conclusion": "cancelled", "run_number": 99,
+                 "head_sha": self.LOCAL_SHA,
+                 "html_url": "https://github.com/run/99", "jobs_url": ""}]
+        runs_resp = self._make_runs_response(runs)
+        with patch("urllib.request.urlopen", return_value=runs_resp):
+            result = _check_ci_status_after_push(tmp_path)
+        assert "⚠️ CI STATUS" in result
+        assert "CANCELLED" in result
+        assert "run #99" in result
+
+
+class TestCiStatusWiring:
+    """Verify that _check_ci_status_after_push is correctly wired into both
+    _repo_commit_push and _repo_write_commit: appended on successful push,
+    skipped when push did not succeed."""
+
+    def _make_ctx(self, tmp_path):
+        """Minimal ToolContext mock for wiring tests."""
+        ctx = MagicMock()
+        ctx.repo_dir = str(tmp_path)
+        ctx.drive_root = str(tmp_path)
+        ctx.branch_dev = "ouroboros"
+        ctx.last_push_succeeded = False
+        ctx._review_advisory = []
+        ctx._last_triad_models = []
+        ctx._last_scope_model = ""
+        ctx._last_triad_raw_results = []
+        ctx._last_scope_raw_result = {}
+        ctx._review_degraded_reasons = []
+        ctx._scope_review_history = {}
+        ctx.pending_events = []
+        ctx.emit_progress_fn = MagicMock()
+        ctx.repo_path = lambda p: tmp_path / p
+        return ctx
+
+    def test_ci_note_appended_on_successful_push(self, tmp_path, monkeypatch):
+        """When push succeeds, _check_ci_status_after_push result is appended
+        to the _repo_commit_push return value."""
+        import ouroboros.tools.git as git_mod
+
+        ctx = self._make_ctx(tmp_path)
+
+        # Stub out everything except the ci_note wiring
+        monkeypatch.setattr(git_mod, "_check_advisory_freshness", lambda *a, **kw: None)
+        monkeypatch.setattr(git_mod, "_run_reviewed_stage_cycle",
+                            lambda *a, **kw: {"status": "passed",
+                                              "pre_fingerprint": {}, "post_fingerprint": {}})
+        monkeypatch.setattr(git_mod, "_record_commit_attempt", lambda *a, **kw: None)
+        monkeypatch.setattr(git_mod, "_post_commit_result", lambda *a, **kw: None)
+        monkeypatch.setattr(git_mod, "_auto_tag_on_version_bump", lambda *a, **kw: "")
+        monkeypatch.setattr(git_mod, "_acquire_git_lock", lambda *a, **kw: tmp_path / "git.lock")
+        monkeypatch.setattr(git_mod, "_release_git_lock", lambda *a, **kw: None)
+        monkeypatch.setattr(git_mod, "_auto_push",
+                            lambda *a, **kw: " [pushed: ouroboros]")
+        monkeypatch.setattr(git_mod, "_check_ci_status_after_push",
+                            lambda *a, **kw: "\n\n✅ CI: Run passed for this commit.")
+        # Stub git commit subprocess
+        monkeypatch.setattr(git_mod, "run_cmd",
+                            lambda *a, **kw: "")
+
+        result = git_mod._repo_commit_push(ctx, "test commit")
+        assert "✅ CI" in result, f"CI note not appended on successful push: {result!r}"
+
+    def test_ci_note_skipped_when_push_fails(self, tmp_path, monkeypatch):
+        """When push fails (last_push_succeeded is False), _check_ci_status_after_push
+        must NOT be called."""
+        import ouroboros.tools.git as git_mod
+
+        ctx = self._make_ctx(tmp_path)
+
+        monkeypatch.setattr(git_mod, "_check_advisory_freshness", lambda *a, **kw: None)
+        monkeypatch.setattr(git_mod, "_run_reviewed_stage_cycle",
+                            lambda *a, **kw: {"status": "passed",
+                                              "pre_fingerprint": {}, "post_fingerprint": {}})
+        monkeypatch.setattr(git_mod, "_record_commit_attempt", lambda *a, **kw: None)
+        monkeypatch.setattr(git_mod, "_post_commit_result", lambda *a, **kw: None)
+        monkeypatch.setattr(git_mod, "_auto_tag_on_version_bump", lambda *a, **kw: "")
+        monkeypatch.setattr(git_mod, "_acquire_git_lock", lambda *a, **kw: tmp_path / "git.lock")
+        monkeypatch.setattr(git_mod, "_release_git_lock", lambda *a, **kw: None)
+        # Push fails
+        monkeypatch.setattr(git_mod, "_auto_push",
+                            lambda *a, **kw: " [push skipped: no remote]")
+        ci_called = [False]
+        def _ci_stub(*a, **kw):
+            ci_called[0] = True
+            return "\n\n✅ CI: Run passed for this commit."
+        monkeypatch.setattr(git_mod, "_check_ci_status_after_push", _ci_stub)
+        monkeypatch.setattr(git_mod, "run_cmd", lambda *a, **kw: "")
+
+        result = git_mod._repo_commit_push(ctx, "test commit")
+        assert not ci_called[0], "CI status must not be queried when push did not succeed"
+        assert "✅ CI" not in result
+
+    # ---- _repo_write_commit wiring ----
+
+    def _patch_write_commit(self, git_mod, tmp_path, monkeypatch, push_ok: bool):
+        """Common monkeypatches for _repo_write_commit wiring tests."""
+        # Write a file so repo_write_commit has something to stage
+        (tmp_path / "x.py").write_text("pass\n")
+        monkeypatch.setattr(git_mod, "_check_advisory_freshness", lambda *a, **kw: None)
+        monkeypatch.setattr(git_mod, "_run_reviewed_stage_cycle",
+                            lambda *a, **kw: {"status": "passed",
+                                              "pre_fingerprint": {}, "post_fingerprint": {}})
+        monkeypatch.setattr(git_mod, "_record_commit_attempt", lambda *a, **kw: None)
+        monkeypatch.setattr(git_mod, "_invalidate_advisory", lambda *a, **kw: None)
+        monkeypatch.setattr(git_mod, "_post_commit_result", lambda *a, **kw: None)
+        monkeypatch.setattr(git_mod, "_auto_tag_on_version_bump", lambda *a, **kw: "")
+        monkeypatch.setattr(git_mod, "_acquire_git_lock", lambda *a, **kw: tmp_path / "git.lock")
+        monkeypatch.setattr(git_mod, "_release_git_lock", lambda *a, **kw: None)
+        push_str = " [pushed: ouroboros]" if push_ok else " [push skipped: no remote]"
+        monkeypatch.setattr(git_mod, "_auto_push", lambda *a, **kw: push_str)
+        monkeypatch.setattr(git_mod, "run_cmd", lambda *a, **kw: "")
+
+    def test_write_commit_ci_note_appended_on_successful_push(self, tmp_path, monkeypatch):
+        """_repo_write_commit appends CI note when push succeeds."""
+        import ouroboros.tools.git as git_mod
+        ctx = self._make_ctx(tmp_path)
+        self._patch_write_commit(git_mod, tmp_path, monkeypatch, push_ok=True)
+        monkeypatch.setattr(git_mod, "_check_ci_status_after_push",
+                            lambda *a, **kw: "\n\n✅ CI: Run passed for this commit.")
+        result = git_mod._repo_write_commit(ctx, path="x.py", content="pass\n",
+                                             commit_message="wiring test")
+        assert "✅ CI" in result, f"CI note not appended for _repo_write_commit: {result!r}"
+
+    def test_write_commit_ci_note_skipped_when_push_fails(self, tmp_path, monkeypatch):
+        """_repo_write_commit skips CI lookup when push fails."""
+        import ouroboros.tools.git as git_mod
+        ctx = self._make_ctx(tmp_path)
+        self._patch_write_commit(git_mod, tmp_path, monkeypatch, push_ok=False)
+        ci_called = [False]
+        def _ci_stub(*a, **kw):
+            ci_called[0] = True
+            return "\n\n✅ CI: Run passed for this commit."
+        monkeypatch.setattr(git_mod, "_check_ci_status_after_push", _ci_stub)
+        git_mod._repo_write_commit(ctx, path="x.py", content="pass\n",
+                                    commit_message="wiring test")
+        assert not ci_called[0], "CI status must not be queried when push failed"
