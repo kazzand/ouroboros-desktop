@@ -182,16 +182,24 @@ class TestDockerfile:
             f"(pip at char {pip_pos}, install-deps at {deps_pos})"
         )
 
-    def test_playwright_install_after_pip_install(self):
-        """The playwright Python package must be installed (via pip) before
-        ``playwright install chromium`` is called, otherwise the ``python3 -m playwright``
-        invocation will fail with ModuleNotFoundError."""
+    def test_pip_install_before_all_playwright_invocations(self):
+        """pip install must appear BEFORE every ``python3 -m playwright ...`` invocation
+        in the Dockerfile — both ``install-deps`` and ``install chromium``.
+        If *any* playwright invocation precedes pip install, ModuleNotFoundError occurs."""
         src = _read("Dockerfile")
         pip_pos = src.find("pip install")
-        pw_pos = src.find("playwright install chromium")
         assert pip_pos != -1, "pip install step not found in Dockerfile"
-        assert pw_pos != -1, "playwright install chromium not found in Dockerfile"
-        assert pip_pos < pw_pos, (
-            "pip install must appear BEFORE playwright install chromium in Dockerfile "
-            f"(pip at char {pip_pos}, playwright at {pw_pos})"
+
+        import re as _re
+        playwright_invocations = [
+            m.start() for m in _re.finditer(r"python3 -m playwright", src)
+        ]
+        assert playwright_invocations, "No 'python3 -m playwright' invocations found in Dockerfile"
+
+        earliest_playwright = min(playwright_invocations)
+        assert pip_pos < earliest_playwright, (
+            "pip install must appear BEFORE the earliest 'python3 -m playwright' invocation "
+            f"in the Dockerfile (pip at char {pip_pos}, earliest playwright at {earliest_playwright}). "
+            f"Found {len(playwright_invocations)} playwright invocation(s) at positions: "
+            f"{playwright_invocations}"
         )
