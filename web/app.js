@@ -109,4 +109,23 @@ initOnboardingOverlay();
 // ---------------------------------------------------------------------------
 initMatrixRain();
 loadVersion();
+
+// Visual viewport height — keeps layout above soft keyboard on iOS/Android.
+// Updates a <style> tag (not element.style) to set --vvh without inline styles.
+(function () {
+    const vvhStyle = document.createElement('style');
+    vvhStyle.id = 'runtime-vvh';
+    document.head.appendChild(vvhStyle);
+    const updateVvh = () => {
+        const h = window.visualViewport ? window.visualViewport.height : window.innerHeight;
+        vvhStyle.textContent = ':root{--vvh:' + h + 'px}';
+    };
+    if (window.visualViewport) {
+        window.visualViewport.addEventListener('resize', updateVvh);
+        window.visualViewport.addEventListener('scroll', updateVvh);
+    }
+    window.addEventListener('resize', updateVvh);
+    updateVvh();
+}());
+
 ws.connect();

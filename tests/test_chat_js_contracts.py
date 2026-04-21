@@ -440,3 +440,136 @@ def test_plan_prefix_js_constant_matches_python_port():
     assert _PLAN_PREFIX.replace("\n\n", "\\n\\n") in src or _PLAN_PREFIX in src, (
         "PLAN_PREFIX const in chat.js must match the Python port's canonical string"
     )
+
+
+class TestRenderMarkdownMdTableWrap:
+    """renderMarkdown wraps markdown tables in .md-table-wrap for overflow scrolling."""
+
+    def test_table_output_contains_md_table_wrap(self):
+        content = open("web/modules/utils.js").read()
+        assert 'class="md-table-wrap"' in content, (
+            "renderMarkdown must wrap tables in <div class=\"md-table-wrap\"> for horizontal overflow"
+        )
+
+    def test_md_table_wrap_css_rule_exists(self):
+        css = open("web/style.css").read()
+        assert ".md-table-wrap" in css, (
+            ".md-table-wrap CSS rule must exist in web/style.css"
+        )
+
+    def test_md_table_wrap_has_overflow_x_auto(self):
+        css = open("web/style.css").read()
+        # Find the .md-table-wrap block and verify it has overflow-x: auto
+        idx = css.find(".md-table-wrap")
+        assert idx != -1, ".md-table-wrap not found in style.css"
+        block = css[idx:idx+200]
+        assert "overflow-x: auto" in block, (
+            ".md-table-wrap must have overflow-x: auto for horizontal scrolling"
+        )
+
+
+class TestRenderMarkdownNoInlineStyles:
+    """renderMarkdown must not use inline style= attributes — use CSS classes instead."""
+
+    def test_no_inline_style_in_header_replacement(self):
+        content = open("web/modules/utils.js").read()
+        # Extract the renderMarkdown function body
+        start = content.find("export function renderMarkdown")
+        end = content.find("\nexport function", start + 1)
+        fn_body = content[start:end] if end != -1 else content[start:]
+        # Headers should use CSS classes, not inline styles
+        assert 'style="font-size' not in fn_body, (
+            "renderMarkdown headers must use CSS classes (md-h1/md-h2/md-h3), not inline style= attributes"
+        )
+
+    def test_no_inline_style_in_list_replacement(self):
+        content = open("web/modules/utils.js").read()
+        start = content.find("export function renderMarkdown")
+        end = content.find("\nexport function", start + 1)
+        fn_body = content[start:end] if end != -1 else content[start:]
+        # List items should use CSS class, not inline style
+        assert 'style="display:block;padding-left' not in fn_body, (
+            "renderMarkdown list items must use CSS class md-li, not inline style= attributes"
+        )
+
+    def test_no_inline_style_in_link_replacement(self):
+        content = open("web/modules/utils.js").read()
+        start = content.find("export function renderMarkdown")
+        end = content.find("\nexport function", start + 1)
+        fn_body = content[start:end] if end != -1 else content[start:]
+        # Links should use CSS class, not inline style
+        assert 'style="color:var(--accent)' not in fn_body, (
+            "renderMarkdown links must use CSS class md-link, not inline style= attributes"
+        )
+
+    def test_markdown_css_classes_defined_in_stylesheet(self):
+        css = open("web/style.css").read()
+        for cls in [".md-h1", ".md-h2", ".md-h3", ".md-li", ".md-link"]:
+            assert cls in css, f"{cls} must be defined as a CSS rule in web/style.css"
+
+
+class TestVisualViewportListener:
+    """web/app.js must contain the visualViewport listener that drives --vvh."""
+
+    def test_visual_viewport_listener_present(self):
+        content = open("web/app.js").read()
+        assert "window.visualViewport" in content, (
+            "web/app.js must contain a visualViewport listener to update --vvh CSS token"
+        )
+
+    def test_vvh_property_set_in_listener(self):
+        content = open("web/app.js").read()
+        assert "--vvh" in content, (
+            "web/app.js must set --vvh CSS custom property via visualViewport listener"
+        )
+
+    def test_vvh_css_variable_defined_in_root(self):
+        css = open("web/style.css").read()
+        assert "--vvh:" in css, (
+            "--vvh CSS custom property must be defined in :root in web/style.css"
+        )
+
+    def test_body_uses_vvh_not_100vh(self):
+        css = open("web/style.css").read()
+        # body block should use var(--vvh), not 100vh directly
+        body_idx = css.find("body {")
+        body_block = css[body_idx:body_idx+200]
+        assert "var(--vvh)" in body_block, (
+            "body must use height: var(--vvh) for keyboard-safe mobile layout"
+        )
+        assert "100vh" not in body_block, (
+            "body must not use 100vh directly — use var(--vvh) which falls back to 100dvh"
+        )
+
+
+class TestRenderMarkdownLinkSanitization:
+    """renderMarkdown must sanitize unsafe URL schemes and add rel=noopener noreferrer."""
+
+    def test_safe_https_link_preserved(self):
+        content = open("web/modules/utils.js").read()
+        # Safe https:// links should pass the allowlist
+        assert '/^https?:/' in content or "^https?:" in content, (
+            "renderMarkdown must allowlist https:// scheme for links"
+        )
+
+    def test_unsafe_scheme_falls_back_to_hash(self):
+        content = open("web/modules/utils.js").read()
+        # javascript: and other unsafe schemes must be blocked — the safe variable falls back to '#'
+        # Code pattern: const safe = /^https?:|^mailto:/i.test(url) ? url : '#';
+        assert ": '#'" in content or ': "#"' in content or "? url : '#'" in content or '? url : "#"' in content, (
+            "renderMarkdown must fall back to '#' for unsafe URL schemes (const safe = ... ? url : '#')"
+        )
+
+    def test_rel_noopener_noreferrer_on_links(self):
+        content = open("web/modules/utils.js").read()
+        # All generated anchors must have rel=noopener noreferrer
+        assert 'rel="noopener noreferrer"' in content or "rel='noopener noreferrer'" in content, (
+            "renderMarkdown must emit rel=\"noopener noreferrer\" on generated anchors"
+        )
+
+    def test_mailto_scheme_allowed(self):
+        content = open("web/modules/utils.js").read()
+        # mailto: is a safe and useful scheme that should be allowed
+        assert "mailto:" in content, (
+            "renderMarkdown should allowlist mailto: scheme in link sanitizer"
+        )

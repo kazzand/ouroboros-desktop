@@ -25,6 +25,7 @@
     --radius: 12px;
     --radius-lg: 16px;
     --radius-xl: 20px;
+    --vvh: 100dvh;
 }
 
 * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -37,13 +38,13 @@ body {
     font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Segoe UI', system-ui, sans-serif;
     background: var(--bg-primary);
     color: var(--text-primary);
-    height: 100vh;
+    height: var(--vvh);
     overflow: hidden;
 }
 
 #app {
     display: flex;
-    height: 100vh;
+    height: var(--vvh);
     position: relative;
 }
 
@@ -64,7 +65,7 @@ body {
     position: fixed;
     left: 0;
     top: 0;
-    height: 100vh;
+    height: var(--vvh);
     width: 80px;
     display: flex;
     flex-direction: column;
@@ -784,6 +785,7 @@ body {
     border-radius: var(--radius-lg);
     max-width: 80%;
     word-wrap: break-word;
+    min-width: 0;
 }
 
 .chat-bubble.user {
@@ -1248,6 +1250,72 @@ body {
 .chat-bubble .message .md-table td {
     padding: 3px 8px;
     border-bottom: 1px solid rgba(255,255,255,0.06);
+}
+
+/* Markdown rendering classes — global, used by renderMarkdown in all contexts */
+.md-h1 {
+    font-size: 16px;
+    color: var(--text-primary);
+    display: block;
+    margin: 12px 0 6px;
+}
+.md-h2 {
+    font-size: 14px;
+    color: var(--text-primary);
+    display: block;
+    margin: 10px 0 4px;
+}
+.md-h3 {
+    font-size: 13px;
+    color: var(--text-primary);
+    display: block;
+    margin: 8px 0 4px;
+}
+.md-li {
+    display: block;
+    padding-left: 12px;
+}
+.md-link {
+    color: var(--accent);
+    text-decoration: underline;
+}
+
+/* Table overflow wrapper — prevents wide tables from breaking bubble layout */
+.md-table-wrap {
+    display: block;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    max-width: 100%;
+}
+
+/* Nav spacer (replaces inline style="flex:1") */
+.nav-spacer {
+    flex: 1;
+}
+
+/* Mobile responsive — narrow screens only; desktop layout unchanged */
+@media (max-width: 640px) {
+    /* Prevent iOS zoom on input focus */
+    textarea, input[type="text"], input[type="password"], input[type="email"], select {
+        font-size: 16px !important;
+    }
+
+    /* Compact chat bubbles on small screens */
+    .chat-bubble {
+        max-width: 92%;
+    }
+    .chat-bubble.user {
+        margin-left: 8%;
+    }
+    .chat-bubble.assistant,
+    .chat-bubble.system {
+        margin-right: 8%;
+    }
+
+    /* Input area safe-area inset for iOS notch */
+    #chat-input-area {
+        padding-bottom: max(16px, env(safe-area-inset-bottom, 0px));
+    }
 }
 
 #chat-input-area {

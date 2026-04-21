@@ -21,13 +21,16 @@ export function renderMarkdown(text) {
     // Strikethrough
     html = html.replace(/~~(.+?)~~/g, '<del>$1</del>');
     // Headers (order matters: ### before ## before #)
-    html = html.replace(/^### (.+)$/gm, '<strong style="font-size:13px;color:var(--text-primary);display:block;margin:8px 0 4px">$1</strong>');
-    html = html.replace(/^## (.+)$/gm, '<strong style="font-size:14px;color:var(--text-primary);display:block;margin:10px 0 4px">$1</strong>');
-    html = html.replace(/^# (.+)$/gm, '<strong style="font-size:16px;color:var(--text-primary);display:block;margin:12px 0 6px">$1</strong>');
+    html = html.replace(/^### (.+)$/gm, '<strong class="md-h3">$1</strong>');
+    html = html.replace(/^## (.+)$/gm, '<strong class="md-h2">$1</strong>');
+    html = html.replace(/^# (.+)$/gm, '<strong class="md-h1">$1</strong>');
     // Unordered lists
-    html = html.replace(/^- (.+)$/gm, '<span style="display:block;padding-left:12px">\u2022 $1</span>');
+    html = html.replace(/^- (.+)$/gm, '<span class="md-li">\u2022 $1</span>');
     // Links
-    html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" style="color:var(--accent);text-decoration:underline">$1</a>');
+    html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, function(_, text, url) {
+        const safe = /^https?:|^mailto:/i.test(url) ? url : '#';
+        return '<a href="' + safe + '" target="_blank" rel="noopener noreferrer" class="md-link">' + text + '</a>';
+    });
     // Tables: detect header row + separator + data rows
     html = html.replace(/((?:^\|.+\|$\n?)+)/gm, function(block) {
         const rows = block.trim().split('\n').filter(r => r.trim());
@@ -42,7 +45,7 @@ export function renderMarkdown(text) {
         t += '<tbody>';
         for (let i = headIdx + 1; i < rows.length; i++) t += parseRow(rows[i], 'td');
         t += '</tbody></table>';
-        return t;
+        return '<div class="md-table-wrap">' + t + '</div>';
     });
     return html;
 }
