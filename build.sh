@@ -34,9 +34,23 @@ import shutil
 
 root = pathlib.Path("python-standalone")
 replaced = 0
+skipped = 0
+
+
+def _should_skip_symlink(path: pathlib.Path) -> bool:
+    # Keep bundled Playwright browser app/framework trees intact on macOS.
+    # Flattening symlinks inside these nested bundles breaks codesign later.
+    parts = path.parts
+    return (
+        ".local-browsers" in parts
+        or any(part.endswith(".app") or part.endswith(".framework") for part in parts)
+    )
 
 for path in sorted(root.rglob("*")):
     if not path.is_symlink():
+        continue
+    if _should_skip_symlink(path):
+        skipped += 1
         continue
     target = path.resolve()
     path.unlink()
@@ -46,7 +60,10 @@ for path in sorted(root.rglob("*")):
         shutil.copy2(target, path)
     replaced += 1
 
-print(f"Replaced {replaced} symlinks in python-standalone")
+print(
+    f"Replaced {replaced} symlinks in python-standalone "
+    f"(skipped {skipped} inside bundled browser bundles)"
+)
 PY
 
 rm -rf build dist

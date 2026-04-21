@@ -64,6 +64,21 @@ class TestBuildSh:
             f"(found at char {pw_pos}, PyInstaller cmd at {pi_pos})"
         )
 
+    def test_symlink_normalizer_skips_playwright_browser_bundles(self):
+        src = _read("build.sh")
+        assert "_should_skip_symlink" in src, (
+            "build.sh should centralize the macOS symlink-skip guard for bundled "
+            "browser bundles"
+        )
+        assert ".local-browsers" in src, (
+            "build.sh must skip symlink normalization inside Playwright's bundled "
+            "browser tree on macOS"
+        )
+        assert ".app" in src and ".framework" in src, (
+            "build.sh must preserve nested macOS app/framework bundles during "
+            "symlink normalization"
+        )
+
 
 # ---------------------------------------------------------------------------
 # build_linux.sh  (Linux)
