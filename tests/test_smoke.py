@@ -544,7 +544,7 @@ class TestPrePushGate:
         """
         import ast
         import pathlib
-        src = (pathlib.Path(__file__).parent.parent / "ouroboros" / "tools" / "git.py").read_text()
+        src = (pathlib.Path(__file__).parent.parent / "ouroboros" / "tools" / "git.py").read_text(encoding="utf-8")
         tree = ast.parse(src)
         found_timeout = None
         for node in ast.walk(tree):
