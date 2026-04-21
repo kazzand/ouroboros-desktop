@@ -25,7 +25,9 @@ echo "--- Installing agent dependencies into python-standalone ---"
 python-standalone/bin/pip3 install -q -r requirements.txt
 
 echo "--- Installing Chromium for browser tools (bundled into python-standalone) ---"
-PLAYWRIGHT_BROWSERS_PATH=0 python-standalone/bin/python3 -m playwright install chromium
+# macOS bundles only the headless shell; the full Chromium app bundle trips
+# PyInstaller's nested-bundle codesign path on arm64 runners.
+PLAYWRIGHT_BROWSERS_PATH=0 python-standalone/bin/python3 -m playwright install --only-shell chromium
 
 echo "--- Normalizing python-standalone symlinks for PyInstaller ---"
 python3 - <<'PY'

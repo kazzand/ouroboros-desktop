@@ -139,6 +139,19 @@ class TestHasPlatformChromium:
         exe.write_text("stub", encoding="utf-8")
         assert _has_platform_chromium(tmp_path) is True
 
+    def test_headless_shell_dir_with_matching_executable_returns_true(self, tmp_path, monkeypatch):
+        """A bundled chromium_headless_shell payload should also count as usable."""
+        from ouroboros.tools import browser as bmod
+        monkeypatch.setattr(bmod.sys, "platform", "darwin", raising=False)
+        from ouroboros.tools.browser import _has_platform_chromium
+        chromium_dir = tmp_path / "chromium_headless_shell-1234"
+        chromium_dir.mkdir()
+        platform_dir = chromium_dir / "chrome-headless-shell-mac-arm64"
+        exe = platform_dir / "chrome-headless-shell"
+        exe.parent.mkdir(parents=True)
+        exe.write_text("stub", encoding="utf-8")
+        assert _has_platform_chromium(tmp_path) is True
+
 
 class TestSetPlaywrightBrowsersPathIfBundled:
     """_set_playwright_browsers_path_if_bundled: sets env var only when bundled Chromium found."""
@@ -166,6 +179,23 @@ class TestSetPlaywrightBrowsersPathIfBundled:
         exe = platform_dir / "Chromium.app" / "Contents" / "MacOS" / "Chromium"
         exe.parent.mkdir(parents=True)
         exe.write_text("stub", encoding="utf-8")  # real macOS executable path
+        fake_pw = types.SimpleNamespace(__file__=str(tmp_path / "__init__.py"))
+        monkeypatch.setitem(sys.modules, "playwright", fake_pw)
+        bmod._set_playwright_browsers_path_if_bundled()
+        assert os.environ.get("PLAYWRIGHT_BROWSERS_PATH") == "0"
+
+    def test_sets_zero_when_headless_shell_dir_matches(self, monkeypatch, tmp_path):
+        import os
+        monkeypatch.delenv("PLAYWRIGHT_BROWSERS_PATH", raising=False)
+        import ouroboros.tools.browser as bmod
+        monkeypatch.setattr(bmod.sys, "platform", "darwin", raising=False)
+        local_browsers = tmp_path / "driver" / "package" / ".local-browsers"
+        chromium_dir = local_browsers / "chromium_headless_shell-9999"
+        chromium_dir.mkdir(parents=True)
+        platform_dir = chromium_dir / "chrome-headless-shell-mac-arm64"
+        exe = platform_dir / "chrome-headless-shell"
+        exe.parent.mkdir(parents=True)
+        exe.write_text("stub", encoding="utf-8")
         fake_pw = types.SimpleNamespace(__file__=str(tmp_path / "__init__.py"))
         monkeypatch.setitem(sys.modules, "playwright", fake_pw)
         bmod._set_playwright_browsers_path_if_bundled()

@@ -1545,29 +1545,33 @@ Python runtime that carries all agent dependencies — and, from v4.40.3, the bu
 Chromium binary installed via `PLAYWRIGHT_BROWSERS_PATH=0 playwright install chromium`
 before PyInstaller runs; see *Bundled Chromium* paragraph below).
 
-**Bundled Chromium (build scripts v4.40.2+; runtime detection v4.40.3+):** Each build script invokes
-`playwright install chromium` inside `python-standalone` with `PLAYWRIGHT_BROWSERS_PATH`
-set to `0`, **before** PyInstaller packages the app. This directs Playwright to store
-the Chromium binary inside the playwright package directory
+**Bundled Chromium / headless shell (build scripts v4.40.2+; runtime detection v4.40.3+):**
+Each build script installs its Playwright browser payload inside `python-standalone`
+with `PLAYWRIGHT_BROWSERS_PATH` set to `0`, **before** PyInstaller packages the app.
+This stores the browser payload inside the playwright package directory
 (`driver/package/.local-browsers/`), which is already part of the `python-standalone`
-data tree bundled by PyInstaller. The exact shell syntax differs per platform:
+data tree bundled by PyInstaller. macOS now bundles **only the Chromium headless shell**
+because the full nested Chrome app bundle trips PyInstaller's macOS codesign path;
+Linux and Windows still bundle the regular Chromium payload. The exact shell syntax differs:
 
-- macOS/Linux (bash): `PLAYWRIGHT_BROWSERS_PATH=0 python-standalone/bin/python3 -m playwright install chromium`
+- macOS (bash): `PLAYWRIGHT_BROWSERS_PATH=0 python-standalone/bin/python3 -m playwright install --only-shell chromium`
+- Linux (bash): `PLAYWRIGHT_BROWSERS_PATH=0 python-standalone/bin/python3 -m playwright install chromium`
 - Windows (PowerShell): `$env:PLAYWRIGHT_BROWSERS_PATH = "0"; python-standalone\python.exe -m playwright install chromium`
 
 At runtime, `ouroboros/tools/browser.py::_set_playwright_browsers_path_if_bundled()`
 runs at module import time. It sets `PLAYWRIGHT_BROWSERS_PATH=0` **only** when
 `_has_platform_chromium(local_browsers)` returns `True` — meaning the
-`driver/package/.local-browsers/` directory inside the playwright package contains at
-least one `chromium-*` subdirectory **and** that subdirectory contains a
-platform-matching entry (`chrome-mac-*` on macOS, `chrome-linux*` on Linux,
-`chrome-win*` on Windows). This two-level check prevents false positives from
-foreign-platform payloads or partial downloads. Source/dev installs that already have
-Chromium in `~/.cache/ms-playwright/` are unaffected — they never trigger the check and
-continue using the standard cache path. If the environment variable is already set
+`driver/package/.local-browsers/` directory inside the playwright package contains a
+platform-matching browser payload with a real executable. Accepted layouts include the
+regular Chromium tree (`chromium-*` with `chrome-mac-*`, `chrome-linux*`, `chrome-win*`)
+and the headless-shell tree (`chromium_headless_shell-*` with
+`chrome-headless-shell-mac-*` on macOS). This two-level check prevents false positives
+from foreign-platform payloads or partial downloads. Source/dev installs that already
+have Chromium in `~/.cache/ms-playwright/` are unaffected — they never trigger the check
+and continue using the standard cache path. If the environment variable is already set
 explicitly, it is always respected. The result: browser tools (`browse_page`,
-`browser_action`, `analyze_screenshot`) work out of the box in all packaged builds with
-no additional download. **Linux caveat:** the Chromium binary is bundled, but some Linux hosts may
+`browser_action`, `analyze_screenshot`) still work out of the box in packaged builds
+with no additional download. **Linux caveat:** the Chromium binary is bundled, but some Linux hosts may
 still need native system libraries if those are not already present. The bundled
 Playwright CLI is inside the app archive, so use the bundled Python to install deps:
 ```

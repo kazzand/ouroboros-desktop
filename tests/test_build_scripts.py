@@ -39,12 +39,12 @@ def _find_pyinstaller_cmd_pos(src: str) -> int:
 # ---------------------------------------------------------------------------
 
 class TestBuildSh:
-    """build.sh must install Chromium with PLAYWRIGHT_BROWSERS_PATH=0 before PyInstaller."""
+    """build.sh must install the Chromium headless shell before PyInstaller."""
 
     def test_playwright_install_chromium_present(self):
         src = _read("build.sh")
-        assert "playwright install chromium" in src, (
-            "build.sh must call 'playwright install chromium'"
+        assert "playwright install --only-shell chromium" in src, (
+            "build.sh must call 'playwright install --only-shell chromium' on macOS"
         )
 
     def test_playwright_browsers_path_zero_set(self):
@@ -55,12 +55,12 @@ class TestBuildSh:
 
     def test_playwright_install_before_pyinstaller(self):
         src = _read("build.sh")
-        pw_pos = src.find("playwright install chromium")
+        pw_pos = src.find("playwright install --only-shell chromium")
         pi_pos = _find_pyinstaller_cmd_pos(src)
-        assert pw_pos != -1, "playwright install chromium not found in build.sh"
+        assert pw_pos != -1, "playwright install --only-shell chromium not found in build.sh"
         assert pi_pos != -1, "PyInstaller command not found in build.sh"
         assert pw_pos < pi_pos, (
-            "playwright install chromium must appear BEFORE PyInstaller in build.sh "
+            "playwright install --only-shell chromium must appear BEFORE PyInstaller in build.sh "
             f"(found at char {pw_pos}, PyInstaller cmd at {pi_pos})"
         )
 
