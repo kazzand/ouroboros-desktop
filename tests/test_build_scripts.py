@@ -184,37 +184,50 @@ class TestDockerfile:
             "playwright install-deps must appear BEFORE playwright install chromium in Dockerfile"
         )
 
-    def test_pip_install_before_playwright_install_deps(self):
-        """pip install must appear BEFORE playwright install-deps chromium — the
-        playwright Python package must be importable when install-deps runs."""
+    def test_dep_install_before_playwright_install_deps(self):
+        """Dependency install (uv sync, uv pip install, or pip install) must appear BEFORE
+        playwright install-deps chromium — the playwright Python package must
+        be importable when install-deps runs."""
         src = _read("Dockerfile")
-        pip_pos = src.find("pip install")
+        # Accept uv sync, uv pip install, and plain pip install
+        pip_pos = src.find("uv sync")
+        if pip_pos == -1:
+            pip_pos = src.find("uv pip install")
+        if pip_pos == -1:
+            pip_pos = src.find("pip install")
         deps_pos = src.find("playwright install-deps chromium")
-        assert pip_pos != -1, "pip install step not found in Dockerfile"
+        assert pip_pos != -1, "dependency install step not found in Dockerfile"
         assert deps_pos != -1, "playwright install-deps chromium not found in Dockerfile"
         assert pip_pos < deps_pos, (
-            "pip install must appear BEFORE playwright install-deps chromium in Dockerfile "
-            f"(pip at char {pip_pos}, install-deps at {deps_pos})"
+            "dependency install must appear BEFORE playwright install-deps chromium in Dockerfile "
+            f"(install at char {pip_pos}, install-deps at {deps_pos})"
         )
 
-    def test_pip_install_before_all_playwright_invocations(self):
-        """pip install must appear BEFORE every ``python3 -m playwright ...`` invocation
-        in the Dockerfile — both ``install-deps`` and ``install chromium``.
-        If *any* playwright invocation precedes pip install, ModuleNotFoundError occurs."""
+    def test_dep_install_before_all_playwright_invocations(self):
+        """Dependency install (uv sync, uv pip install, or pip install) must appear BEFORE
+        every ``python3 -m playwright ...`` invocation in the Dockerfile —
+        both ``install-deps`` and ``install chromium``.
+        If *any* playwright invocation precedes the install, ModuleNotFoundError occurs."""
         src = _read("Dockerfile")
-        pip_pos = src.find("pip install")
-        assert pip_pos != -1, "pip install step not found in Dockerfile"
+        # Accept uv sync, uv pip install, and plain pip install
+        pip_pos = src.find("uv sync")
+        if pip_pos == -1:
+            pip_pos = src.find("uv pip install")
+        if pip_pos == -1:
+            pip_pos = src.find("pip install")
+        assert pip_pos != -1, "dependency install step not found in Dockerfile"
 
         import re as _re
+        # Match both "python3 -m playwright" and "python -m playwright" (including "uv run python -m playwright")
         playwright_invocations = [
-            m.start() for m in _re.finditer(r"python3 -m playwright", src)
+            m.start() for m in _re.finditer(r"python3? -m playwright", src)
         ]
-        assert playwright_invocations, "No 'python3 -m playwright' invocations found in Dockerfile"
+        assert playwright_invocations, "No 'python(3) -m playwright' invocations found in Dockerfile"
 
         earliest_playwright = min(playwright_invocations)
         assert pip_pos < earliest_playwright, (
-            "pip install must appear BEFORE the earliest 'python3 -m playwright' invocation "
-            f"in the Dockerfile (pip at char {pip_pos}, earliest playwright at {earliest_playwright}). "
+            "dependency install must appear BEFORE the earliest 'python -m playwright' invocation "
+            f"in the Dockerfile (install at char {pip_pos}, earliest playwright at {earliest_playwright}). "
             f"Found {len(playwright_invocations)} playwright invocation(s) at positions: "
             f"{playwright_invocations}"
         )

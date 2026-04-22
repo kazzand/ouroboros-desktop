@@ -63,9 +63,8 @@ MANAGED_BUNDLE_PATHS = (
     ".gitignore",
     "BIBLE.md",
     "README.md",
-    "requirements.txt",
-    "requirements-launcher.txt",
     "pyproject.toml",
+    "uv.lock",
     "Makefile",
     "server.py",
     "ouroboros",
@@ -321,10 +320,10 @@ def _migrate_old_settings(context: BootstrapContext) -> None:
 def install_deps(context: BootstrapContext) -> None:
     """Install/update Python deps inside the embedded interpreter."""
     try:
-        requirements = context.repo_dir / "requirements.txt"
-        if requirements.exists():
+        pyproject = context.repo_dir / "pyproject.toml"
+        if pyproject.exists():
             context.hidden_run(
-                [context.embedded_python, "-m", "pip", "install", "-r", str(requirements)],
+                [context.embedded_python, "-m", "pip", "install", f"{context.repo_dir}[browser]"],
                 timeout=240,
                 capture_output=True,
             )

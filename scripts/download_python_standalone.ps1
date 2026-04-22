@@ -30,7 +30,7 @@ Remove-Item -Recurse -Force "_python_tmp"
 
 echo ""
 Write-Host "=== Installing agent dependencies ==="
-& "${Dest}\python.exe" -m pip install --quiet -r requirements.txt
+& "${Dest}\python.exe" -m pip install --quiet ".[browser]"
 
 echo ""
 Write-Host "=== Installing optional: local model support ==="

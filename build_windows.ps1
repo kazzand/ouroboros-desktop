@@ -8,6 +8,11 @@ $ArchiveName = "Ouroboros-${Version}-windows-x64.zip"
 
 Write-Host "=== Building Ouroboros for Windows (v${Version}) ==="
 
+if (-not (Get-Command uv -ErrorAction SilentlyContinue)) {
+    Write-Host "ERROR: uv not found. Install: https://docs.astral.sh/uv/getting-started/installation/"
+    exit 1
+}
+
 if (-not (Test-Path "python-standalone\python.exe")) {
     Write-Host "ERROR: python-standalone\ not found."
     Write-Host "Run first: powershell -ExecutionPolicy Bypass -File scripts/download_python_standalone.ps1"
@@ -15,10 +20,10 @@ if (-not (Test-Path "python-standalone\python.exe")) {
 }
 
 Write-Host "--- Installing launcher dependencies ---"
-python -m pip install -q -r requirements-launcher.txt
+uv pip install --system -q pywebview==5.4 "pythonnet==3.0.5" "clr_loader==0.2.7.post0" pyinstaller
 
 Write-Host "--- Installing agent dependencies into python-standalone ---"
-& "python-standalone\python.exe" -m pip install -q -r requirements.txt
+uv pip install --system --python "python-standalone\python.exe" -q ".[browser]"
 
 if (Test-Path "build") { Remove-Item -Recurse -Force "build" }
 if (Test-Path "dist") { Remove-Item -Recurse -Force "dist" }

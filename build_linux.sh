@@ -11,6 +11,11 @@ fi
 
 echo "=== Building Ouroboros for Linux (v${VERSION}) ==="
 
+if ! command -v uv >/dev/null 2>&1; then
+    echo "ERROR: uv not found. Install: https://docs.astral.sh/uv/getting-started/installation/"
+    exit 1
+fi
+
 if [ ! -f "python-standalone/bin/python3" ]; then
     echo "ERROR: python-standalone/ not found."
     echo "Run first: bash scripts/download_python_standalone.sh"
@@ -18,10 +23,10 @@ if [ ! -f "python-standalone/bin/python3" ]; then
 fi
 
 echo "--- Installing launcher dependencies ---"
-"$PYTHON_CMD" -m pip install -q -r requirements-launcher.txt
+uv pip install --system -q pywebview==5.4 pyinstaller
 
 echo "--- Installing agent dependencies into python-standalone ---"
-python-standalone/bin/pip3 install -q -r requirements.txt
+uv pip install --system --python python-standalone/bin/python3 -q ".[browser]"
 
 rm -rf build dist
 

@@ -10,22 +10,24 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     && rm -rf /var/lib/apt/lists/*
 
+# Install uv (fast Python package manager)
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+
 # Working directory
 ENV APP_HOME=/app
 WORKDIR ${APP_HOME}
 
-# Install Python dependencies
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-
-# Install all Playwright native system dependencies for Chromium (authoritative list from Playwright)
-RUN python3 -m playwright install-deps chromium
-
-# Install Playwright Chromium browser binary so browser tools work out of the box
-RUN PLAYWRIGHT_BROWSERS_PATH=0 python3 -m playwright install chromium
-
 # Copy application
 COPY . .
+
+# Install Python dependencies from lockfile (deterministic, includes browser extra)
+RUN uv sync --frozen --extra browser --no-dev
+
+# Install all Playwright native system dependencies for Chromium (authoritative list from Playwright)
+RUN uv run python -m playwright install-deps chromium
+
+# Install Playwright Chromium browser binary so browser tools work out of the box
+RUN PLAYWRIGHT_BROWSERS_PATH=0 uv run python -m playwright install chromium
 
 # Default environment
 ENV OUROBOROS_SERVER_HOST=0.0.0.0 \
@@ -34,4 +36,4 @@ ENV OUROBOROS_SERVER_HOST=0.0.0.0 \
 
 EXPOSE 8765
 
-ENTRYPOINT ["python", "server.py"]
+ENTRYPOINT ["uv", "run", "python", "server.py"]

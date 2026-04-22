@@ -541,12 +541,12 @@ def sync_runtime_dependencies(reason: str) -> Tuple[bool, str]:
         log.info("Skipping pip install in frozen (PyInstaller) mode — deps are bundled.")
         return True, "frozen:bundled"
 
-    req_path = REPO_DIR / "requirements.txt"
+    pyproject_path = REPO_DIR / "pyproject.toml"
     cmd: List[str] = [sys.executable, "-m", "pip", "install", "-q"]
     source = ""
-    if req_path.exists():
-        cmd += ["-r", str(req_path)]
-        source = f"requirements:{req_path}"
+    if pyproject_path.exists():
+        cmd += [f"{REPO_DIR}[browser]"]
+        source = f"pyproject:{pyproject_path}"
     else:
         cmd += ["openai>=1.0.0", "requests"]
         source = "fallback:minimal"

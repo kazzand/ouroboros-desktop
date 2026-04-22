@@ -1,4 +1,4 @@
-# Ouroboros v4.45.0 — Architecture & Reference
+# Ouroboros v4.46.0 — Architecture & Reference
 
 This document describes every component, page, button, API endpoint, and data flow.
 It is the single source of truth for how the system works. Keep it updated.
@@ -888,7 +888,7 @@ the constitutional guard is that the file itself must remain non-deletable.
 - **Logging**: structured logs written to `data/logs/a2a.log` (RotatingFileHandler, 2 MB × 3 backups).
 - **Client tools** (non-core, require `enable_tools("a2a_discover,a2a_send,a2a_status")`): `a2a_discover` fetches remote Agent Cards, `a2a_send` sends tasks and waits for results, `a2a_status` polls task status.
 - **Settings**: `A2A_ENABLED` (bool), `A2A_HOST` (default `127.0.0.1`), `A2A_PORT` (default `18800`), `A2A_MAX_CONCURRENT` (default `3`), `A2A_AGENT_NAME`, `A2A_AGENT_DESCRIPTION`, `A2A_TASK_TTL_HOURS` (default `24`). All changes require restart (all seven keys are in `server.py::_RESTART_REQUIRED_KEYS`; all included in `apply_settings_to_env` for consistency).
-- **Optional dependency**: `a2a-sdk[http-server]>=0.3.20` and `httpx` are in the `a2a` extra (`pip install 'ouroboros[a2a]'`), NOT in mandatory `install_requires` and NOT in `requirements.txt`. All four A2A modules (`a2a_server.py`, `a2a_executor.py`, `a2a_task_store.py`, `tools/a2a.py`) guard their top-level `from a2a.*` imports with `try/except ImportError` so the rest of Ouroboros starts cleanly when the extra is absent. `start_a2a_server` returns early with a warning if the SDK is missing. The test module (`tests/test_a2a_protocol.py`) uses `pytest.importorskip('a2a.types')` at the top so it skips cleanly when the extra is absent.
+- **Optional dependency**: `a2a-sdk[http-server]>=0.3.20` and `httpx` are in the `a2a` extra (`pip install 'ouroboros[a2a]'`), NOT in mandatory `install_requires` and NOT in base `[project.dependencies]`. All four A2A modules (`a2a_server.py`, `a2a_executor.py`, `a2a_task_store.py`, `tools/a2a.py`) guard their top-level `from a2a.*` imports with `try/except ImportError` so the rest of Ouroboros starts cleanly when the extra is absent. `start_a2a_server` returns early with a warning if the SDK is missing. The test module (`tests/test_a2a_protocol.py`) uses `pytest.importorskip('a2a.types')` at the top so it skips cleanly when the extra is absent.
 - **Concurrency safety**: `supervisor/workers.py` exposes a module-level `_chat_agent_lock` (`threading.Lock`) that `handle_chat_direct` acquires before touching the shared `_chat_agent` singleton. This serializes all callers — A2A tasks (via `asyncio.to_thread`) and Web UI direct-chat — against the agent's mutable per-call state (`_busy`, `_current_chat_id`, `_current_task_id`). A2A tasks are accepted up to `A2A_MAX_CONCURRENT` (semaphore) but their supervisor dispatches are serialized through this shared lock.
 - **Client auth**: `A2A_CLIENT_PASSWORD` env var (not a settings key — read at call time). When set, `a2a_discover`, `a2a_send`, and `a2a_status` pass it as HTTP Basic auth (`ouroboros:<password>`) so they can reach remote A2A servers protected by `NetworkAuthGate` / `OUROBOROS_NETWORK_PASSWORD`.
 - **Memory isolation**: A2A traffic uses negative `chat_id` values (base `-1001`, decremented per task) to distinguish it from human dialogue. `supervisor/message_bus.py::broadcast` and `send_message` check `chat_id >= 0` before WebSocket broadcast; `ouroboros/server_history_api.py` filters negative `chat_id` from `/api/chat/history` replay; `ouroboros/consolidator.py::_read_chat_entries` skips `chat_id < 0` entries to prevent A2A traffic from contaminating `dialogue_blocks.json`; `ouroboros/memory.py::chat_history` (exposed as the `chat_history` tool) filters `chat_id < 0` entries so A2A traffic never appears in the agent's dialogue tool results. Raw A2A entries may still be present in `data/logs/chat.jsonl` (written by `log_chat`); all consumer paths above guard against them. Structured A2A audit logs also go to `data/logs/a2a.log`.
@@ -1522,8 +1522,9 @@ Four-tier GitHub Actions workflow:
 | Build | Tag `v*` (after full-test + integration-test pass) | Matrix: PyInstaller build → `.dmg` / `.tar.gz` / `.zip` + GitHub Release | ~15 min |
 
 Path filters for branch pushes: `ouroboros/**`, `supervisor/**`, `server.py`, `tests/**`,
-`web/**`, `requirements.txt`, `pyproject.toml`, `.github/workflows/**`, `build.sh`,
-`build_linux.sh`, `build_windows.ps1`, `Dockerfile`, `scripts/**`, `VERSION`, `README.md`.
+`web/**`, `pyproject.toml`, `uv.lock`, `.github/workflows/**`, `build.sh`,
+`build_linux.sh`, `build_windows.ps1`, `Dockerfile`, `scripts/**`, `VERSION`, `README.md`,
+`launcher.py`.
 Tag pushes (`v*`) always fire regardless of paths.
 
 ### Build scripts
@@ -1541,7 +1542,7 @@ websockets, dulwich, huggingface_hub, and the rest — ships via the bundled `py
 data tree and is resolved at runtime by the embedded interpreter. Data bundles include
 `ouroboros/`, `supervisor/`, `web/`, `prompts/`, `docs/`, `assets/`, `tests/`,
 `server.py`, `BIBLE.md`, `README.md`, `VERSION`, `pyproject.toml`, `Makefile`,
-`requirements.txt`, `requirements-launcher.txt`, `.gitignore`, and `python-standalone/` (the embedded
+`uv.lock`, `.gitignore`, and `python-standalone/` (the embedded
 Python runtime that carries all agent dependencies — and, from v4.40.3, the bundled
 Chromium binary installed via `PLAYWRIGHT_BROWSERS_PATH=0 playwright install chromium`
 before PyInstaller runs; see *Bundled Chromium* paragraph below).
@@ -1586,7 +1587,7 @@ installs.
 ### Docker (`Dockerfile`)
 
 ```
-python:3.10-slim + git → pip install requirements → playwright install-deps chromium → playwright install chromium → python server.py
+python:3.10-slim + git + uv → COPY all → uv sync --frozen --extra browser --no-dev → playwright install-deps chromium → playwright install chromium → uv run python server.py
 Binds 0.0.0.0:8765, sets OUROBOROS_FILE_BROWSER_DEFAULT=/app.
 ```
 

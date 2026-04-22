@@ -51,7 +51,7 @@ rm -rf _python_tmp
 
 echo ""
 echo "=== Installing agent dependencies ==="
-"${DEST}/bin/pip3" install --quiet -r requirements.txt
+"${DEST}/bin/pip3" install --quiet ".[browser]"
 
 echo ""
 echo "=== Done ==="
