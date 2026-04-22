@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ouroboros"
-version = "4.44.0"
+version = "4.45.0"
 description = "Self-creating AI agent with constitution, background consciousness, and persistent identity"
 readme = "README.md"
 license = {text = "MIT"}
@@ -58,7 +58,10 @@ all = ["claude-agent-sdk>=0.1.60", "a2a-sdk[http-server]>=0.3.20", "httpx", "pla
 testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_functions = ["test_*"]
-addopts = "-q --tb=short"
+addopts = "-q --tb=short -m 'not integration'"
+markers = [
+    "integration: real API calls to LLM providers (skipped by default; run with -m integration)",
+]
 
 [tool.setuptools]
 py-modules = ["server"]

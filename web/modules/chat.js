@@ -75,7 +75,7 @@ export function initChat({ ws, state, updateUnreadBadge }) {
                     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
                 </button>
                 <input type="file" id="chat-file-input" class="chat-file-input-hidden" accept="*/*">
-                <textarea id="chat-input" placeholder="Message Ouroboros..." rows="1"></textarea>
+                <textarea id="chat-input" placeholder="Message Ouroboros..." rows="1" autocorrect="off" autocapitalize="off" spellcheck="false"></textarea>
                 <div class="chat-send-group">
                     <button class="chat-send-inline" id="chat-send" title="Send message">Send</button>
                     <button class="chat-send-chevron" id="chat-send-chevron" type="button" title="More send options" aria-label="More send options">
@@ -135,6 +135,41 @@ export function initChat({ ws, state, updateUnreadBadge }) {
             attachmentPreview.innerHTML = '';
             requestAnimationFrame(() => updateMessagesPadding());
         });
+    });
+
+    // Clipboard paste: stage an image from Cmd+V / Ctrl+V the same way as the
+    // paperclip attachment — no upload until sendMessage().
+    input.addEventListener('paste', (e) => {
+        const items = e.clipboardData && e.clipboardData.items;
+        if (!items) return;
+        for (const item of items) {
+            if (item.type.startsWith('image/')) {
+                e.preventDefault();
+                const blob = item.getAsFile();
+                if (!blob) return;
+                const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+                const ext = blob.type.split('/')[1] || 'png';
+                const file = new File([blob], `clipboard-${ts}.${ext}`, { type: blob.type });
+                pendingAttachment = { file, display_name: file.name };
+                attachmentPreview.classList.add('visible');
+                attachmentPreview.innerHTML = `
+                    <span class="attach-badge">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><polyline points="13 2 13 9 20 9"/></svg>
+                        <span class="attach-name">${escapeHtml(file.name)}</span>
+                        <button class="attach-remove" type="button" title="Remove">×</button>
+                    </span>
+                `;
+                requestAnimationFrame(() => updateMessagesPadding());
+                attachmentPreview.querySelector('.attach-remove').addEventListener('click', () => {
+                    pendingAttachment = null;
+                    attachmentPreview.classList.remove('visible');
+                    attachmentPreview.innerHTML = '';
+                    requestAnimationFrame(() => updateMessagesPadding());
+                });
+                return; // handled — don't let the browser paste image data as text
+            }
+        }
+        // Not an image — let the default paste (text) proceed.
     });
 
     // Set to true during syncHistory pass 1 to suppress premature DOM insertion of

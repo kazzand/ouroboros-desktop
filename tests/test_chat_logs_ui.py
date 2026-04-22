@@ -1001,3 +1001,38 @@ def test_sync_history_sweep_skips_invisible_completed_cards():
         "The final sweep guard must also check ts.completed so in-progress tasks "
         "without cardVisible are still appended"
     )
+
+
+# ─── Autocorrect / spellcheck suppression ───────────────────────────
+
+def test_chat_input_disables_autocorrect():
+    """#chat-input textarea must have autocorrect/autocapitalize/spellcheck off."""
+    source = _read("web/modules/chat.js")
+    assert 'autocorrect="off"' in source, (
+        "chat-input textarea must set autocorrect='off'"
+    )
+    assert 'autocapitalize="off"' in source, (
+        "chat-input textarea must set autocapitalize='off'"
+    )
+    assert 'spellcheck="false"' in source, (
+        "chat-input textarea must set spellcheck='false'"
+    )
+
+
+# ─── Clipboard image paste ──────────────────────────────────────────
+
+def test_clipboard_paste_handler_exists():
+    """chat.js must have a paste event listener that intercepts image/* items."""
+    source = _read("web/modules/chat.js")
+    assert "addEventListener('paste'" in source or 'addEventListener("paste"' in source, (
+        "chat.js must register a paste event listener for clipboard image support"
+    )
+    assert "image/" in source, (
+        "paste handler must check for image/* MIME type"
+    )
+    assert "pendingAttachment" in source, (
+        "paste handler must set pendingAttachment for the staged image"
+    )
+    assert "clipboard-" in source, (
+        "paste handler must generate a clipboard-prefixed filename"
+    )
