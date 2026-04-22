@@ -1,8 +1,9 @@
-# Ouroboros CI — Three-tier cross-platform testing and release pipeline
+# Ouroboros CI — Four-tier cross-platform testing and release pipeline
 #
 # Tier 1: Every push to ouroboros (code paths) → Ubuntu-only tests (~1 min)
 # Tier 2: Push to ouroboros-stable / manual / tag → Full 3-OS matrix (~5 min)
-# Tier 3: Tag v* → Full matrix + build artifacts + GitHub Release (~15 min)
+# Tier 2.5: Push to ouroboros-stable / manual / tag → Provider integration tests (~1 min)
+# Tier 3: Tag v* → Full matrix + integration + build artifacts + GitHub Release (~15 min)
 
 name: CI
 
