@@ -26,16 +26,33 @@ def _get_llm_client():
 
 
 def _assert_basic_response(result, expected_provider=None):
-    """Shared assertion: non-empty reply, token usage present."""
-    text = result.get("text", "") or result.get("content", "")
+    """Shared assertion: non-empty reply, token usage present.
+
+    In v4.44.0+ LLMClient.chat() returns a (msg_dict, usage_dict) tuple,
+    not a flat dict.  Handle both shapes for forward compatibility.
+    """
+    if isinstance(result, tuple):
+        msg, usage = result
+    else:
+        msg, usage = result, result.get("usage", {})
+
+    # Extract text from the message dict
+    text = ""
+    if isinstance(msg, dict):
+        text = msg.get("content", "") or ""
+        # content may be a list of blocks (Anthropic style)
+        if isinstance(text, list):
+            text = " ".join(
+                b.get("text", "") for b in text if isinstance(b, dict)
+            )
     assert text, f"Empty response from LLM: {result}"
 
-    usage = result.get("usage", {})
+    assert isinstance(usage, dict), f"Usage is not a dict: {type(usage)}"
     assert usage.get("prompt_tokens", 0) > 0, f"No prompt_tokens in usage: {usage}"
     assert usage.get("completion_tokens", 0) > 0, f"No completion_tokens in usage: {usage}"
 
     if expected_provider:
-        resolved = usage.get("provider") or usage.get("resolved_model", "")
+        resolved = usage.get("provider", "") or usage.get("resolved_model", "") or ""
         assert expected_provider.lower() in resolved.lower(), (
             f"Expected provider '{expected_provider}' in resolved model, "
             f"got '{resolved}'"
