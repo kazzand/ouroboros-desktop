@@ -1,4 +1,4 @@
-# Ouroboros v4.46.1 — Architecture & Reference
+# Ouroboros v4.47.0 — Architecture & Reference
 
 This document describes every component, page, button, API endpoint, and data flow.
 It is the single source of truth for how the system works. Keep it updated.
@@ -94,7 +94,7 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on configurable host:port (de
 
 # Build & CI (not part of runtime)
 .github/workflows/ci.yml     ← Four-tier CI (quick/full/integration/release)
-build.sh                      ← macOS build (PyInstaller → .dmg)
+build.sh                      ← macOS build (PyInstaller → .dmg; optional codesign + notarization)
 build_linux.sh                ← Linux build (PyInstaller → .tar.gz)
 build_windows.ps1             ← Windows build (PyInstaller → .zip)
 Dockerfile                    ← Docker image (web UI runtime)
@@ -1534,6 +1534,17 @@ Tag pushes (`v*`) always fire regardless of paths.
 | `build.sh` | macOS | `dist/Ouroboros-{VERSION}.dmg` (optional signing + notarization) |
 | `build_linux.sh` | Linux | `dist/Ouroboros-<VERSION>-linux-<arch>.tar.gz` |
 | `build_windows.ps1` | Windows | `dist/Ouroboros-<VERSION>-windows-x64.zip` |
+
+**macOS signing in CI (v4.47.0+):** When GitHub repository secrets
+`BUILD_CERTIFICATE_BASE64`, `P12_PASSWORD`, `KEYCHAIN_PASSWORD`, and `APPLE_TEAM_ID` are
+configured, the macOS build job in `.github/workflows/ci.yml` imports the Developer ID
+certificate into a temporary keychain and runs `build.sh` with `SIGN_IDENTITY` extracted
+from the keychain. If `APPLE_ID` and `APPLE_APP_SPECIFIC_PASSWORD` are also present,
+`build.sh` additionally submits the DMG to Apple's notary service via `xcrun notarytool`
+and staples the ticket. Without any signing secrets, the macOS build falls back to
+`OUROBOROS_SIGN=0` (unsigned). The temporary keychain is deleted unconditionally via an
+`always()` post-step. `build.sh` accepts `SIGN_IDENTITY` as an env-var override,
+falling back to a hardcoded local-dev default when unset.
 
 All three use PyInstaller with `launcher.py` as the packaged entry point (which spawns
 `server.py` as a subprocess). Hidden imports are limited to `webview` and `ouroboros.config`

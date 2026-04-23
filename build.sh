@@ -1,10 +1,12 @@
 #!/bin/bash
 set -e
 
-SIGN_IDENTITY="Developer ID Application: Ian Mironov (WHY6PAKA5V)"
-NOTARYTOOL_PROFILE="ouroboros-notarize"
+# Signing identity: override via env for CI, or fall back to local default.
+# Set OUROBOROS_SIGN=0 to skip signing entirely.
+SIGN_IDENTITY="${SIGN_IDENTITY:-Developer ID Application: Ian Mironov (WHY6PAKA5V)}"
 ENTITLEMENTS="entitlements.plist"
 SIGN_MODE="${OUROBOROS_SIGN:-1}"
+NOTARIZED=0
 
 APP_PATH="dist/Ouroboros.app"
 DMG_NAME="Ouroboros-$(cat VERSION | tr -d '[:space:]').dmg"
@@ -112,13 +114,31 @@ if [ "$SIGN_MODE" != "0" ]; then
     codesign -s "$SIGN_IDENTITY" --timestamp "$DMG_PATH"
 fi
 
+if [ "$SIGN_MODE" != "0" ] && [ -n "${APPLE_ID:-}" ] && [ -n "${APPLE_TEAM_ID:-}" ] && [ -n "${APPLE_APP_SPECIFIC_PASSWORD:-}" ]; then
+    echo ""
+    echo "=== Notarizing DMG ==="
+    xcrun notarytool submit "$DMG_PATH" \
+        --apple-id "$APPLE_ID" \
+        --team-id "$APPLE_TEAM_ID" \
+        --password "$APPLE_APP_SPECIFIC_PASSWORD" \
+        --wait
+    echo "--- Stapling notarization ticket ---"
+    xcrun stapler staple "$DMG_PATH"
+    NOTARIZED=1
+    echo "Notarization complete"
+fi
+
 echo ""
 echo "=== Done ==="
 if [ "$SIGN_MODE" != "0" ]; then
     echo "Signed app: $APP_PATH"
     echo "Signed DMG: $DMG_PATH"
+    if [ "$NOTARIZED" = "1" ]; then
+        echo "Notarized: yes"
+    else
+        echo "Notarized: no"
+    fi
 else
     echo "Unsigned app: $APP_PATH"
     echo "Unsigned DMG: $DMG_PATH"
 fi
-echo "(Not notarized — users need right-click → Open on first launch)"

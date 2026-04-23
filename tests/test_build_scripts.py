@@ -231,3 +231,133 @@ class TestDockerfile:
             f"Found {len(playwright_invocations)} playwright invocation(s) at positions: "
             f"{playwright_invocations}"
         )
+
+
+# ──────────────────────────────────────────────────────────────────────
+# macOS signing contracts (v4.47.0)
+# ──────────────────────────────────────────────────────────────────────
+
+class TestMacOSSigning:
+    """Verify that build.sh and CI workflow support conditional signing."""
+
+    def test_build_sh_sign_identity_from_env(self):
+        """SIGN_IDENTITY must accept an env-var override (not just hardcoded)."""
+        src = _read("build.sh")
+        assert "${SIGN_IDENTITY:-" in src, (
+            "build.sh must use ${SIGN_IDENTITY:-...} so CI can override the identity"
+        )
+
+    def test_build_sh_notarytool_conditional(self):
+        """Notarization must only run when APPLE_ID is set."""
+        src = _read("build.sh")
+        assert "xcrun notarytool" in src, "build.sh must contain notarytool invocation"
+        assert "APPLE_ID" in src, "build.sh notarization must check for APPLE_ID"
+        assert "APPLE_APP_SPECIFIC_PASSWORD" in src, (
+            "build.sh notarization must use APPLE_APP_SPECIFIC_PASSWORD"
+        )
+
+    def test_build_sh_notarization_summary_uses_flag(self):
+        """Notarization summary must use a flag set after successful notarization, not APPLE_ID presence."""
+        src = _read("build.sh")
+        assert "NOTARIZED=1" in src, "build.sh must set NOTARIZED=1 after successful notarization"
+        assert 'NOTARIZED" = "1"' in src or "NOTARIZED\" = \"1\"" in src, (
+            "build.sh summary must check the NOTARIZED flag, not just APPLE_ID presence"
+        )
+
+    def test_build_sh_stapler(self):
+        """After notarization, the DMG must be stapled."""
+        src = _read("build.sh")
+        assert "xcrun stapler staple" in src, "build.sh must staple after notarization"
+
+    def test_ci_keychain_import_step(self):
+        """CI must have a certificate import step for macOS."""
+        src = _read(".github/workflows/ci.yml")
+        assert "Import Apple signing certificate" in src
+        assert "security create-keychain" in src
+        assert "security import" in src
+        assert "BUILD_CERTIFICATE_BASE64" in src
+
+    def test_ci_base64_decode_portable(self):
+        """Certificate decode must use a portable method (not GNU base64 flags)."""
+        src = _read(".github/workflows/ci.yml")
+        # Must NOT use GNU-style --decode -o (broken on macOS BSD base64)
+        assert "base64 --decode -o" not in src, (
+            "CI must not use GNU-style 'base64 --decode -o' — macOS uses BSD base64"
+        )
+
+    def test_ci_identity_no_double_prefix(self):
+        """SIGN_IDENTITY must not prepend 'Developer ID Application:' on top of sed output."""
+        src = _read(".github/workflows/ci.yml")
+        # The sed extraction already returns the full identity string including prefix.
+        # Wrapping it in "Developer ID Application: $(...)" would double the prefix.
+        assert 'SIGN_IDENTITY="Developer ID Application: $(' not in src, (
+            "CI must not prepend 'Developer ID Application:' — sed already extracts the full identity"
+        )
+
+    def test_ci_identity_empty_check(self):
+        """CI must fail explicitly if identity extraction returns empty."""
+        src = _read(".github/workflows/ci.yml")
+        assert 'if [ -z "$SIGN_IDENTITY" ]' in src, (
+            "CI must check for empty SIGN_IDENTITY after extraction"
+        )
+
+    def test_ci_signing_conditional(self):
+        """macOS build step must be conditional: sign if secrets present, skip otherwise."""
+        src = _read(".github/workflows/ci.yml")
+        assert "OUROBOROS_SIGN=0" in src, (
+            "CI must fall back to unsigned build when secrets are absent"
+        )
+        assert "Signing certificate detected" in src or "codesign" in src.lower(), (
+            "CI must have a signing path when secrets are present"
+        )
+
+    def test_ci_uses_secrets_context_for_condition(self):
+        """Certificate import step must use secrets.* not env.* in its if condition."""
+        src = _read(".github/workflows/ci.yml")
+        # env.BUILD_CERTIFICATE_BASE64 is not available in step-level if conditions
+        assert "secrets.BUILD_CERTIFICATE_BASE64" in src, (
+            "CI must use secrets.BUILD_CERTIFICATE_BASE64 in the step if condition"
+        )
+
+    def test_ci_import_gates_on_full_secret_set(self):
+        """Import step must gate on ALL required signing secrets, not just the certificate."""
+        src = _read(".github/workflows/ci.yml")
+        # Find the import step's if condition
+        import_idx = src.find("Import Apple signing certificate")
+        assert import_idx != -1, "Import step not found"
+        # The if: line is nearby — check that it gates on all four secrets
+        region = src[import_idx:import_idx + 500]
+        for secret in ["secrets.BUILD_CERTIFICATE_BASE64", "secrets.P12_PASSWORD",
+                       "secrets.KEYCHAIN_PASSWORD", "secrets.APPLE_TEAM_ID"]:
+            assert secret in region, (
+                f"Import step if-condition must gate on {secret} to prevent "
+                f"partial-secret failures"
+            )
+
+    def test_ci_build_step_gates_on_full_secret_set(self):
+        """Build macOS app signing branch must gate on ALL required secrets."""
+        src = _read(".github/workflows/ci.yml")
+        build_idx = src.find("Build macOS app")
+        assert build_idx != -1, "Build macOS app step not found"
+        # The shell if-branch is within ~800 chars after the step name
+        region = src[build_idx:build_idx + 800]
+        for var in ["BUILD_CERTIFICATE_BASE64", "P12_PASSWORD",
+                    "KEYCHAIN_PASSWORD", "APPLE_TEAM_ID"]:
+            assert var in region, (
+                f"Build macOS app signing branch must check {var} to prevent "
+                f"entering the signing path when the keychain was never created"
+            )
+
+    def test_ci_keychain_cleanup(self):
+        """CI must clean up the temporary keychain unconditionally."""
+        src = _read(".github/workflows/ci.yml")
+        assert "Cleanup keychain" in src
+        assert "security delete-keychain" in src
+        assert "always()" in src
+
+    def test_ci_notarization_secrets_passed(self):
+        """CI macOS build step must pass notarization env vars."""
+        src = _read(".github/workflows/ci.yml")
+        assert "APPLE_ID" in src
+        assert "APPLE_TEAM_ID" in src
+        assert "APPLE_APP_SPECIFIC_PASSWORD" in src

@@ -4,6 +4,7 @@
 # Tier 2: Push to ouroboros-stable / manual / tag → Full 3-OS matrix (~5 min)
 # Tier 2.5: Push to ouroboros-stable / manual / tag → Provider integration tests (~1 min)
 # Tier 3: Tag v* → Full matrix + integration + build artifacts + GitHub Release (~15 min)
+#         macOS build is signed + notarized when Apple secrets are present; unsigned otherwise.
 
 name: CI
 
@@ -139,10 +140,73 @@ jobs:
         shell: pwsh
         run: .\scripts\download_python_standalone.ps1
 
-      # —— macOS build ——
+      # —— macOS: import signing certificate (optional) ——
+      - name: Import Apple signing certificate
+        if: matrix.os == 'macos-latest' && secrets.BUILD_CERTIFICATE_BASE64 != '' && secrets.P12_PASSWORD != '' && secrets.KEYCHAIN_PASSWORD != '' && secrets.APPLE_TEAM_ID != ''
+        env:
+          BUILD_CERTIFICATE_BASE64: ${{ secrets.BUILD_CERTIFICATE_BASE64 }}
+          P12_PASSWORD: ${{ secrets.P12_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        run: |
+          CERTIFICATE_PATH="$RUNNER_TEMP/build_certificate.p12"
+          KEYCHAIN_PATH="$RUNNER_TEMP/app-signing.keychain-db"
+
+          python3 -c "import base64,sys,os; sys.stdout.buffer.write(base64.b64decode(os.environ['BUILD_CERTIFICATE_BASE64']))" > "$CERTIFICATE_PATH"
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+          security import "$CERTIFICATE_PATH" -P "$P12_PASSWORD" -A \
+            -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          security set-key-partition-list -S apple-tool:,apple: \
+            -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+          security list-keychains -d user -s "$KEYCHAIN_PATH" login.keychain-db
+
+          echo "✅ Certificate imported into temporary keychain"
+
+      # —— macOS build (signed if certificate present, unsigned otherwise) ——
       - name: Build macOS app
         if: matrix.os == 'macos-latest'
-        run: OUROBOROS_SIGN=0 bash build.sh
+        env:
+          BUILD_CERTIFICATE_BASE64: ${{ secrets.BUILD_CERTIFICATE_BASE64 }}
+          P12_PASSWORD: ${{ secrets.P12_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+        run: |
+          if [ -n "${BUILD_CERTIFICATE_BASE64:-}" ] && [ -n "${P12_PASSWORD:-}" ] && [ -n "${KEYCHAIN_PASSWORD:-}" ] && [ -n "${APPLE_TEAM_ID:-}" ]; then
+            echo "Signing certificate detected — building with codesign + notarization"
+            SIGN_IDENTITY="$(
+              security find-identity -v -p codesigning "$RUNNER_TEMP/app-signing.keychain-db" \
+              | grep "Developer ID Application" | head -1 \
+              | sed 's/.*"\(.*\)"/\1/'
+            )"
+            if [ -z "$SIGN_IDENTITY" ]; then
+              echo "ERROR: No Developer ID Application identity found in keychain"
+              exit 1
+            fi
+            echo "Using identity: $SIGN_IDENTITY"
+            export SIGN_IDENTITY
+            export APPLE_ID
+            export APPLE_TEAM_ID
+            export APPLE_APP_SPECIFIC_PASSWORD
+            bash build.sh
+          else
+            echo "No signing secrets — building unsigned"
+            OUROBOROS_SIGN=0 bash build.sh
+          fi
+
+      # —— macOS: cleanup keychain ——
+      - name: Cleanup keychain
+        if: matrix.os == 'macos-latest' && always()
+        run: |
+          KEYCHAIN_PATH="$RUNNER_TEMP/app-signing.keychain-db"
+          if [ -f "$KEYCHAIN_PATH" ]; then
+            security delete-keychain "$KEYCHAIN_PATH"
+          fi
 
       # —— Linux build ——
       - name: Build Linux binary
