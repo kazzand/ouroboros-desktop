@@ -311,13 +311,51 @@ class TestMacOSSigning:
             "CI must have a signing path when secrets are present"
         )
 
-    def test_ci_uses_secrets_context_for_condition(self):
-        """Certificate import step must use secrets.* not env.* in its if condition."""
+    def test_ci_uses_env_context_for_condition(self):
+        """Certificate import step must use env.* (not secrets.*) in its if condition.
+
+        GitHub Actions does not allow secrets.* in step-level if expressions —
+        the workflow file fails to parse with 'Unrecognized named-value: secrets'.
+        Signing secrets are mapped at the job level, then env.* is used in step if.
+        """
         src = _read(".github/workflows/ci.yml")
-        # env.BUILD_CERTIFICATE_BASE64 is not available in step-level if conditions
-        assert "secrets.BUILD_CERTIFICATE_BASE64" in src, (
-            "CI must use secrets.BUILD_CERTIFICATE_BASE64 in the step if condition"
+        assert "env.BUILD_CERTIFICATE_BASE64" in src, (
+            "CI must use env.BUILD_CERTIFICATE_BASE64 in the step if condition"
         )
+        # Verify secrets are NOT used directly in if conditions.
+        # Parse full if-blocks including multiline continuations (indented lines
+        # following an if: that don't start a new YAML key).
+        lines = src.splitlines()
+        in_if = False
+        if_block = []
+        for line in lines:
+            stripped = line.strip()
+            if stripped.startswith("if:"):
+                # Flush previous if-block
+                if in_if and if_block:
+                    full = " ".join(if_block)
+                    assert "secrets." not in full, (
+                        f"secrets.* must not appear in step if-conditions: {full[:200]}"
+                    )
+                in_if = True
+                if_block = [stripped]
+            elif in_if:
+                # Continuation: indented and not a new YAML key
+                if stripped and not stripped.endswith(":") and not stripped.startswith("- "):
+                    if_block.append(stripped)
+                else:
+                    full = " ".join(if_block)
+                    assert "secrets." not in full, (
+                        f"secrets.* must not appear in step if-conditions: {full[:200]}"
+                    )
+                    in_if = False
+                    if_block = []
+        # Flush final block
+        if in_if and if_block:
+            full = " ".join(if_block)
+            assert "secrets." not in full, (
+                f"secrets.* must not appear in step if-conditions: {full[:200]}"
+            )
 
     def test_ci_import_gates_on_full_secret_set(self):
         """Import step must gate on ALL required signing secrets, not just the certificate."""
@@ -327,11 +365,31 @@ class TestMacOSSigning:
         assert import_idx != -1, "Import step not found"
         # The if: line is nearby — check that it gates on all four secrets
         region = src[import_idx:import_idx + 500]
-        for secret in ["secrets.BUILD_CERTIFICATE_BASE64", "secrets.P12_PASSWORD",
-                       "secrets.KEYCHAIN_PASSWORD", "secrets.APPLE_TEAM_ID"]:
-            assert secret in region, (
-                f"Import step if-condition must gate on {secret} to prevent "
+        for env_var in ["env.BUILD_CERTIFICATE_BASE64", "env.P12_PASSWORD",
+                       "env.KEYCHAIN_PASSWORD", "env.APPLE_TEAM_ID"]:
+            assert env_var in region, (
+                f"Import step if-condition must gate on {env_var} to prevent "
                 f"partial-secret failures"
+            )
+
+    def test_ci_signing_secrets_at_job_level(self):
+        """Signing secrets must be in the build job's env block, not step-level.
+
+        Step-level env vars are NOT available to that step's if: condition
+        in GitHub Actions. Secrets must be mapped at job level.
+        """
+        src = _read(".github/workflows/ci.yml")
+        # Find the build job section and its env block (before steps:)
+        build_idx = src.find("  build:")
+        assert build_idx != -1, "build job not found"
+        steps_idx = src.find("    steps:", build_idx)
+        assert steps_idx != -1, "steps: not found in build job"
+        job_header = src[build_idx:steps_idx]
+        for secret_name in ["BUILD_CERTIFICATE_BASE64", "P12_PASSWORD",
+                            "KEYCHAIN_PASSWORD", "APPLE_TEAM_ID"]:
+            assert secret_name in job_header, (
+                f"Signing secret {secret_name} must be in build job env block "
+                f"(before steps:) so step if: conditions can read env.*"
             )
 
     def test_ci_build_step_gates_on_full_secret_set(self):
