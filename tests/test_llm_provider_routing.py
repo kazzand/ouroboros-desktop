@@ -76,6 +76,45 @@ def test_build_remote_kwargs_normalizes_tool_descriptions_for_openrouter():
     assert kwargs["tools"][0]["function"]["description"] == "first half second half"
 
 
+def test_build_remote_kwargs_requests_reasoning_continuity_from_openrouter():
+    client = LLMClient()
+    target = client._resolve_remote_target("google/gemini-3-pro-preview")
+
+    kwargs = client._build_remote_kwargs(
+        target,
+        [{"role": "user", "content": "hi"}],
+        "high",
+        512,
+        "auto",
+        None,
+        None,
+    )
+
+    assert kwargs["extra_body"]["reasoning"] == {"effort": "high", "exclude": False}
+
+
+def test_summarize_reasoning_payload_is_log_safe():
+    from ouroboros.llm import summarize_reasoning_payload
+
+    summary = summarize_reasoning_payload({
+        "reasoning": "secret chain of thought",
+        "reasoning_details": [
+            {"type": "reasoning.encrypted", "data": "opaque-provider-payload"},
+            {"type": "reasoning.summary", "summary": "short"},
+            {"type": "reasoning.text", "text": "private"},
+        ],
+    })
+
+    assert summary["has_reasoning"] is True
+    assert summary["reasoning_chars"] == len("secret chain of thought")
+    assert summary["reasoning_details_count"] == 3
+    assert summary["reasoning_encrypted_blocks"] == 1
+    assert summary["reasoning_summary_blocks"] == 1
+    assert summary["reasoning_text_blocks"] == 1
+    assert "secret chain of thought" not in repr(summary)
+    assert "opaque-provider-payload" not in repr(summary)
+
+
 def test_build_remote_kwargs_deduplicates_tool_names_for_openrouter():
     client = LLMClient()
     target = client._resolve_remote_target("anthropic/claude-sonnet-4.6")

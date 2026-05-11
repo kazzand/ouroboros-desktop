@@ -112,6 +112,32 @@ def test_handle_text_response_keeps_full_reasoning_note():
     assert updated["reasoning_notes"] == [content]
 
 
+def test_assistant_tool_context_preserves_openrouter_reasoning_fields():
+    from ouroboros.loop import _assistant_tool_context_message
+
+    tool_calls = [{"id": "call_1", "type": "function", "function": {"name": "repo_read", "arguments": "{}"}}]
+    reasoning_details = [
+        {
+            "type": "reasoning.encrypted",
+            "data": "opaque-provider-payload",
+            "id": "reasoning-1",
+        }
+    ]
+    msg = {
+        "role": "assistant",
+        "content": None,
+        "tool_calls": tool_calls,
+        "reasoning": "plain reasoning when a provider returns it",
+        "reasoning_details": reasoning_details,
+    }
+
+    assistant_msg = _assistant_tool_context_message(msg, tool_calls)
+
+    assert assistant_msg["tool_calls"] is tool_calls
+    assert assistant_msg["reasoning"] == msg["reasoning"]
+    assert assistant_msg["reasoning_details"] is reasoning_details
+
+
 def test_request_restart_latches_reason_until_task_end(tmp_path, monkeypatch):
     from ouroboros.tools import control as control_module
 

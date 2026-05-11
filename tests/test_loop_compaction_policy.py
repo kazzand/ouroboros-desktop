@@ -209,6 +209,12 @@ class TestEstimateMessagesChars(unittest.TestCase):
         msgs = [_msg("tool", "ok", tool_call_id="tid123")]
         self.assertEqual(_emc(msgs), len("ok") + len("tid123"))
 
+    def test_reasoning_details_counted(self):
+        reasoning_details = [{"type": "reasoning.encrypted", "data": "opaque"}]
+        msgs = [{"role": "assistant", "content": "", "reasoning_details": reasoning_details}]
+        expected = len(json.dumps(reasoning_details, ensure_ascii=False))
+        self.assertEqual(_emc(msgs), expected)
+
     def test_empty_list_returns_zero(self):
         self.assertEqual(_emc([]), 0)
 

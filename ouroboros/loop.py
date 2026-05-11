@@ -15,7 +15,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import logging
 
-from ouroboros.llm import LLMClient, normalize_reasoning_effort, add_usage
+from ouroboros.llm import LLMClient, normalize_reasoning_effort, add_usage, summarize_reasoning_payload
 from ouroboros.tool_policy import initial_tool_schemas, list_non_core_tools
 from ouroboros.tools.registry import ToolRegistry
 from ouroboros.context import build_user_content
@@ -44,6 +44,8 @@ def _estimate_messages_chars(messages: List[Dict[str, Any]]) -> int:
     - message `content` (string or multipart list)
     - `tool_calls` (serialised to JSON)
     - `tool_call_id`
+    - OpenRouter reasoning continuity fields (`reasoning`, `reasoning_content`,
+      `reasoning_details`)
     This deliberately excludes the static system-prompt block (built once in
     context.py and amortised across rounds by prompt caching), focusing on
     the mutable per-round portion of the transcript which is what grows
@@ -74,6 +76,18 @@ def _estimate_messages_chars(messages: List[Dict[str, Any]]) -> int:
         tc_id = msg.get("tool_call_id")
         if tc_id:
             total += len(str(tc_id))
+        for reasoning_key in ("reasoning", "reasoning_content", "reasoning_details"):
+            reasoning_value = msg.get(reasoning_key)
+            if not reasoning_value:
+                continue
+            if reasoning_key == "reasoning_details":
+                try:
+                    import json as _json3
+                    total += len(_json3.dumps(reasoning_value, ensure_ascii=False))
+                except (TypeError, ValueError):
+                    total += len(str(reasoning_value))
+            else:
+                total += len(str(reasoning_value))
     return total
 
 
@@ -93,6 +107,19 @@ def _handle_text_response(
     if content and content.strip():
         llm_trace["reasoning_notes"].append(content.strip())
     return (content or ""), accumulated_usage, llm_trace
+
+
+def _assistant_tool_context_message(msg: Dict[str, Any], tool_calls: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Build the assistant history entry that must be replayed before tool results."""
+    assistant_msg: Dict[str, Any] = {
+        "role": "assistant",
+        "content": msg.get("content") or "",
+        "tool_calls": tool_calls,
+    }
+    for key in ("reasoning", "reasoning_content", "reasoning_details"):
+        if key in msg and msg.get(key) is not None:
+            assistant_msg[key] = msg[key]
+    return assistant_msg
 
 
 def _check_budget_limits(
@@ -693,7 +720,19 @@ def run_llm_loop(
             if not tool_calls:
                 return _handle_text_response(content, llm_trace, accumulated_usage)
 
-            messages.append({"role": "assistant", "content": content or "", "tool_calls": tool_calls})
+            assistant_msg = _assistant_tool_context_message(msg, tool_calls)
+            reasoning_summary = summarize_reasoning_payload(assistant_msg)
+            if (
+                reasoning_summary.get("has_reasoning")
+                or reasoning_summary.get("has_reasoning_content")
+                or reasoning_summary.get("has_reasoning_details")
+            ):
+                log.info(
+                    "Preserving reasoning continuity for tool call round %s: %s",
+                    round_idx,
+                    reasoning_summary,
+                )
+            messages.append(assistant_msg)
 
             if content and content.strip():
                 emit_progress(content.strip())

@@ -1,4 +1,4 @@
-# Ouroboros v5.8.0-rc.6 — Architecture & Reference
+# Ouroboros v5.8.0-rc.7 — Architecture & Reference
 
 This document describes every component, page, button, API endpoint, and data flow.
 It is the single source of truth for how the system works. Keep it updated.
@@ -36,6 +36,8 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on configurable host:port (de
       ├── a2a_executor.py      ← A2A AgentExecutor bridging A2A protocol to supervisor via handle_chat_direct
       ├── a2a_server.py        ← A2A Starlette/uvicorn server (port 18800, dynamic Agent Card, JSON-RPC)
       ├── a2a_task_store.py    ← File-based A2A TaskStore (atomic writes, TTL cleanup)
+      ├── mcp_client.py        ← MCP (Model Context Protocol) client manager: parse MCP_SERVERS, validate URLs, redact tokens, normalize tool names (mcp_<server>__<tool>), discover and dispatch via the optional `mcp` SDK
+      ├── mcp_api.py           ← MCP HTTP surface (GET /api/mcp/status, POST /api/mcp/refresh, POST /api/mcp/test); reads through MCPManager singleton
       ├── improvement_backlog.py ← Minimal durable advisory backlog helpers + digest formatting
       ├── loop.py              ← High-level LLM tool loop
       ├── loop_llm_call.py     ← Single-round LLM call + usage accounting
@@ -343,6 +345,7 @@ The web UI is a single-page app (`web/index.html` + `web/style.css` + ES modules
 - `settings_ui.js` — Settings page HTML layout, tabs, secret input bindings, Network Gate LAN hint container
 - `settings_controls.js` — segmented effort controls
 - `settings_catalog.js` — optional model-catalog refresh helper; handles `/api/model-catalog`, browser timeout, stale-response suppression, and model-picker catalog broadcasts
+- `mcp_settings.js` — Settings → Integrations MCP Servers widget; renders multi-server cards, handles Add/Remove/Test/Refresh actions, preserves masked auth-token round-trips, and polls `/api/mcp/status`.
 - `costs.js` — cost breakdown tables
 - `page_header.js` — v5.7.2 shared page-header/tab-strip renderer used by Settings, Dashboard, Skills, Widgets, Files, and Chat; escapes title/description/labels and emits shared `app-page-*` / `app-tab-*` classes without inline styles.
 - `skills.js` — Skills page (discover + enable/disable + review trigger + Repair task affordance for non-native failing skills + key-grant state + live-vs-catalog extension status; reads `/api/state` + `/api/extensions`, writes through `/api/skills/<name>/toggle` + `/api/skills/<name>/review`, sends Repair prompts through `/api/command`, and requests key grants through the desktop launcher bridge)
@@ -579,6 +582,9 @@ authentication. If the password is blank, non-loopback access stays open by desi
 | POST | `/api/marketplace/ouroboroshub/install` | Queue official skill install from pinned raw GitHub files and auto-review. |
 | POST | `/api/marketplace/ouroboroshub/update/{name}` | Queue official skill update (install with overwrite). |
 | POST | `/api/marketplace/ouroboroshub/uninstall/{name}` | Queue official skill uninstall. |
+| GET | `/api/mcp/status` | MCP client snapshot — configured servers, discovered tools, last refresh/error, redacted auth (no `auth_token` in response, only `auth_configured` boolean). |
+| POST | `/api/mcp/refresh` | Re-list tools for one server (`{server_id}`) or every enabled server (empty body). Calls MCP `tools/list` and updates the manager's per-server `tools` cache. |
+| POST | `/api/mcp/test` | Probe a candidate MCP config without saving it. Accepts inline `{server: {...}}` for unsaved/edited cards, or `{server_id: "..."}` to look up the persisted real `auth_token` by id. |
 | POST | `/api/command` | Queue a local command/task payload. Optional `visible_text` broadcasts and logs a short system status (used by skill Repair) while the full payload stays off the visible chat transcript; skill review/dependency lifecycle progress uses the live-card stream separately. |
 | POST | `/api/reset` | Delete all runtime data, restart for fresh onboarding |
 | GET | `/api/git/log` | Recent commits + tags + current branch/sha |
@@ -1037,6 +1043,21 @@ the constitutional guard is that the file itself must remain non-deletable.
 - **Memory isolation**: A2A traffic uses negative `chat_id` values (base `-1001`, decremented per task) to distinguish it from human dialogue. `supervisor/message_bus.py::broadcast` and `send_message` check `chat_id >= 0` before WebSocket broadcast; `ouroboros/server_history_api.py` filters negative `chat_id` from `/api/chat/history` replay; `ouroboros/consolidator.py::_read_chat_entries` skips `chat_id < 0` entries to prevent A2A traffic from contaminating `dialogue_blocks.json`; `ouroboros/memory.py::chat_history` (exposed as the `chat_history` tool) filters `chat_id < 0` entries so A2A traffic never appears in the agent's dialogue tool results. Raw A2A entries may still be present in `data/logs/chat.jsonl` (written by `log_chat`); all consumer paths above guard against them. Structured A2A audit logs also go to `data/logs/a2a.log`.
 - **Panic cleanup**: `ouroboros/server_control.py::execute_panic_stop` sweeps the A2A port (`A2A_PORT`, default `18800`) alongside the main server port (`8765`) and local-model port (`8766`) so a stuck A2A uvicorn server does not leave the port in `TIME_WAIT` after an emergency stop.
 - **Frozen-bundle support (v4.36.1+):** `tools/a2a.py` is listed in `_FROZEN_TOOL_MODULES` in `registry.py`, so the three A2A client tools (`a2a_discover`, `a2a_send`, `a2a_status`) are loaded in packaged `.app` / `.tar.gz` / `.zip` bundles alongside the dev/source auto-discovery path. The A2A server itself (port 18800) starts normally in packaged builds when `A2A_ENABLED=True`. Prior to v4.36.1 the client tools were dev-only while a bundle with updated `registry.py` was pending; that limitation is now lifted.
+
+### MCP (Model Context Protocol) client
+
+- **Client-only, hot-reloadable.** Ouroboros connects to one or more external MCP servers and surfaces their tools through the existing `ToolRegistry`. There is no Ouroboros-side MCP server in this iteration; `A2A` covers the agent-to-agent surface. MCP is a *tool/resource integration* lane.
+- **Disabled by default** (`MCP_ENABLED=False`). Enable in Settings → Integrations → MCP Servers. Toggling MCP and editing servers does NOT require a restart — the manager is reconfigured live on every `/api/settings` save and on server lifespan startup.
+- **Modules**: `ouroboros/mcp_client.py` (process-wide `MCPManager` + transport adapters + secret hygiene + URL deny-list), `ouroboros/mcp_api.py` (HTTP surface), `web/modules/mcp_settings.js` (multi-server card UI). The optional Python `mcp` package is the runtime dependency; missing-SDK case degrades to `sdk_available=false` in `/api/mcp/status` so the rest of the app keeps loading.
+- **Settings shape**: `MCP_ENABLED` (bool), `MCP_TOOL_TIMEOUT_SEC` (int, default 60), `MCP_SERVERS` (list of dicts with `id`, `name`, `enabled`, `transport`, `url`, `auth_header`, `auth_token`, `allowed_tools`). `MCP_SERVERS` is intentionally excluded from `apply_settings_to_env` (list-of-dicts payload) and is read via `load_settings()`/`get_mcp_servers()`. The manager's snapshot is updated by `mcp_client.reconfigure_from_settings(current)` after every settings save.
+- **Tool naming**: discovered tools become `mcp_<serverSlug>__<toolSlug>` (provider-safe alnum + `_`, ≤64 chars; long inputs are truncated with a deterministic SHA1 suffix). `parse_tool_name` reverses the mapping. `ToolRegistry.schemas()` / `list_non_core_tools()` / `get_schema_by_name()` / `get_timeout()` / `execute()` all recognize the prefix and dispatch to `MCPManager.call_tool` after the standard `safety.check_safety` round-trip.
+- **Discovery and dispatch**: every tool call opens a fresh transport, runs `tools/call`, and closes it. This trades a small latency hit for robustness against stale sessions; in v1 we don't pool. `Refresh tools` (per-server) and `Refresh all` (UI / `POST /api/mcp/refresh`) call `tools/list` and update `MCPServerRuntime.tools`.
+- **Security**:
+  - `auth_token` is masked on the wire by `server.api_settings_get` and rehydrated from the on-disk old settings by `_rehydrate_mcp_servers_payload` so a UI round-trip without re-typing the secret cannot overwrite a working credential with the literal mask.
+  - `_validate_url` rejects `ftp://`/`ws://` schemes, deny-listed cloud-metadata hosts (`169.254.169.254`, `100.100.100.200`, `metadata.google.internal`, etc.), and any IPv4 address in the link-local `169.254.0.0/16` range.
+  - Tool descriptions are server-supplied untrusted data; the UI and the registry treat them as data and never as policy.
+  - MCP tools are non-core by default — the agent must call `enable_tools("mcp_...")` (or have them already enabled) before they appear in round 1. `safety.DEFAULT_POLICY` (`POLICY_CHECK`) ensures every MCP tool call gets a single light-model recheck.
+- **HTTP surface**: `GET /api/mcp/status` (redacted snapshot for the UI), `POST /api/mcp/refresh` (one server when `server_id` is given, every enabled server otherwise), `POST /api/mcp/test` (probe a candidate config without saving — accepts inline `{server: {...}}` or `{server_id: "..."}`).
 
 ### Block-wise dialogue consolidation (consolidator.py)
 
@@ -2375,6 +2396,7 @@ search time and refused at install time.
 | ``web/modules/confirm_dialog.js`` | Shared Promise-based confirmation modal used by Skills and marketplace actions instead of ad-hoc native ``confirm()`` calls. |
 | ``web/modules/marketplace.js`` | ClawHub UI lazily loaded by the Skills page. Provides lexical search, official-only filtering, cards, detail modal, and queued lifecycle actions. Failed installs remain visible instead of being immediately erased by refresh. |
 | ``web/modules/ouroboroshub.js`` | Official hub UI backed by the static GitHub catalog. Lists 10-50 official skills without a server-side search service; install pulls only the selected skill files and uses the shared lifecycle-card pending UI while install/review is running. |
+| ``web/modules/mcp_settings.js`` | MCP Servers card widget rendered inside Settings → Integrations next to A2A. Manages multi-server cards (Add/Remove/Enable/Save), inline `Test connection` and `Refresh tools` actions, masked-token rehydration via `{server_id}` form, and live status polling against ``/api/mcp/status``. |
 | ``web/modules/widgets.js`` | Widgets page host for reviewed ``register_ui_tab`` declarations. Supports legacy ``iframe`` / ``inline_card`` and declarative v1 components without loading arbitrary skill JavaScript. Declarative widget state persists across tab switches for the current browser session. |
 
 #### 12.6.2 Frontmatter mapping (OpenClaw -> Ouroboros)

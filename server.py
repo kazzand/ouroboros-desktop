@@ -1110,6 +1110,11 @@ async def api_settings_get(request: Request) -> JSONResponse:
     for key in _SECRET_SETTING_KEYS:
         if safe.get(key):
             safe[key] = _mask_secret_value(safe[key])
+    # MCP_SERVERS is a list of dicts with embedded ``auth_token`` secrets.
+    # Mask each token so the wire surface mirrors the convention used for
+    # flat secret keys above; ``api_settings_post`` rehydrates masked
+    # tokens from the on-disk old settings before saving.
+    safe["MCP_SERVERS"] = _mask_mcp_servers_payload(safe.get("MCP_SERVERS") or [])
     # Inject read-only runtime network metadata for the Settings UI hint
     try:
         port = int(PORT_FILE.read_text().strip()) if PORT_FILE.exists() else DEFAULT_PORT
@@ -1117,6 +1122,76 @@ async def api_settings_get(request: Request) -> JSONResponse:
         port = DEFAULT_PORT
     safe["_meta"] = _build_network_meta(_BIND_HOST, port)
     return JSONResponse(safe)
+
+
+def _mask_mcp_servers_payload(servers: Any) -> list:
+    """Return ``MCP_SERVERS`` with ``auth_token`` values masked for the UI."""
+    if not isinstance(servers, list):
+        return []
+    try:
+        from ouroboros.mcp_client import canonical_server_id as _mcp_canonical_id
+    except Exception:
+        _mcp_canonical_id = lambda value: str(value or "").strip()  # type: ignore[assignment]
+    out = []
+    for entry in servers:
+        if not isinstance(entry, dict):
+            continue
+        clone = dict(entry)
+        if clone.get("id"):
+            clone["id"] = _mcp_canonical_id(clone.get("id"))
+        token = str(clone.get("auth_token") or "")
+        if token:
+            clone["auth_token"] = _mask_secret_value(token)
+            clone["auth_configured"] = True
+        else:
+            clone["auth_token"] = ""
+            clone["auth_configured"] = False
+        out.append(clone)
+    return out
+
+
+def _rehydrate_mcp_servers_payload(
+    incoming: Any, current: Any
+) -> list:
+    """Replace masked ``auth_token`` values with the persisted real token.
+
+    The UI may submit a server entry where ``auth_token`` was rendered
+    masked (``"abcd..."``) and never re-typed. Without this rehydration
+    the next save would persist the literal mask and break the
+    integration. We match by ``id`` against the current settings;
+    unrecognised ids keep whatever the UI sent (so a freshly created
+    server with a real token is saved as-is).
+    """
+    if not isinstance(incoming, list):
+        return []
+    try:
+        from ouroboros.mcp_client import canonical_server_id as _mcp_canonical_id
+    except Exception:
+        _mcp_canonical_id = lambda value: str(value or "").strip()  # type: ignore[assignment]
+    current_by_id: Dict[str, Dict[str, Any]] = {}
+    if isinstance(current, list):
+        for entry in current:
+            if isinstance(entry, dict):
+                cur_id = _mcp_canonical_id(entry.get("id"))
+                if cur_id:
+                    current_by_id[cur_id] = entry
+    out = []
+    for entry in incoming:
+        if not isinstance(entry, dict):
+            continue
+        clone = dict(entry)
+        clone.pop("auth_configured", None)
+        if clone.get("id"):
+            clone["id"] = _mcp_canonical_id(clone.get("id"))
+        token = str(clone.get("auth_token") or "")
+        if _looks_masked_secret(token):
+            existing = current_by_id.get(_mcp_canonical_id(clone.get("id")))
+            if existing:
+                clone["auth_token"] = str(existing.get("auth_token") or "")
+            else:
+                clone["auth_token"] = ""
+        out.append(clone)
+    return out
 
 
 async def api_onboarding(request: Request) -> Response:
@@ -1206,6 +1281,15 @@ async def api_settings_post(request: Request) -> JSONResponse:
     try:
         body = await request.json()
         old_settings = load_settings()
+        # Rehydrate masked MCP auth tokens from the on-disk old settings
+        # before merge so a UI round-trip without re-typing the secret
+        # does not silently overwrite a working token with the mask.
+        if "MCP_SERVERS" in body:
+            body = dict(body)
+            body["MCP_SERVERS"] = _rehydrate_mcp_servers_payload(
+                body.get("MCP_SERVERS"),
+                old_settings.get("MCP_SERVERS"),
+            )
         current = _merge_settings_payload(old_settings, body)
         # Phase 2: normalize the new runtime-mode axis on the save path so a
         # typo like ``{"OUROBOROS_RUNTIME_MODE": "turbo"}`` cannot land in
@@ -1293,6 +1377,17 @@ async def api_settings_post(request: Request) -> JSONResponse:
         save_settings(current)
         _apply_settings_to_env(current)
         _start_supervisor_if_needed(current)
+
+        # MCP client — hot-reloadable. ``MCP_SERVERS`` /  ``MCP_ENABLED`` /
+        # ``MCP_TOOL_TIMEOUT_SEC`` changes take effect on the next tool
+        # call without a process restart. The manager preserves
+        # previously-discovered tools when a server's config did not
+        # change so an in-flight task continues to see the same names.
+        try:
+            from ouroboros.mcp_client import reconfigure_from_settings as _mcp_reconfigure
+            _mcp_reconfigure(current)
+        except Exception:
+            log.warning("MCP reconfigure after settings change failed", exc_info=True)
 
         # Phase 4: when OUROBOROS_SKILLS_REPO_PATH changed, reconcile the
         # extension loader against the new path so stale registrations
@@ -1623,6 +1718,11 @@ from ouroboros.local_model_api import (
     api_local_model_install_runtime,
 )
 from ouroboros.chat_upload_api import api_chat_upload, api_chat_upload_delete
+from ouroboros.mcp_api import (
+    api_mcp_status,
+    api_mcp_refresh,
+    api_mcp_test,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -1882,6 +1982,10 @@ routes = [
     Route("/api/local-model/status", endpoint=api_local_model_status),
     Route("/api/local-model/test", endpoint=api_local_model_test, methods=["POST"]),
     Route("/api/local-model/install-runtime", endpoint=api_local_model_install_runtime, methods=["POST"]),
+    # MCP (Model Context Protocol) client — Settings → Integrations widget.
+    Route("/api/mcp/status", endpoint=api_mcp_status, methods=["GET"]),
+    Route("/api/mcp/refresh", endpoint=api_mcp_refresh, methods=["POST"]),
+    Route("/api/mcp/test", endpoint=api_mcp_test, methods=["POST"]),
     WebSocketRoute("/ws", endpoint=ws_endpoint),
     Mount("/static", app=NoCacheStaticFiles(directory=str(web_dir)), name="static"),
 ]
@@ -1957,6 +2061,15 @@ async def lifespan(app):
         _reload_extensions(drive_root, _load_settings, repo_path=repo_path or None)
     except Exception:
         log.warning("Extension reload_all at startup failed", exc_info=True)
+
+    # MCP client — hot-reloadable. Reconfigure the process-global manager
+    # from on-disk settings so the agent sees configured servers/tools
+    # without waiting for the first /api/settings POST.
+    try:
+        from ouroboros.mcp_client import reconfigure_from_settings as _mcp_reconfigure_startup
+        _mcp_reconfigure_startup(settings)
+    except Exception:
+        log.warning("MCP startup reconfigure failed", exc_info=True)
 
     # A2A server — disabled by default; enable in Settings → Integrations
     a2a_server_task = None

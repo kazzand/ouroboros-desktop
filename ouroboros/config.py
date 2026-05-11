@@ -116,6 +116,14 @@ SETTINGS_DEFAULTS = {
     "A2A_AGENT_DESCRIPTION": "",
     "A2A_MAX_CONCURRENT": 3,
     "A2A_TASK_TTL_HOURS": 24,
+    # MCP (Model Context Protocol) client — disabled by default. Hot-reloadable.
+    # ``MCP_SERVERS`` is a list of dicts persisted in settings.json. Each
+    # server entry is opaque user-edited JSON; secrets in ``auth.token`` are
+    # masked on the wire by ``server.py::api_settings_get`` and rehydrated on
+    # ``api_settings_post`` so the agent never sees raw tokens via /api/settings.
+    "MCP_ENABLED": False,
+    "MCP_SERVERS": [],
+    "MCP_TOOL_TIMEOUT_SEC": 60,
 }
 
 _VALID_EFFORTS = ("none", "low", "medium", "high")
@@ -615,6 +623,25 @@ def _coerce_setting_value(key: str, value):
     # Trim on load so empty-with-spaces truly reads as empty.
     if key == "OUROBOROS_SKILLS_REPO_PATH":
         return str(value or "").strip()
+    if key == "MCP_SERVERS":
+        # MCP_SERVERS is a list-of-dicts. settings.json round-trips JSON
+        # natively, but env-var inheritance hands us a string. Tolerate
+        # both shapes so a fresh subprocess that re-imports config sees
+        # the parent's list intact.
+        if isinstance(value, list):
+            return [dict(item) for item in value if isinstance(item, dict)]
+        if isinstance(value, str):
+            text = value.strip()
+            if not text:
+                return []
+            try:
+                parsed = json.loads(text)
+            except (TypeError, ValueError):
+                return []
+            if isinstance(parsed, list):
+                return [dict(item) for item in parsed if isinstance(item, dict)]
+            return []
+        return []
     if isinstance(default, bool):
         if isinstance(value, bool):
             return value
@@ -763,6 +790,42 @@ def save_settings(settings: dict, *, allow_elevation: bool = False) -> None:
         _release_settings_lock(fd)
 
 
+def get_mcp_enabled() -> bool:
+    """Return True when the MCP client is enabled in settings."""
+    raw = str(os.environ.get("MCP_ENABLED", "") or "").strip().lower()
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    return bool(load_settings().get("MCP_ENABLED"))
+
+
+def get_mcp_servers() -> list:
+    """Return the configured MCP servers list (always a list of dicts)."""
+    settings = load_settings()
+    raw = settings.get("MCP_SERVERS")
+    coerced = _coerce_setting_value("MCP_SERVERS", raw)
+    return list(coerced)
+
+
+def get_mcp_tool_timeout_sec() -> int:
+    """Return the configured per-MCP-tool timeout in seconds (default 60)."""
+    raw = os.environ.get("MCP_TOOL_TIMEOUT_SEC")
+    if raw:
+        try:
+            parsed = int(raw)
+            if parsed > 0:
+                return parsed
+        except (TypeError, ValueError):
+            pass
+    settings = load_settings()
+    try:
+        parsed = int(settings.get("MCP_TOOL_TIMEOUT_SEC") or 0)
+    except (TypeError, ValueError):
+        parsed = 0
+    return parsed if parsed > 0 else int(SETTINGS_DEFAULTS["MCP_TOOL_TIMEOUT_SEC"])
+
+
 def apply_settings_to_env(settings: dict) -> None:
     """Push settings into environment variables for supervisor modules."""
     env_keys = [
@@ -795,6 +858,10 @@ def apply_settings_to_env(settings: dict) -> None:
         "A2A_ENABLED", "A2A_PORT", "A2A_HOST",
         "A2A_AGENT_NAME", "A2A_AGENT_DESCRIPTION",
         "A2A_MAX_CONCURRENT", "A2A_TASK_TTL_HOURS",
+        # MCP client — flat scalars only. ``MCP_SERVERS`` is intentionally
+        # excluded from env propagation (it's a list-of-dicts) and is read
+        # via ``load_settings()`` / ``get_mcp_servers()`` instead.
+        "MCP_ENABLED", "MCP_TOOL_TIMEOUT_SEC",
     ]
     for k in env_keys:
         val = settings.get(k)

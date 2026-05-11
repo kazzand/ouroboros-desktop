@@ -1,6 +1,11 @@
 import { refreshModelCatalog } from './settings_catalog.js';
 import { bindEffortSegments, syncEffortSegments } from './settings_controls.js';
 import { bindLocalModelControls } from './settings_local_model.js';
+import {
+    applyMcpSettings,
+    collectMcpSettings,
+    initMcpSettings,
+} from './mcp_settings.js';
 import { bindSecretInputs, bindSettingsTabs, renderSettingsPage } from './settings_ui.js';
 import { formatDualVersion } from './utils.js';
 
@@ -201,6 +206,7 @@ export function initSettings({ state, setBeforePageLeave } = {}) {
     bindSecretInputs(page);
     bindEffortSegments(page);
     bindLocalModelControls({ state });
+    initMcpSettings({ onChange: () => updateSettingsDirtyState() });
     // Populate the About sub-tab version label from /api/health so the
     // existing #nav-version short label and the in-Settings detailed version
     // string stay consistent. The fetch is best-effort — if it fails the
@@ -420,6 +426,8 @@ export function initSettings({ state, setBeforePageLeave } = {}) {
         applyInputValue('s-a2a-agent-description', s.A2A_AGENT_DESCRIPTION);
         if (s.A2A_MAX_CONCURRENT) applyInputValue('s-a2a-max-concurrent', s.A2A_MAX_CONCURRENT);
         if (s.A2A_TASK_TTL_HOURS) applyInputValue('s-a2a-ttl-hours', s.A2A_TASK_TTL_HOURS);
+        // MCP settings (multi-server widget rendered by mcp_settings.js).
+        applyMcpSettings(s);
         resetSecretClearFlags(page);
         syncEffortSegments(page);
         syncRuntimeModeBridgeState();
@@ -546,6 +554,8 @@ export function initSettings({ state, setBeforePageLeave } = {}) {
             A2A_AGENT_DESCRIPTION: (byId('s-a2a-agent-description')?.value || '').trim(),
             A2A_MAX_CONCURRENT: readInt('s-a2a-max-concurrent', 3),
             A2A_TASK_TTL_HOURS: readInt('s-a2a-ttl-hours', 24),
+            // MCP settings (object/list payload from mcp_settings.js).
+            ...collectMcpSettings(),
             OPENAI_BASE_URL: byId('s-openai-base-url').value.trim(),
             OPENAI_COMPATIBLE_BASE_URL: byId('s-openai-compatible-base-url').value.trim(),
             CLOUDRU_FOUNDATION_MODELS_BASE_URL: byId('s-cloudru-base-url').value.trim(),

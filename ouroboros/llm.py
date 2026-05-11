@@ -149,6 +149,45 @@ def reasoning_rank(value: str) -> int:
     return int(order.get(str(value or "").strip().lower(), 3))
 
 
+def summarize_reasoning_payload(msg: Dict[str, Any]) -> Dict[str, Any]:
+    """Return log-safe metadata about provider reasoning continuity fields."""
+    reasoning = msg.get("reasoning")
+    reasoning_content = msg.get("reasoning_content")
+    details = msg.get("reasoning_details")
+
+    summary: Dict[str, Any] = {
+        "has_reasoning": bool(reasoning),
+        "reasoning_chars": len(str(reasoning or "")),
+        "has_reasoning_content": bool(reasoning_content),
+        "reasoning_content_chars": len(str(reasoning_content or "")),
+        "has_reasoning_details": isinstance(details, list) and bool(details),
+        "reasoning_details_count": len(details) if isinstance(details, list) else 0,
+        "reasoning_detail_types": [],
+        "reasoning_encrypted_blocks": 0,
+        "reasoning_text_blocks": 0,
+        "reasoning_summary_blocks": 0,
+    }
+    if not isinstance(details, list):
+        return summary
+
+    detail_types: List[str] = []
+    for detail in details:
+        if not isinstance(detail, dict):
+            continue
+        detail_type = str(detail.get("type") or "").strip()
+        if detail_type:
+            detail_types.append(detail_type)
+        if detail_type == "reasoning.encrypted":
+            summary["reasoning_encrypted_blocks"] += 1
+        elif detail_type == "reasoning.text":
+            summary["reasoning_text_blocks"] += 1
+        elif detail_type == "reasoning.summary":
+            summary["reasoning_summary_blocks"] += 1
+
+    summary["reasoning_detail_types"] = sorted(set(detail_types))
+    return summary
+
+
 def add_usage(total: Dict[str, Any], usage: Dict[str, Any]) -> None:
     """Accumulate usage from one LLM call into a running total."""
     for k in ("prompt_tokens", "completion_tokens", "total_tokens", "cached_tokens", "cache_write_tokens"):
@@ -1349,7 +1388,9 @@ class LLMClient:
         effort = normalize_reasoning_effort(reasoning_effort)
 
         extra_body: Dict[str, Any] = {
-            "reasoning": {"effort": effort, "exclude": True},
+            # OpenRouter requires reasoning_details to be echoed back unchanged
+            # for multi-turn tool calling on reasoning models.
+            "reasoning": {"effort": effort, "exclude": False},
         }
 
         if resolved_model.startswith("anthropic/"):

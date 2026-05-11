@@ -16,7 +16,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import logging
 
-from ouroboros.llm import LLMClient, LocalContextTooLargeError, add_usage
+from ouroboros.llm import LLMClient, LocalContextTooLargeError, add_usage, summarize_reasoning_payload
 from ouroboros.pricing import emit_llm_usage_event, estimate_cost, infer_model_category
 from ouroboros.utils import utc_now_iso, append_jsonl
 
@@ -105,6 +105,7 @@ def call_llm_with_retry(
                 )
             usage["cost"] = cost
             add_usage(accumulated_usage, usage)
+            reasoning_summary = summarize_reasoning_payload(msg)
 
             category = task_type if task_type in ("evolution", "consciousness", "review", "summarize") else "task"
             emit_llm_usage_event(
@@ -177,6 +178,7 @@ def call_llm_with_retry(
                 "cache_write_tokens": cache_write_tokens,
                 "cache_hit_rate": cache_hit_rate,
                 "cost_usd": cost,
+                **reasoning_summary,
             }
             _emit_live_log(event_queue, {
                 "type": "llm_round_finished",
@@ -194,6 +196,7 @@ def call_llm_with_retry(
                 "response_kind": "tool_calls" if tool_calls else "message",
                 "tool_call_count": len(tool_calls),
                 "has_text": bool(content and str(content).strip()),
+                **reasoning_summary,
             })
             append_jsonl(drive_logs / "events.jsonl", _round_event)
             return msg, cost

@@ -436,6 +436,36 @@ export function renderSettingsPage() {
                             </div>
                         </div>
                     </div>
+                    <div class="form-section">
+                        <h3>MCP Servers</h3>
+                        <div class="settings-section-copy">
+                            Connect Ouroboros to external Model Context Protocol servers. Discovered tools
+                            appear under <code>mcp_&lt;server&gt;__&lt;tool&gt;</code> and are non-core
+                            (enable via <code>list_available_tools</code> / <code>enable_tools</code>).
+                            Hot-reloadable — no restart required.
+                        </div>
+                        <div class="form-row">
+                            <div class="form-field checkbox-field">
+                                <label for="s-mcp-enabled">Enable MCP client</label>
+                                <input type="checkbox" id="s-mcp-enabled">
+                            </div>
+                        </div>
+                        <div class="form-grid two">
+                            <div class="form-field">
+                                <label for="s-mcp-tool-timeout">Per-tool timeout (s)</label>
+                                <input type="number" id="s-mcp-tool-timeout" min="1" max="3600" placeholder="60">
+                            </div>
+                            <div class="form-field"></div>
+                        </div>
+                        <div class="settings-toolbar mcp-servers-toolbar">
+                            <button type="button" class="btn btn-primary btn-sm" id="btn-mcp-add-server">Add Server</button>
+                            <button type="button" class="btn btn-secondary btn-sm" id="btn-mcp-refresh-all">Refresh All Tools</button>
+                            <span id="mcp-global-status" class="settings-inline-status" data-tone="muted"></span>
+                        </div>
+                        <div id="mcp-servers-list" class="mcp-servers-list">
+                            <div class="muted">No MCP servers configured. Click "Add Server" to start.</div>
+                        </div>
+                    </div>
                 </section>
 
                 <section class="settings-panel" data-settings-panel="advanced">

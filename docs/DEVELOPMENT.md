@@ -459,6 +459,37 @@ Rules for widget changes:
 - Add/update `tests/test_widgets_ui_static.py` for every new component kind or
   media policy.
 
+### MCP (Model Context Protocol) integration
+
+MCP is the *external tool/resource* lane (distinct from A2A which is
+*agent-to-agent*). Rules for code that touches the MCP surface:
+
+- `ouroboros/mcp_client.py` is the single place that imports the optional
+  `mcp` SDK. Any new transport adapter goes here and must guard the
+  import with `try/except ImportError` so source checkouts without the
+  SDK still load (`sdk_available=false` in `/api/mcp/status`).
+- Tool names exposed to the model MUST be produced by
+  `mcp_client.make_tool_name(server, tool)`. Never hand-craft an
+  `mcp_*` identifier — the helper enforces alnum/underscore, ≤24 char
+  server slug, ≤32 char tool slug, and ≤64 char total length with a
+  deterministic SHA1 fallback for overflow.
+- `_validate_url` is the single URL gate for MCP server endpoints.
+  When extending the deny list (cloud metadata, link-local, etc.) keep
+  failure messages explicit so the UI can render them.
+- `auth_token` values flow only through `settings.json` and the
+  manager's in-process state. They MUST be masked on the `/api/settings`
+  GET surface (`server._mask_mcp_servers_payload`) and rehydrated from
+  the on-disk old settings on the POST surface
+  (`server._rehydrate_mcp_servers_payload`). No code path may log or
+  echo the raw token through `/api/mcp/status`, errors, or tool results.
+- MCP tool results are server-supplied untrusted data. The UI escapes
+  them with `escapeHtml`; the registry treats descriptions as data and
+  does not let them override safety policy.
+- Whenever you change the MCP wire shape, update both
+  `tests/test_mcp_client.py` (manager + helpers) and
+  `tests/test_mcp_api.py` (HTTP endpoints). UI structural changes
+  belong in `tests/test_mcp_ui_static.py`.
+
 ---
 
 ## Build & CI

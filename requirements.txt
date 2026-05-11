@@ -12,6 +12,11 @@ pytest>=7.0
 claude-agent-sdk>=0.1.60
 # A2A (Agent-to-Agent) protocol is part of the packaged/base runtime.
 a2a-sdk[http-server]>=0.3.20,<1.0.0
+# MCP (Model Context Protocol) client — base runtime dependency. The
+# ``ouroboros.mcp_client`` module gracefully degrades when this is missing
+# (``sdk_available=false`` in /api/mcp/status) so source checkouts still
+# load before this is installed.
+mcp>=1.6,<2.0
 # optional: browser automation tools (for browse_page/browser_action)
 playwright
 playwright-stealth
