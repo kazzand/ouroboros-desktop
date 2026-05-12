@@ -1387,11 +1387,13 @@ class LLMClient:
 
         effort = normalize_reasoning_effort(reasoning_effort)
 
-        extra_body: Dict[str, Any] = {
+        extra_body: Dict[str, Any] = {}
+        if tools:
             # OpenRouter requires reasoning_details to be echoed back unchanged
-            # for multi-turn tool calling on reasoning models.
-            "reasoning": {"effort": effort, "exclude": False},
-        }
+            # for multi-turn tool calling on reasoning models. Keep plain
+            # no-tools chats provider-minimal; some endpoints reject reasoning
+            # parameters on simple chat completions.
+            extra_body["reasoning"] = {"effort": effort, "exclude": False}
 
         if resolved_model.startswith("anthropic/"):
             extra_body["provider"] = {

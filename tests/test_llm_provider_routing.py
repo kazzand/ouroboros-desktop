@@ -76,7 +76,7 @@ def test_build_remote_kwargs_normalizes_tool_descriptions_for_openrouter():
     assert kwargs["tools"][0]["function"]["description"] == "first half second half"
 
 
-def test_build_remote_kwargs_requests_reasoning_continuity_from_openrouter():
+def test_build_remote_kwargs_omits_reasoning_for_plain_openrouter_chat():
     client = LLMClient()
     target = client._resolve_remote_target("google/gemini-3-pro-preview")
 
@@ -88,6 +88,30 @@ def test_build_remote_kwargs_requests_reasoning_continuity_from_openrouter():
         "auto",
         None,
         None,
+    )
+
+    assert "reasoning" not in kwargs["extra_body"]
+
+
+def test_build_remote_kwargs_requests_reasoning_continuity_for_openrouter_tools():
+    client = LLMClient()
+    target = client._resolve_remote_target("google/gemini-3-pro-preview")
+
+    kwargs = client._build_remote_kwargs(
+        target,
+        [{"role": "user", "content": "hi"}],
+        "high",
+        512,
+        "auto",
+        None,
+        [{
+            "type": "function",
+            "function": {
+                "name": "lookup",
+                "description": "lookup",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }],
     )
 
     assert kwargs["extra_body"]["reasoning"] == {"effort": "high", "exclude": False}
